@@ -11613,6 +11613,54 @@ function repoTokenRow(r) {
 // Both are measured when the card opens, because that walks them, and both count toward the repo
 // rather than toward any box's disk allowance.
 const repoCacheSeen = new Map();   // repo id -> the last answer, so a re-render need not walk again
+// The kinds of project a repo is (SKEIN-1373, the owner on 2026-11-06), which decide the shared
+// caches its boxes get. Unchosen, each box reads them off its own checkout as it starts; a tick here
+// is the owner's choice, kept in skein's record of the repo and never in the repo's files.
+const repoKindsSeen = new Map();   // repo id -> the last answer, so a re-render need not ask again
+function repoKindsRow(r) {
+  return `<div class="set-field" data-repokinds="${esc(r.id)}"><span class="set-title">Kinds<span class="rsaved" data-saved="${esc(r.id)}-kinds">saved</span></span>`
+    + `<span class="desc">which shared caches this repo's boxes get: cargo's and the compiler cache for rust, npm's for node, pip's and uv's for python, go's modules for go. A kind it is not gets none, so nothing is set up or counted for it. Unchosen, each box reads them off its own checkout as it starts: Cargo.toml, package.json, pyproject.toml or requirements.txt, go.mod. A change reaches a box at its next start</span>`
+    + `<div class="path-row" data-kindpicks><span class="desc">reading…</span></div></div>`;
+}
+function showRepoKinds(id, k) {
+  const row = document.querySelector(`[data-repokinds="${CSS.escape(id)}"] [data-kindpicks]`);
+  if (!row) return;
+  const phrase = list => list.length ? list.join(", ") : "no kind";
+  const on = k.chosen || k.detected || [];
+  const said = k.chosen
+    ? (k.detected ? `Chosen. The default branch reads as ${phrase(k.detected)}.` : "Chosen.")
+    : k.detected ? `Read off the checkout: the default branch is ${phrase(k.detected)}. A tick makes it your choice.`
+    : `skein could not read the default branch (${k.unread || "no reason given"}), so each box reads its own checkout.`;
+  row.innerHTML = k.known.map(kind => `<label><input type="checkbox" data-kind="${esc(kind)}"${on.includes(kind) ? " checked" : ""} /> ${esc(kind)}</label>`).join(" ")
+    + (k.chosen ? ` <button type="button" class="kbtn ghost" data-kinddetect>Read them off the checkout</button>` : "")
+    + ` <span class="desc">${esc(said)}</span>`;
+  row.querySelectorAll("[data-kind]").forEach(c => c.addEventListener("change", () =>
+    saveRepoKinds(id, [...row.querySelectorAll("[data-kind]:checked")].map(x => x.dataset.kind))));
+  const detect = row.querySelector("[data-kinddetect]");
+  if (detect) detect.addEventListener("click", () => saveRepoKinds(id, null));
+}
+function loadRepoKinds(id) {
+  fetch(`/api/repos/${encodeURIComponent(id)}/kinds`)
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(k => { repoKindsSeen.set(id, k); showRepoKinds(id, k); })
+    .catch(e => {
+      const row = document.querySelector(`[data-repokinds="${CSS.escape(id)}"] [data-kindpicks]`);
+      if (row) row.textContent = `could not read this repo's kinds: ${failText(e)}`;
+    });
+}
+// `null` goes back to reading them off the checkout; a list, the empty one included, is a choice.
+function saveRepoKinds(id, kinds) {
+  fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ kinds }),
+  })
+    .then(async r => { if (!r.ok) throw await refused(r); return r.json(); })
+    .then(() => {
+      const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-kinds")}"]`);
+      if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
+      loadRepoKinds(id);
+    })
+    .catch(e => { notice(`${id}: ${failText(e)}`); loadRepoKinds(id); });
+}
 function repoCacheRow(r) {
   return `<div class="set-field" data-repotools="${esc(r.id)}"><span class="set-title">Tools area</span>`
     + `<span class="desc">the tools this repo's agents install and every download cache, on the fleet's disk and shared by this repo's boxes alone. It counts toward this repo, not toward any box's disk allowance. skein removes nothing in it; an agent removes a tool version it no longer needs with <code>skein_clean</code></span>`
@@ -11746,6 +11794,7 @@ function renderRepoList() {
           [["none", "Nothing — read only"], ["comment", "Findings"], ["changes", "Findings and refusals"], ["approve", "Everything, including approvals"]])
       + repoLoopWarning(r)
       + repoTokenRow(r)
+      + repoKindsRow(r)
       + repoCacheRow(r)
       + `<div class="rfoot"><button type="button" class="kbtn ghost danger" data-remove="${esc(r.id)}" title="skein forgets this repo; the clone and store stay on disk">Unregister</button></div>`
       + `</div></div>`;
@@ -11755,7 +11804,7 @@ function renderRepoList() {
     openRepos.has(id) ? openRepos.delete(id) : openRepos.add(id);
     h.closest(".rcard").classList.toggle("open");
     h.setAttribute("aria-expanded", openRepos.has(id));
-    if (openRepos.has(id)) loadRepoCache(id);
+    if (openRepos.has(id)) { loadRepoCache(id); loadRepoKinds(id); }
   }));
   // A re-render after a save shows what was last measured rather than walking the cache again.
   for (const id of openRepos) if (repoCacheSeen.has(id)) {
@@ -11763,13 +11812,14 @@ function renderRepoList() {
     showRepoTools(id, d.tools);
     showRepoCache(id, d.cache);
   }
+  for (const id of openRepos) repoKindsSeen.has(id) ? showRepoKinds(id, repoKindsSeen.get(id)) : loadRepoKinds(id);
   el.querySelectorAll("[data-remove]").forEach(b => b.addEventListener("click", () => removeRepo(b.dataset.remove)));
   // The token input is excluded by name, not by luck: it carries a `data-id` like its neighbours but
   // no `data-key`, so leaving it in would POST `{undefined: "<the token>"}` to the repo settings
   // route — a token in the wrong store, on blur, silently.
   // The share picker likewise: it has a `data-id` and no `data-key`, and it saves only on its
   // button, after its warning has been read.
-  el.querySelectorAll(".rbody input:not([data-repotoken]), .rbody select:not([data-sharepick])")
+  el.querySelectorAll(".rbody input:not([data-repotoken]):not([data-kind]), .rbody select:not([data-sharepick])")
     .forEach(i => i.addEventListener("change", () => saveRepoField(i)));
   el.querySelectorAll("[data-sharepick]").forEach(pick => pick.addEventListener("change", () => {
     const slug = pick.dataset.sharepick;

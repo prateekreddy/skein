@@ -439,6 +439,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/repos/:id", axum::routing::delete(api_remove_repo))
         .route("/api/repos/:id/pull", post(api_pull_repo))
         .route("/api/repos/:id/settings", post(api_set_repo_settings))
+        .route("/api/repos/:id/kinds", get(api_repo_kinds))
         .route(
             "/api/repos/:id/cache",
             get(api_repo_cache).post(api_repo_cache_clean),

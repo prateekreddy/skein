@@ -46,7 +46,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
          SKEIN_BOX_PRIVILEGED={priv_q} SKEIN_MODEL_SCRATCH={scratch_q} \
          SKEIN_FLEET_MOUNTS={mounts_q} SKEIN_BOX_STORE={store_q} \
          SKEIN_BOX_PEERS={peers_q} SKEIN_BOX_TELEMETRY={telemetry_q} \
-         SKEIN_FLEET_NAME={fleetname_q} SKEIN_BOX_VERSIONS={versions_q} \
+         SKEIN_FLEET_NAME={fleetname_q} SKEIN_BOX_VERSIONS={versions_q} {kinds_env}\
          {launcher} {name_q} {root_q} {pid_q} {session_q} {state_q} {limits_q} bash -lc {cmd_q}",
         launcher = sh_quote(&box_session_path()),
         // Where the agent in this box keeps its model scratch, as a path relative to the box's own
@@ -129,6 +129,7 @@ pub fn session_script(name: &str, session: &str, agent_command: &str) -> String 
         versions_q = sh_quote(&super::versions::versions_env(
             &super::versions::wanted_versions(name),
         )),
+        kinds_env = kinds_env(name),
         cmd_q = sh_quote(agent_command),
     )
 }
@@ -1133,6 +1134,30 @@ pub fn box_is_ready(name: &str) -> bool {
         .exec(&box_ready_script(name), Duration::from_secs(20))
         .map(|said| said.trim() == "ready")
         .unwrap_or(false)
+}
+
+/// The kinds of project a box's repo is (`repos::KINDS`): the owner's choice for the repo when
+/// there is one ([`crate::repos::Repo::kinds`]), else what the box's own checkout holds, read as it
+/// starts the way its Rust toolchain pin is (`versions::wanted_versions`). `None` when neither
+/// answers, a box of no registered repo whose checkout cannot be listed.
+///
+/// The box's checkout and not the repo's mirror: a branch is what the box builds, and a branch that
+/// adds a `package.json` is a node project in that box before it is one on the default branch.
+pub fn box_kinds(name: &str) -> Option<Vec<String>> {
+    if let Some(chosen) = crate::repos::repo_for_box(name).and_then(|r| r.kinds) {
+        return Some(chosen);
+    }
+    crate::repos::kinds_in_dir(&std::path::Path::new(&box_root(name)).join("tree"))
+}
+
+/// `SKEIN_BOX_KINDS` for [`session_script`]: the kinds of project the box's repo is, which decide
+/// the caches the launcher points into the repo's tools area (SKEIN-1373). Empty when they cannot
+/// be told, and the launcher then points every kind's caches there, as it did before kinds existed.
+fn kinds_env(name: &str) -> String {
+    match box_kinds(name) {
+        Some(kinds) => format!("SKEIN_BOX_KINDS={} ", sh_quote(&kinds.join(" "))),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -2253,6 +2278,55 @@ mod tests {
         );
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
+    }
+
+    /// **A box's launcher is told the kinds its checkout makes, and the owner's choice for the repo
+    /// replaces them** (SKEIN-1373).
+    ///
+    /// What would make it fail: `box_kinds` reading the repo's choice after detection, or not at
+    /// all (the second script still says `rust`); detection reading somewhere other than the box's
+    /// own checkout (the first says nothing); an empty choice read as "never chosen" (the third
+    /// says `rust`, when the owner said no kind at all).
+    #[test]
+    fn a_box_start_carries_its_kinds_and_the_owners_choice_replaces_detection() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home)
+            .set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "web".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+        let tree = std::path::Path::new(&box_root("web-main")).join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("Cargo.toml"), "").unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains("SKEIN_BOX_KINDS='rust' "),
+            "a box whose checkout has a Cargo.toml is not told it is a rust repo: {script}"
+        );
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        crate::repos::set_repo_kinds("web", Some(&words(&["node", "python"]))).unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains("SKEIN_BOX_KINDS='node python' "),
+            "the owner's choice of kinds does not replace what the checkout says: {script}"
+        );
+        crate::repos::set_repo_kinds("web", Some(&[])).unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            script.contains("SKEIN_BOX_KINDS='' "),
+            "a repo the owner said has no kind is told the checkout's instead: {script}"
+        );
+        std::fs::remove_dir_all(&tree).unwrap();
+        crate::repos::set_repo_kinds("web", None).unwrap();
+        let script = session_script("web-main", "skein-agent", "claude");
+        assert!(
+            !script.contains("SKEIN_BOX_KINDS"),
+            "a box whose kinds cannot be told is given some anyway: {script}"
+        );
     }
 
     /// **A box's launcher is told its repo's telemetry-plugin switch, and it is off unless the repo

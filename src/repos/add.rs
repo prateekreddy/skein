@@ -148,6 +148,8 @@ pub fn add_repo_with_token(
         // starting state, and the state a reviewer wants on a repo nobody has configured is the
         // one where a deletion is audited before it is approved.
         owed_checks: None,
+        // Never chosen: each box reads the kinds off its own checkout (`Repo::kinds`).
+        kinds: None,
         // The remote's default until somebody names another on the repo card.
         base_branch: String::new(),
         plane_project: String::new(),

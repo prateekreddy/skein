@@ -61,9 +61,16 @@ memory: |
   in the repo's scripts. If every box needs a tool, ask for it with `skein_request_package`: manager
   `apt` or `npm`. Nothing is installed until the owner approves it, and then every box has it.
 
-  When `$PIP_CACHE_DIR` is set, it, `$CARGO_HOME`, `$npm_config_cache`, `$UV_CACHE_DIR` and pnpm's
-  store (`$npm_config_store_dir`) are this repo's download cache, shared by all of its boxes and kept
-  across restarts, so a reinstall downloads little.
+  This repo's download caches are shared by all of its boxes and kept across restarts, so a
+  reinstall downloads little, for the kinds of project the repo is: `$CARGO_HOME` in a rust repo,
+  `$npm_config_cache` in a node repo, `$PIP_CACHE_DIR` and `$UV_CACHE_DIR` in a python repo, and
+  `$GOPATH` in a go repo. A kind it is not has none set, and that tool uses this box's own. pnpm's
+  store (`$npm_config_store_dir`) is this box's own. In a rust repo with sccache installed,
+  `RUSTC_WRAPPER` is `sccache`, which keeps compiled dependencies for a rebuild into the same
+  target directory, after a `cargo clean` for example; a build in another worktree does not hit it,
+  because the target's path is part of each entry. `sccache --show-stats` shows the hit rate. It
+  never caches what cargo builds incrementally, the workspace's own crates in a dev build.
+  `RUSTC_WRAPPER= cargo build` builds without it.
 
   Playwright's browsers are shared by the whole fleet, read-only, and linked into
   `~/.cache/ms-playwright` when this box starts. If Playwright says a browser is missing, ask for it

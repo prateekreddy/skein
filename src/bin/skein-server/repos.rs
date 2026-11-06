@@ -19,6 +19,21 @@ pub(super) struct RepoSettingsReq {
     auto_review_ceiling: Option<String>,
     /// the branch a new box of this repo starts from; empty = the remote's default
     base_branch: Option<String>,
+    /// the kinds of project this repo is, which decide its boxes' shared caches (SKEIN-1373):
+    /// absent = leave them alone, `null` = read them off each box's checkout again, a list = the
+    /// owner's choice, `[]` included
+    #[serde(default, deserialize_with = "present")]
+    kinds: Option<Option<Vec<String>>>,
+}
+
+/// A field that is present, `null` or not, as `Some`: so `kinds` can tell "leave it alone" (absent,
+/// the serde default) from "clear it" (`null`), which a plain `Option` reads as one thing.
+fn present<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(de).map(Some)
 }
 
 pub(super) async fn api_set_repo_settings(
@@ -28,6 +43,12 @@ pub(super) async fn api_set_repo_settings(
     // First, so a branch that cannot be one refuses before anything else is written.
     if let Some(branch) = &req.base_branch {
         if let Err(error) = skein::repos::set_base_branch(&id, branch) {
+            return (StatusCode::BAD_REQUEST, error).into_response();
+        }
+    }
+    // And a kind skein does not know, for the same reason.
+    if let Some(kinds) = &req.kinds {
+        if let Err(error) = skein::repos::set_repo_kinds(&id, kinds.as_deref()) {
             return (StatusCode::BAD_REQUEST, error).into_response();
         }
     }
@@ -279,6 +300,31 @@ pub(super) async fn api_repo_cache(Path(id): Path<String>) -> Response {
             Json(serde_json::json!({ "cache": cache, "tools": tools })).into_response()
         }
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// A repo's kinds for its card (SKEIN-1373): `"chosen"`, the owner's choice or `null` for none;
+/// `"detected"`, what the repo's default branch holds, read from its mirror, or `null` with
+/// `"unread"` saying why when the mirror could not be read; and `"known"`, every kind there is.
+/// Asked for when the card opens, since reading the mirror is a `git` call.
+pub(super) async fn api_repo_kinds(Path(id): Path<String>) -> Response {
+    let Some(repo) = skein::repos::load_repos().into_iter().find(|r| r.id == id) else {
+        return (StatusCode::NOT_FOUND, format!("no repo with id {id:?}")).into_response();
+    };
+    let chosen = repo.kinds.clone();
+    match tokio::task::spawn_blocking(move || skein::repos::kinds_in_mirror(&repo)).await {
+        Ok(detected) => {
+            let known: Vec<&str> = skein::repos::KINDS.iter().map(|(k, _)| *k).collect();
+            let unread = detected.as_ref().err().cloned();
+            Json(serde_json::json!({
+                "chosen": chosen,
+                "detected": detected.ok(),
+                "unread": unread,
+                "known": known,
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

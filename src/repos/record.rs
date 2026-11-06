@@ -174,6 +174,17 @@ pub struct Repo {
     /// been made, so the fail-closed direction is ON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owed_checks: Option<Vec<String>>,
+    /// **What kinds of project this repo is, as the owner chose them** (rust, node, python, go;
+    /// `kinds::KINDS`), which decide which of the repo's shared caches its boxes are pointed at
+    /// (SKEIN-1373, the owner's decision of 2026-11-06).
+    ///
+    /// `None`, the field absent, is "never chosen", and each box reads the kinds off its own
+    /// checkout as it starts (`kinds::kinds_in_dir`). `Some([])` is a repo the owner has said needs
+    /// none of the caches, which is a different answer and is honoured: an `Option` for the reason
+    /// [`Repo::owed_checks`] is one. Kept here, in skein's record, and never in the repo's own files,
+    /// which a box can change. Read at launch, so a change reaches a box at its next start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<String>>,
     /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
     /// a `repos.json` written before connections existed still parses.
     #[serde(default, skip_serializing_if = "String::is_empty")]
