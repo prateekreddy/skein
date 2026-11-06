@@ -68,7 +68,7 @@ impl Fleet {
                         &|b| b.to_string(),
                         chrono::Utc::now(),
                         &mut rates,
-                        None,
+                        &skein::jobs::machine::Busy::default(),
                     );
                     std::thread::sleep(Duration::from_millis(100));
                 }

@@ -12,10 +12,14 @@
 //! and `iowait`; the two guest fields are already inside `user` and `nice`, and are not counted
 //! twice. One file read per tick, against `fleet::box_loads`' sandbox exec and interval.
 //!
-//! **Kept by whoever ticks**, as [`super::cgroup::Rates`] is: `jobs::watch_jobs` holds the last
-//! reading from one tick to the next. The first tick, and a tick after a reading that did not
-//! parse, has no rate and gates nothing on it.
+//! **Kept by whoever ticks**, as [`super::cgroup::Rates`] is: `jobs::watch_jobs` holds the
+//! readings from one tick to the next, the last 15 minutes of them for the cockpit's averages.
+//! The first tick, and a tick after a reading that did not parse, has no rate and gates nothing on
+//! it.
 
+use super::cgroup::Readings;
+use chrono::{DateTime, Utc};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The `cpu` line of `/proc/stat`, in the kernel's clock ticks, and how many CPUs the file lists.
@@ -75,25 +79,67 @@ pub fn busy_between(then: CpuTimes, now: CpuTimes, fallback_cpus: u32) -> Option
     Some((busy as f64 / total as f64).min(1.0) * cpus as f64)
 }
 
-/// The last reading of the whole machine, kept from one tick to the next.
-#[derive(Debug, Default, Clone, Copy)]
+/// The whole machine's readings, kept from one tick to the next ([`super::cgroup::Readings`]).
+#[derive(Debug, Default, Clone)]
 pub struct MachineBusy {
-    last: Option<CpuTimes>,
+    kept: Readings<CpuTimes>,
+}
+
+/// How busy the whole machine is: at the last reading, which is what the queue admits on, and on
+/// average over each span of [`super::cgroup::AVERAGE_OVER`] the readings cover, for the cockpit's
+/// jobs list.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Busy {
+    /// The cores busy since the reading before. `None` gates nothing on it.
+    pub now: Option<f64>,
+    /// The cores busy on average over each covered span, keyed by its seconds.
+    pub over: BTreeMap<String, f64>,
+}
+
+impl Busy {
+    /// Busy `now`, with no averages: what a test of the admission hands the tick.
+    pub fn now(now: Option<f64>) -> Busy {
+        Busy {
+            now,
+            ..Busy::default()
+        }
+    }
 }
 
 impl MachineBusy {
-    /// Take `text` as this tick's `/proc/stat` and return the cores busy since the last reading.
-    /// A reading that does not parse forgets the last one, so the next starts over.
-    pub fn observe(&mut self, text: Option<&str>, fallback_cpus: u32) -> Option<f64> {
-        let now = text.and_then(parse);
-        let then = std::mem::replace(&mut self.last, now);
-        busy_between(then?, now?, fallback_cpus)
+    /// Take `text` as `/proc/stat` read at `at` and return the cores busy since the last reading.
+    /// A reading that does not parse forgets every one before it, so the next starts over.
+    pub fn observe(
+        &mut self,
+        text: Option<&str>,
+        fallback_cpus: u32,
+        at: DateTime<Utc>,
+    ) -> Option<f64> {
+        let Some(now) = text.and_then(parse) else {
+            self.kept.clear();
+            return None;
+        };
+        let then = self.kept.latest();
+        self.kept.push(now, at);
+        busy_between(then?.0, now, fallback_cpus)
     }
 
-    /// [`MachineBusy::observe`] of the file at `path`, `/proc/stat` in skein-server.
-    pub fn read(&mut self, path: &Path, fallback_cpus: u32) -> Option<f64> {
+    /// [`MachineBusy::observe`] of the file at `path`, `/proc/stat` in skein-server, with the
+    /// averages its readings now cover.
+    pub fn read(&mut self, path: &Path, fallback_cpus: u32, at: DateTime<Utc>) -> Busy {
         let text = std::fs::read_to_string(path).ok();
-        self.observe(text.as_deref(), fallback_cpus)
+        let now = self.observe(text.as_deref(), fallback_cpus, at);
+        Busy {
+            now,
+            over: self.averages(fallback_cpus),
+        }
+    }
+
+    /// The cores busy on average over each span of [`super::cgroup::AVERAGE_OVER`] the readings
+    /// cover, keyed by its seconds.
+    pub fn averages(&self, fallback_cpus: u32) -> BTreeMap<String, f64> {
+        self.kept
+            .over(|(then, _), (now, _)| busy_between(then, now, fallback_cpus))
     }
 }
 
@@ -122,12 +168,16 @@ mod tests {
     #[test]
     fn two_readings_give_the_cores_busy_between_them() {
         let mut m = MachineBusy::default();
-        assert_eq!(m.observe(Some(&stat(1000, 500, 4000, 100, 200)), 11), None);
-        let busy = m.observe(Some(&stat(1200, 550, 4120, 130, 250)), 11);
-        assert_eq!(busy, Some(2.5));
-        assert_eq!(m.observe(Some("no cpu line here"), 11), None);
+        let t = |secs| DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(secs);
         assert_eq!(
-            m.observe(Some(&stat(1300, 600, 4200, 140, 250)), 11),
+            m.observe(Some(&stat(1000, 500, 4000, 100, 200)), 11, t(0)),
+            None
+        );
+        let busy = m.observe(Some(&stat(1200, 550, 4120, 130, 250)), 11, t(2));
+        assert_eq!(busy, Some(2.5));
+        assert_eq!(m.observe(Some("no cpu line here"), 11, t(4)), None);
+        assert_eq!(
+            m.observe(Some(&stat(1300, 600, 4200, 140, 250)), 11, t(6)),
             None,
             "a reading after one that did not parse has nothing to compare with"
         );
@@ -140,6 +190,34 @@ mod tests {
             None,
             "a counter went backwards"
         );
+    }
+
+    /// **The whole machine's readings give its average over each span they cover, and leave out a
+    /// span they do not.** Four CPUs, read every two seconds: all four busy for the first 30
+    /// seconds, then one. At 90 s the last minute, from the reading at 30 s, is one core busy, and
+    /// five minutes is not covered.
+    ///
+    /// What would make it fail: a minute given before 60 s of readings, the minute averaged from
+    /// the first reading (it reads 2), or a span not covered given anyway.
+    #[test]
+    fn the_machines_readings_give_each_covered_spans_average() {
+        let t = |secs| DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(secs);
+        // Clock ticks of 100 a second: busy for the CPUs busy, idle for the rest.
+        let at = |secs: u64| {
+            let busy = 400 * secs.min(30) + 100 * secs.saturating_sub(30);
+            stat(busy, 0, 400 * secs - busy, 0, 0)
+        };
+        let mut m = MachineBusy::default();
+        for secs in (0..=58).step_by(2) {
+            m.observe(Some(&at(secs)), 4, t(secs as i64));
+        }
+        assert!(m.averages(4).is_empty(), "{:?}", m.averages(4));
+        for secs in (60..=90).step_by(2) {
+            m.observe(Some(&at(secs)), 4, t(secs as i64));
+        }
+        let over = m.averages(4);
+        assert_eq!(over.get("60").copied(), Some(1.0), "{over:?}");
+        assert!(!over.contains_key("300"), "{over:?}");
     }
 
     /// **The real `/proc/stat` of this machine reads, twice, as a busy count between none and
@@ -158,10 +236,11 @@ mod tests {
             .count() as u32;
         assert_eq!(first.cpus, listed);
         let mut m = MachineBusy::default();
-        m.read(Path::new("/proc/stat"), 1);
+        m.read(Path::new("/proc/stat"), 1, Utc::now());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let busy = m
-            .read(Path::new("/proc/stat"), 1)
+            .read(Path::new("/proc/stat"), 1, Utc::now())
+            .now
             .expect("no rate from two readings 300 ms apart");
         assert!(
             (0.0..=listed as f64).contains(&busy),

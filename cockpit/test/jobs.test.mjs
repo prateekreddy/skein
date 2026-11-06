@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { jobFigures, jobsForHash, jobsHtml, jobSpan } from "../src/jobs.mjs";
+import { jobFigures, jobsForHash, jobsHtml, jobsOverHtml, jobSpan } from "../src/jobs.mjs";
 
 // Rows spelled the way `jobs::FleetJob` serialises them.
 const running = (extra = {}) => ({
@@ -75,4 +75,30 @@ test("an empty fleet says how a box queues work, and a queue not running says so
   assert.match(jobsHtml(view([])), /skein-job run -- &lt;command&gt;/);
   assert.match(jobsHtml(view([], { running: false })), /The queue is not running/);
   assert.doesNotMatch(jobsHtml(view([])), /not running/);
+});
+
+// What would make it fail: the select not starting on "now", a pick that does not change the
+// figure shown (the job's `using` read whatever the pick), the machine's busy cores not following
+// the same pick, or a span not covered yet shown as if it were, without saying what it is instead.
+test("the average-over pick starts on now, and changes the figures it averages", () => {
+  const selected = html => [...html.matchAll(/<option value="([^"]+)" selected>/g)].map(m => m[1]);
+  assert.deepEqual(selected(jobsOverHtml()), ["now"]);
+  assert.deepEqual(selected(jobsOverHtml("bogus")), ["now"]);
+  assert.deepEqual(selected(jobsOverHtml("300")), ["300"]);
+  assert.match(jobsOverHtml(), /average over <select data-jobs-over>/);
+  const j = running({ using: 0.4, using_avg: { "60": 3.2, run: 2.9 } });
+  const v = view([j], { busy: 1.1, busy_avg: { "60": 8.6 } });
+  const fig = html => /class="sq-meta jb-fig">([^<]*)</.exec(html)[1];
+  const pool = html => /class="jb-pool">(.*?)<\/div>/.exec(html)[1];
+  // The default is now: the rate between the last two readings.
+  assert.equal(fig(jobsHtml(v)), "4 cores · using 0.4 · 1.5 GB · running 2m");
+  assert.match(pool(jobsHtml(v)), /machine busy <b>1.1<\/b>$/);
+  // A minute: both the job's and the machine's figures move.
+  assert.equal(fig(jobsHtml(v, "", "60")), "4 cores · using 3.2 · 1.5 GB · running 2m");
+  assert.match(pool(jobsHtml(v, "", "60")), /machine busy <b>8.6<\/b>$/);
+  assert.equal(jobFigures(j, "run"), "4 cores · using 2.9 · 1.5 GB · running 2m");
+  // Five minutes, not covered yet: the job's whole run so far, the machine's longest covered span.
+  assert.equal(jobFigures(j, "300"), "4 cores · using 2.9 (all 2m so far) · 1.5 GB · running 2m");
+  assert.match(pool(jobsHtml(v, "", "300")), /machine busy <b>8.6<\/b> \(last 1 min\)$/);
+  assert.match(pool(jobsHtml(view([j]))), /<b>1<\/b> free$/, "no machine figure when none was read");
 });
