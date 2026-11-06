@@ -5022,9 +5022,9 @@ mod tests {
     /// **The shipped hook says a tidy note once in the whole box, not once per session**, and
     /// holds nothing for it.
     ///
-    /// What would make it fail: `disk-tidy` missing from the hook's `BOX_ONCE` (a second session
-    /// is told the same note); the box's record not written (likewise). Watched: with `BOX_ONCE`
-    /// emptied, session s2 was told the note again and this failed.
+    /// What would make it fail: `disk-tidy` missing from the kinds `skein-resources` says once per
+    /// box (a second session is told the same note); the box's record not written (likewise).
+    /// Watched: with that list of kinds emptied, session s2 was told the note again and this failed.
     #[test]
     fn the_tidy_note_is_said_once_per_box() {
         let h = hooked();
