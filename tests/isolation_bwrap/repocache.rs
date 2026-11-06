@@ -679,7 +679,9 @@ fn a_repos_kinds_decide_its_caches_and_no_box_gets_a_compiler_wrapper() {
     let seen = |repo: &str, rel: &str| {
         // The box sees its area at `~/.repo-tools`, its own home's.
         f.fleet_root
-            .join(format!("{repo}-main/home/.repo-tools"))
+            .join(format!("{repo}-main"))
+            .join("home")
+            .join(".repo-tools")
             .join(rel)
             .display()
             .to_string()

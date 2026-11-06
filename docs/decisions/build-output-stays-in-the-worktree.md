@@ -10,7 +10,7 @@ shared path such as the fleet root's `.skein` directory.
 **Why.** The fleet reached 88% of its disk, and 19.2 GB of it was build directories under the fleet
 root's `.skein`, four days old, from agent lanes whose briefs put their build output there. Nothing
 in skein makes those directories and nothing removes them: it was a convention with no owner
-(`src/fleet/disk.rs:167-180`). A worktree already has the lifetime a build directory needs — it goes
+(`src/fleet/disk.rs:228-241`). A worktree already has the lifetime a build directory needs — it goes
 when the worktree goes — and the leak happened because the convention put the cache outside the one
 directory that had it. Only the privileged workshop box can write there at all, so this is an
 orchestration problem, not a skein defect, and it is invisible from the boxes that might notice.
@@ -24,6 +24,6 @@ tracker items were built on it before it was disproved.
 - A build directory under a shared path.
 - Reporting an inference from a naming convention as a measurement.
 
-**Enforced at.** skein reports what it did not make: `src/fleet/disk.rs:165-188` names every entry
+**Enforced at.** skein reports what it did not make: `src/fleet/disk.rs:226-249` names every entry
 under the fleet root's `.skein` that is neither skein's own nor any box's, and deletes nothing. What
 puts a build directory in the right place is the lane brief.

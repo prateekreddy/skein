@@ -582,7 +582,9 @@ function showRepoKinds(id, k) {
   const said = k.chosen
     ? (k.detected ? `Chosen. The default branch reads as ${phrase(k.detected)}.` : "Chosen.")
     : k.detected ? `Read off the checkout: the default branch is ${phrase(k.detected)}. A tick makes it your choice.`
-    : `skein could not read the default branch (${k.unread || "no reason given"}), so each box reads its own checkout.`;
+    // Not `k.unread`: that is the mirror's own error, with the stored token's path in it, and the
+    // card already says what is wrong with the repo's token in its own words.
+    : "skein could not read this repo's default branch, so each box reads its own checkout as it starts. A tick makes it your choice.";
   row.innerHTML = k.known.map(kind => `<label><input type="checkbox" data-kind="${esc(kind)}"${on.includes(kind) ? " checked" : ""} /> ${esc(kind)}</label>`).join(" ")
     + (k.chosen ? ` <button type="button" class="kbtn ghost" data-kinddetect>Read them off the checkout</button>` : "")
     + ` <span class="desc">${esc(said)}</span>`;

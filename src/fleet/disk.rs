@@ -223,7 +223,7 @@ pub(super) fn freed_bytes(path: &std::path::Path, on_disk: Option<u64>) -> u64 {
             .sum::<u64>()
 }
 
-// ──────────── the substrate:what skein installs beside the boxes, and what nobody claims ────────
+// ──────────── the substrate: what skein installs beside the boxes, and what nobody claims ────────
 //
 // `<fleet root>/.skein` is the one entry in the fleet root that is not a box, and on 2026-09-05 it
 // held **19.2 GB of build directories nothing in skein had made and nothing in skein would remove**
