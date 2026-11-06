@@ -1172,15 +1172,16 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
 ///
 /// `rates` is the last reading of each running job's cgroup, which the tick has no state of its
 /// own to keep: the caller holds it from one tick to the next ([`watch_jobs`]), and what it gives
-/// is what [`schedule`] admits on. `machine_busy` is the cores busy on the whole machine since the
-/// caller's last tick ([`machine::MachineBusy`]), or `None` to gate nothing on it.
+/// is what [`schedule`] admits on. `machine` is how busy the whole machine is ([`machine::Busy`]):
+/// its `now`, the cores busy since the caller's last tick, is what [`schedule`] admits on, `None`
+/// to gate nothing on it, and its averages go to the cockpit's jobs list with the jobs' own.
 pub fn tick(
     places: &Places,
     limits: Limits,
     repo_of: &dyn Fn(&str) -> String,
     now: DateTime<Utc>,
     rates: &mut cgroup::Rates,
-    machine_busy: Option<f64>,
+    machine: &machine::Busy,
 ) -> Result<Queue, String> {
     let mut queue = read_queue(&places.queue);
     let requests = read_requests(&places.requests);
@@ -1310,7 +1311,7 @@ pub fn tick(
         &|name| memory_asked(&states, name),
         &|job| live.get(&(job.box_name.clone(), job.id.clone())).copied(),
         &|job| job.idle_secs(now).is_some(),
-        machine_busy,
+        machine.now,
     );
     granted_now(&mut queue, &before, now);
     // A job granted now moves into a cgroup of its own, weighted for the cores it was granted and
@@ -1364,7 +1365,10 @@ pub fn tick(
             failed.push(format!("the job history: {e}"));
         }
     }
-    if let Err(e) = write_json(&fleet_view_path(places), &fleet_view(&queue, pool, now)) {
+    if let Err(e) = write_json(
+        &fleet_view_path(places),
+        &fleet_view(&queue, pool, now, rates, machine),
+    ) {
         failed.push(format!("the cockpit's jobs list: {e}"));
     }
     tidy_stops(&stops_dir(places), &stops, &queue);
@@ -1439,23 +1443,24 @@ pub async fn watch_jobs() {
     let mut tick_every = tokio::time::interval(LOOK_EVERY);
     tick_every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last = String::new();
-    // Each running job's last cgroup reading, and the whole machine's last `/proc/stat`, carried
-    // from one tick to the next: the tick keeps no state of its own, and a rate needs two
-    // readings.
+    // Each running job's cgroup readings, and the whole machine's `/proc/stat` readings, carried
+    // from one tick to the next: the tick keeps no state of its own, a rate needs two readings,
+    // and the cockpit's averages need the last 15 minutes of them.
     let mut rates = cgroup::Rates::default();
     let mut machine = machine::MachineBusy::default();
     loop {
         tick_every.tick().await;
         let ran = tokio::task::spawn_blocking(move || {
             let limits = limits();
-            let busy = machine.read(Path::new("/proc/stat"), limits.cores);
+            let now = Utc::now();
+            let busy = machine.read(Path::new("/proc/stat"), limits.cores, now);
             let r = tick(
                 &Places::live(),
                 limits,
                 &repo_of_box,
-                Utc::now(),
+                now,
                 &mut rates,
-                busy,
+                &busy,
             );
             (rates, machine, r.map(|_| ()))
         })
@@ -1740,6 +1745,14 @@ pub struct FleetView {
     /// Of `granted`, the cores of idle jobs, lent to waiting ones ([`Pool::lent`]).
     #[serde(default)]
     pub lent: u32,
+    /// The cores busy on the whole machine since the tick before, which is what [`schedule`]
+    /// admitted on; `None` before two readings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<f64>,
+    /// The same on average over each span of [`cgroup::AVERAGE_OVER`] the readings cover, keyed by
+    /// its seconds; a span not covered yet is left out.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub busy_avg: BTreeMap<String, f64>,
     /// Running jobs first, in the order skein saw them, then waiting ones in the order they go.
     #[serde(default)]
     pub jobs: Vec<FleetJob>,
@@ -1766,6 +1779,11 @@ pub struct FleetJob {
     /// The cores it is using now; `None` while it waits or before it was measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub using: Option<f64>,
+    /// The cores it used on average while it runs ([`cgroup::Rates::averages`]): over each span of
+    /// [`cgroup::AVERAGE_OVER`] its readings cover, keyed by the span's seconds, and over its whole
+    /// run as `run`. A span not covered yet is left out; empty while it waits.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub using_avg: BTreeMap<String, f64>,
     /// The memory it holds now while it runs, or is expected to need while it waits, in MiB.
     #[serde(default)]
     pub mem_mib: u64,
@@ -1784,8 +1802,14 @@ pub struct FleetJob {
     pub idle_secs: Option<i64>,
 }
 
-/// The cockpit's jobs list, from the queue and the pool as one tick left them.
-pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
+/// The cockpit's jobs list, from the queue, the pool and the readings as one tick left them.
+pub fn fleet_view(
+    queue: &Queue,
+    pool: Pool,
+    now: DateTime<Utc>,
+    rates: &cgroup::Rates,
+    machine: &machine::Busy,
+) -> FleetView {
     let row = |job: &Job, position: Option<usize>| {
         let running = job.state == "granted";
         FleetJob {
@@ -1800,6 +1824,10 @@ pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
             min: job.min,
             granted_cores: job.granted_cores,
             using: job.using.filter(|_| running),
+            using_avg: match running {
+                true => rates.averages(&job.box_name, &job.id, parse_stamp(&job.granted)),
+                false => BTreeMap::new(),
+            },
             mem_mib: match job.mem_mib.filter(|_| running) {
                 Some(m) => m,
                 // What the tick worked out from its command's history; the class default for a
@@ -1840,6 +1868,8 @@ pub fn fleet_view(queue: &Queue, pool: Pool, now: DateTime<Utc>) -> FleetView {
         granted: pool.granted,
         free: pool.free,
         lent: pool.lent,
+        busy: machine.now,
+        busy_avg: machine.over.clone(),
         jobs,
     }
 }
@@ -1949,7 +1979,7 @@ mod tests {
                 &repo_of,
                 at(secs),
                 &mut cgroup::Rates::default(),
-                busy,
+                &machine::Busy::now(busy),
             )
             .unwrap()
         }
@@ -2178,7 +2208,7 @@ mod tests {
                 &|b: &str| b.to_string(),
                 at(0),
                 &mut cgroup::Rates::default(),
-                None,
+                &machine::Busy::default(),
             )
             .unwrap()
         });

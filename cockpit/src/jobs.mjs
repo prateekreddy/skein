@@ -11,6 +11,13 @@
 // **An idle job's cores are lent** (SKEIN-1469): a running row with `idle_secs` says so in its
 // figures, and the pool says how many of the granted cores are lent, as the queue counted them.
 //
+// **The CPU figures may be averaged** over the last 1, 5 or 15 minutes or a job's whole run, by the
+// owner's pick; "now" is the rate between the queue's last two readings, two seconds apart, which
+// swings with a bursty build. A job's `using` and the machine's busy cores follow the same pick. A
+// span not covered yet, because the job or skein's watching of it is younger than that, shows the
+// longest that is, and says which. A waiting job's reason is the queue's own words for why it
+// waits, from its last reading, and is never averaged.
+//
 // **A link can open it**: `/#jobs` for the whole fleet, `/#jobs-<box>` for one box's jobs, so a
 // box's terminal pane can link to its own.
 
@@ -36,20 +43,67 @@ export function jobSpan(secs) {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
+// What the figures may be averaged over, keyed as `jobs::FleetJob`'s `using_avg` and
+// `jobs::FleetView`'s `busy_avg` are, with `now` first: the default.
+export const JOB_OVER = [["now", "now"], ["60", "1 min"], ["300", "5 min"], ["900", "15 min"], ["run", "whole run"]];
+
+// `over` if it is one of JOB_OVER's, else "now".
+export function jobsOver(over) {
+  return JOB_OVER.some(([k]) => k === over) ? over : "now";
+}
+
+// The pick, as a labelled select with `over` chosen.
+export function jobsOverHtml(over) {
+  const o = jobsOver(over);
+  const opts = JOB_OVER.map(([k, label]) => `<option value="${k}"${k === o ? " selected" : ""}>${label}</option>`).join("");
+  return `<label class="jb-over">average over <select data-jobs-over>${opts}</select></label>`;
+}
+
+const jobsNum = x => typeof x === "number" && Number.isFinite(x);
+
+// A running job's cores used over `over`, and what to say beside them when that is not the span
+// picked: `{ cores, note }`, or null when it was never read. A span its readings do not cover yet
+// gives its whole run so far, which is all of the time it has run.
+export function jobUsing(j, over = "now") {
+  const o = jobsOver(over);
+  const avg = j && j.using_avg && typeof j.using_avg === "object" ? j.using_avg : {};
+  if (o !== "now" && jobsNum(avg[o])) return { cores: avg[o], note: "" };
+  if (o !== "now" && jobsNum(avg.run)) return { cores: avg.run, note: ` (all ${jobSpan(j.secs)} so far)` };
+  if (!jobsNum(j && j.using)) return null;
+  return { cores: j.using, note: o === "now" ? "" : " (now)" };
+}
+
+// The whole machine's busy cores over `over`, as `jobUsing` gives a job's. The machine has no run
+// of its own, so "whole run" and a span not covered yet give the longest span that is.
+export function machineBusy(v, over = "now") {
+  const o = jobsOver(over);
+  const avg = v && v.busy_avg && typeof v.busy_avg === "object" ? v.busy_avg : {};
+  if (o !== "now") {
+    if (jobsNum(avg[o])) return { cores: avg[o], note: "" };
+    const upto = o === "run" ? Infinity : Number(o);
+    const longest = JOB_OVER.filter(([k]) => k !== "now" && k !== "run" && Number(k) < upto && jobsNum(avg[k])).pop();
+    if (longest) return { cores: avg[longest[0]], note: ` (last ${longest[1]})` };
+  }
+  if (!jobsNum(v && v.busy)) return null;
+  return { cores: v.busy, note: o === "now" ? "" : " (now)" };
+}
+
 const cores = n => (n === 1 ? "1 core" : `${n | 0} cores`);
 const gb = mib => {
   const s = (Number(mib) / 1024).toFixed(1);
   return s.endsWith(".0") ? s.slice(0, -2) : s;
 };
 
-// One row's figures, in words: what it asked for and has, its memory, and how long.
-export function jobFigures(j) {
+// One row's figures, in words: what it asked for and has, its memory, and how long. Its CPU is
+// averaged over `over` (JOB_OVER).
+export function jobFigures(j, over = "now") {
   const running = j.state === "granted";
   const parts = [];
   if (running) {
     parts.push(j.granted_cores && j.granted_cores !== j.cores
       ? `asked ${cores(j.cores)}, granted ${j.granted_cores}` : `${cores(j.granted_cores || j.cores)}`);
-    if (typeof j.using === "number") parts.push(`using ${j.using.toFixed(1)}`);
+    const u = jobUsing(j, over);
+    if (u) parts.push(`using ${u.cores.toFixed(1)}${u.note}`);
     if (typeof j.idle_secs === "number") parts.push(`idle ${jobSpan(j.idle_secs)}, its cores lent`);
     parts.push(j.mem_measured ? `${gb(j.mem_mib)} GB` : `~${gb(j.mem_mib)} GB`);
     parts.push(`running ${jobSpan(j.secs)}`);
@@ -61,13 +115,16 @@ export function jobFigures(j) {
   return parts.join(" · ");
 }
 
-// The list, as HTML. `box` narrows it to one box's jobs ("" for all).
-export function jobsHtml(view, box = "") {
+// The list, as HTML. `box` narrows it to one box's jobs ("" for all); `over` is what the CPU figures
+// are averaged over (JOB_OVER).
+export function jobsHtml(view, box = "", over = "now") {
   const v = view && typeof view === "object" ? view : {};
   const all = Array.isArray(v.jobs) ? v.jobs : [];
   const jobs = box ? all.filter(j => j.box === box) : all;
   const lent = v.lent | 0 ? ` · <b>${v.lent | 0}</b> lent` : "";
-  const pool = `<div class="jb-pool"><b>${v.cores | 0}</b> cores · <b>${v.granted | 0}</b> granted${lent} · <b>${v.free | 0}</b> free</div>`;
+  const m = machineBusy(v, over);
+  const busy = m ? ` · machine busy <b>${m.cores.toFixed(1)}</b>${m.note}` : "";
+  const pool = `<div class="jb-pool"><b>${v.cores | 0}</b> cores · <b>${v.granted | 0}</b> granted${lent} · <b>${v.free | 0}</b> free${busy}</div>`;
   const stale = v.running === false
     ? `<div class="note jb-stale">The queue is not running: skein has not looked at it for a while, so this may be out of date.</div>` : "";
   const scope = box
@@ -85,7 +142,7 @@ export function jobsHtml(view, box = "") {
     return `<div class="msg jb-row" data-card="${jobsEsc(key)}" data-state="${running ? "running" : "waiting"}">`
       + `<div class="sq-meta"><b>${jobsEsc(j.box)}</b> · ${jobsEsc(j.repo)} · ${jobsEsc(j.class)} · ${where}</div>`
       + `<div class="aq-body jb-cmd" title="${jobsEsc(j.command || "")}">${jobsEsc(what)}</div>`
-      + `<div class="sq-meta jb-fig">${jobsEsc(jobFigures(j))}</div>`
+      + `<div class="sq-meta jb-fig">${jobsEsc(jobFigures(j, over))}</div>`
       + (j.reason ? `<div class="sq-log jb-why">${jobsEsc(j.reason)}</div>` : "")
       + `<div class="sq-row"><button type="button" class="kbtn ghost" data-stop data-box="${jobsEsc(j.box)}" data-id="${jobsEsc(j.id)}"`
       + ` title="${running ? "Kill its processes. The agent is told you stopped it." : "Take it out of the queue. The agent is told you stopped it."}">Stop</button>`

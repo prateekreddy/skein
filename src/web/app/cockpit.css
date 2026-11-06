@@ -1173,6 +1173,8 @@
   /* Write access too (SKEIN-1298): its count was the one drawn as grey text beside the icon. */
   #subqbtn, #askqbtn, #gitqbtn { position:relative; }
   #jobs .jb-pool { padding:8px 12px; color:var(--dim); }
+  #jobs .jb-overrow { padding:8px 12px 0; color:var(--dim); }
+  #jobs .jb-overrow select { margin-left:6px; }
   #jobs .jb-pool b { color:var(--fg); }
   #jobs .jb-scope { padding:0 12px 8px; color:var(--dim); }
   #jobs .jb-cmd { font-family:var(--mono); }

@@ -70,7 +70,11 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   the cores asked, granted and used, memory, time, why a job waits, and the pool; a **Stop** on each
   row that takes a waiting job out of the queue or kills a running one, whose agent is told the
   owner stopped it. Deep links `/#jobs` and `/#jobs-<box>` (`jobsForHash` in
-  `cockpit/src/jobs.mjs`).
+  `cockpit/src/jobs.mjs`). An **average over** pick (`JOB_OVER`: now, 1, 5 or 15 minutes, whole
+  run; now by default, kept per browser) sets what each job's cores used and the machine's busy
+  cores on the pool line are averaged over, from readings the server keeps in memory
+  (`cgroup::Rates::averages`, `machine::MachineBusy::averages`); a span not covered yet shows the
+  longest that is, and says so.
 - **Continue N** — batch resume of boxes classed proceed, with an AI safety gate that can only ever
   *add* a hold.
 - **The board's state taxonomy** — `GROUPS`, in `cockpit/src/groups.mjs` since the pure functions

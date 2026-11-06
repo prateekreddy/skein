@@ -37,7 +37,8 @@
 //! running goes with it. A job that ended `done` or `cancelled` with its wrapper still there is
 //! left alone until the wrapper has left the box, and then whatever is still in its cgroup is
 //! killed, measured and the cgroup removed ([`stop_leftovers`], SKEIN-1438). [`Rates`] turns two readings of a running job into the cores it is using
-//! now.
+//! now, and the readings it keeps into what it used on average over the last minutes and its whole
+//! run, for the cockpit's jobs list.
 //!
 //! **Shared between boxes by what they were granted.** A job's weight only splits the CPU its box's
 //! cgroup gets. Which box gets how much is the box cgroups' own `cpu.weight`, which [`weigh_boxes`]
@@ -145,11 +146,75 @@ pub fn cores_between(
     (micros > 0 && now_usec >= then_usec).then(|| (now_usec - then_usec) as f64 / micros as f64)
 }
 
-/// The live CPU rate of each running job, kept between ticks by whoever ticks: the last reading of
-/// each job's cgroup, the rate between it and the one before, and the highest rate seen so far.
+/// The spans the cockpit's jobs list averages CPU over besides now, in seconds: 1, 5 and 15
+/// minutes, the owner's choice beside now and a job's whole run (SKEIN-1422). A build is bursty, so
+/// the rate between two readings two seconds apart swings, and read alone it showed a busy machine's
+/// jobs using little.
+pub const AVERAGE_OVER: [i64; 3] = [60, 300, 900];
+
+/// One counter's readings, kept to average over each span of [`AVERAGE_OVER`]: every reading,
+/// oldest first, back to the newest one at or before the longest span ago. One a tick is 451 at
+/// most, so none is thinned.
+#[derive(Debug, Clone)]
+pub struct Readings<T> {
+    kept: std::collections::VecDeque<(T, DateTime<Utc>)>,
+}
+
+impl<T> Default for Readings<T> {
+    fn default() -> Self {
+        Readings {
+            kept: Default::default(),
+        }
+    }
+}
+
+impl<T: Copy> Readings<T> {
+    /// Keep `value`, read at `at`, and forget what no span needs any more.
+    pub fn push(&mut self, value: T, at: DateTime<Utc>) {
+        self.kept.push_back((value, at));
+        let longest = chrono::Duration::seconds(AVERAGE_OVER[AVERAGE_OVER.len() - 1]);
+        while self.kept.len() > 1 && self.kept[1].1 <= at - longest {
+            self.kept.pop_front();
+        }
+    }
+
+    /// Forget every reading: the counter started again.
+    pub fn clear(&mut self) {
+        self.kept.clear();
+    }
+
+    /// The newest reading.
+    pub fn latest(&self) -> Option<(T, DateTime<Utc>)> {
+        self.kept.back().copied()
+    }
+
+    /// `rate` from the newest reading at or before each span of [`AVERAGE_OVER`] ago to the newest
+    /// of all, keyed by the span's seconds. A span with no reading that old is not covered yet, and
+    /// left out.
+    pub fn over(
+        &self,
+        rate: impl Fn((T, DateTime<Utc>), (T, DateTime<Utc>)) -> Option<f64>,
+    ) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        let Some(latest) = self.latest() else {
+            return out;
+        };
+        for secs in AVERAGE_OVER {
+            let from = latest.1 - chrono::Duration::seconds(secs);
+            let then = self.kept.iter().rev().find(|(_, at)| *at <= from).copied();
+            if let Some(r) = then.and_then(|then| rate(then, latest)) {
+                out.insert(secs.to_string(), r);
+            }
+        }
+        out
+    }
+}
+
+/// The live CPU rate of each running job, kept between ticks by whoever ticks: each job's cgroup
+/// readings ([`Readings`]), the rate between the last two, and the highest rate seen so far.
 #[derive(Debug, Default, Clone)]
 pub struct Rates {
-    last: BTreeMap<(String, String), (u64, DateTime<Utc>)>,
+    kept: BTreeMap<(String, String), Readings<u64>>,
     peak: BTreeMap<(String, String), f64>,
 }
 
@@ -165,14 +230,45 @@ impl Rates {
     ) -> Option<f64> {
         let key = (box_name.to_string(), id.to_string());
         let Some(read) = usage(&job_cgroup(cgroups, box_name, id)) else {
-            self.last.remove(&key);
+            self.kept.remove(&key);
             return None;
         };
-        let prev = self.last.insert(key.clone(), (read.cpu_usec, now));
+        let kept = self.kept.entry(key.clone()).or_default();
+        let prev = kept.latest();
+        // A counter that went backwards is a cgroup made again under the same name: what was kept
+        // counted another one.
+        if prev.is_some_and(|(usec, _)| read.cpu_usec < usec) {
+            kept.clear();
+        }
+        kept.push(read.cpu_usec, now);
         let rate = prev.and_then(|(usec, at)| cores_between(usec, at, read.cpu_usec, now))?;
         let peak = self.peak.entry(key).or_insert(rate);
         *peak = peak.max(rate);
         Some(rate)
+    }
+
+    /// The cores box `box_name`'s job `id` used on average over each span of [`AVERAGE_OVER`] its
+    /// readings cover, keyed by the span's seconds, and over its whole run as `run`: what its
+    /// cgroup had counted at the last reading over the time since `granted`, its cgroup having been
+    /// made at its grant ([`place`]). Empty for a job not read.
+    pub fn averages(
+        &self,
+        box_name: &str,
+        id: &str,
+        granted: Option<DateTime<Utc>>,
+    ) -> BTreeMap<String, f64> {
+        let Some(kept) = self.kept.get(&(box_name.to_string(), id.to_string())) else {
+            return BTreeMap::new();
+        };
+        let mut out = kept.over(|(was, then), (is, now)| cores_between(was, then, is, now));
+        let run = kept
+            .latest()
+            .zip(granted)
+            .and_then(|((usec, at), granted)| cores_between(0, granted, usec, at));
+        if let Some(run) = run {
+            out.insert("run".into(), run);
+        }
+        out
     }
 
     /// The most cores box `box_name`'s job `id` was seen using between two readings: `None` until
@@ -186,14 +282,14 @@ impl Rates {
     /// Stop following a job that ended.
     pub fn forget(&mut self, box_name: &str, id: &str) {
         let key = (box_name.to_string(), id.to_string());
-        self.last.remove(&key);
+        self.kept.remove(&key);
         self.peak.remove(&key);
     }
 
     /// Stop following every job `running` does not name, so a job that left the queue without
     /// being seen to end is not followed for ever.
     pub fn retain(&mut self, running: &dyn Fn(&str, &str) -> bool) {
-        self.last.retain(|(b, id), _| running(b, id));
+        self.kept.retain(|(b, id), _| running(b, id));
         self.peak.retain(|(b, id), _| running(b, id));
     }
 }
@@ -763,6 +859,76 @@ mod tests {
         );
     }
 
+    /// **What a job used on average over the last minute and over its whole run, from readings at
+    /// known times; a span its readings do not reach yet is left out.**
+    ///
+    /// Granted at 0 and read every two seconds: four cores for 20 seconds, then one. At 70 s the
+    /// last minute runs from the reading at 10 s (40 core-seconds counted) to 130, so 1.5 cores;
+    /// the whole run is 130 over 70 seconds; now is 1. Five and 15 minutes are not covered. Read on
+    /// to 1,000 seconds at one core, 15 minutes is covered and reads 1, so the reading it needs is
+    /// still kept.
+    ///
+    /// What would make it fail: a span averaged from the oldest reading rather than the one at its
+    /// start (the minute reads 1.79), a span not yet covered given anyway, the whole run counted
+    /// from the first reading rather than the grant (it reads 1.79 too), or readings dropped before
+    /// the longest span is done with them (15 minutes missing at 1,000 s).
+    #[test]
+    fn readings_at_known_times_give_each_spans_average_and_leave_out_one_not_covered() {
+        let (_d, cgroups) = tree("cpu", true);
+        let dir = place_with(&Fake::default(), &cgroups, "web-main", "j", 1, None).unwrap();
+        let granted = DateTime::parse_from_rfc3339("2026-11-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let counted = |t: i64| match t <= 20 {
+            true => 4_000_000 * t,
+            false => 80_000_000 + 1_000_000 * (t - 20),
+        };
+        let mut rates = Rates::default();
+        let read_to = |rates: &mut Rates, from: i64, to: i64| {
+            let mut now = None;
+            for t in (from..=to).step_by(2) {
+                std::fs::write(dir.join("cpu.stat"), format!("usage_usec {}\n", counted(t)))
+                    .unwrap();
+                now = rates.observe(
+                    &cgroups,
+                    "web-main",
+                    "j",
+                    granted + chrono::Duration::seconds(t),
+                );
+            }
+            now
+        };
+        read_to(&mut rates, 2, 58);
+        let early = rates.averages("web-main", "j", Some(granted));
+        assert!(
+            !early.contains_key("60"),
+            "a minute given at 58 s: {early:?}"
+        );
+        let now = read_to(&mut rates, 60, 70);
+        assert_eq!(now, Some(1.0));
+        let avg = rates.averages("web-main", "j", Some(granted));
+        let near = |k: &str, want: f64| {
+            let got = avg.get(k).copied();
+            assert!(
+                got.is_some_and(|g| (g - want).abs() < 1e-9),
+                "{k}: {got:?}, want {want}: {avg:?}"
+            );
+        };
+        near("60", 1.5);
+        near("run", 130.0 / 70.0);
+        assert!(
+            !avg.contains_key("300") && !avg.contains_key("900"),
+            "{avg:?}"
+        );
+        read_to(&mut rates, 72, 1000);
+        let late = rates.averages("web-main", "j", Some(granted));
+        assert_eq!(late.get("900").copied(), Some(1.0), "{late:?}");
+        assert_eq!(late.get("60").copied(), Some(1.0), "{late:?}");
+        assert!(rates
+            .averages("web-main", "other", Some(granted))
+            .is_empty());
+    }
+
     // ─────────── through the scheduler's tick, on a cgroup tree written as plain files ───────────
 
     /// A fleet of one box, `web-main`, for [`crate::jobs::tick`]: `leaf` says whether the box has
@@ -808,7 +974,8 @@ mod tests {
             oversubscribe: 1.5,
             mem_free_mib: None,
         };
-        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates, None).unwrap()
+        let idle = crate::jobs::machine::Busy::default();
+        crate::jobs::tick(places, limits, &|b: &str| b.to_string(), at, rates, &idle).unwrap()
     }
 
     fn job<'a>(q: &'a crate::jobs::Queue, id: &str) -> &'a crate::jobs::Job {
@@ -1285,7 +1452,7 @@ mod tests {
             &|b: &str| b.to_string(),
             at,
             &mut Rates::default(),
-            None,
+            &crate::jobs::machine::Busy::default(),
         )
         .unwrap();
         let next = job(&q, "j-2");

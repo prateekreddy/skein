@@ -642,11 +642,16 @@ const askqShown = new Map();
 // while the panel is open, which is how often the queue looks. **Stop is the owner's**: the press
 // goes to `/api/fleet/jobs/<box>/<id>/stop`, which only the cockpit's token can reach, and answers
 // once the queue has stopped the job. The row's controls stay disabled until then, so one press is
-// one stop.
-let jobsBox = "", jobsTimer = null;
+// one stop. **What the CPU figures are averaged over** is the owner's pick (`JOB_OVER`), "now" until
+// they choose, and kept in this browser; its select sits above the list, so the list redrawn every
+// two seconds never closes it under the pointer.
+const JOBS_OVER_KEY = "skein.jobs.over";
+let jobsBox = "", jobsTimer = null, jobsOverPick = "now";
+try { jobsOverPick = jobsOver(localStorage.getItem(JOBS_OVER_KEY)); } catch { /* a convenience */ }
 function openJobs(box = "") {
   jobsBox = box || "";
   const o = document.getElementById("jobs"); o.classList.add("open"); o.setAttribute("aria-hidden","false");
+  document.getElementById("jobs-over").innerHTML = jobsOverHtml(jobsOverPick);
   loadJobs();
   clearInterval(jobsTimer);
   jobsTimer = setInterval(() => { if (o.classList.contains("open")) loadJobs(); else clearInterval(jobsTimer); }, 2000);
@@ -658,13 +663,19 @@ function closeJobs() {
 function loadJobs() {
   const list = document.getElementById("jobs-list");
   return fetch("/api/fleet/jobs").then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))).then(v => {
-    list.innerHTML = jobsHtml(v, jobsBox);
+    list.innerHTML = jobsHtml(v, jobsBox, jobsOverPick);
     for (const key of inFlight) {
       const [panel, card] = key.split("\n");
       if (panel === "jobs") markSending("jobs", card, true);
     }
   }).catch(() => { list.innerHTML = `<div class="note">could not load the jobs</div>`; });
 }
+document.getElementById("jobs-over").addEventListener("change", e => {
+  if (!e.target.matches("select[data-jobs-over]")) return;
+  jobsOverPick = jobsOver(e.target.value);
+  try { localStorage.setItem(JOBS_OVER_KEY, jobsOverPick); } catch { /* a convenience */ }
+  loadJobs();
+});
 document.getElementById("jobs-list").addEventListener("click", e => {
   if (e.target.closest("[data-jobs-all]")) { e.preventDefault(); jobsBox = ""; loadJobs(); return; }
   const b = e.target.closest("button[data-stop]");
