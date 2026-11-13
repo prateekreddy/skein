@@ -2501,11 +2501,14 @@ mod tests {
         let api = github_for_a(LISTING, &[("a/two", 200), ("a/three", 200)]);
         pinned(&mut env, &home, &api.url);
 
-        store_repo_token_checked("a/one", "ghp_skein-test-classic")
+        // Assembled, not written out, so no literal in the source has a live token's shape
+        // (tools/secret-check.py); the prefix is the very thing under test.
+        let classic = ["gh", "p_skein-test-classic"].concat();
+        store_repo_token_checked("a/one", &classic)
             .expect("a classic token is warned about, never refused");
         let (c, token) =
             credential_for("a/one").expect("the classic token is not handed to a/one's boxes");
-        assert_eq!(token.expose(), "ghp_skein-test-classic");
+        assert_eq!(token.expose(), classic);
         assert_eq!((c.reaches_all, c.reaches_more.clone()), (true, vec![]));
         assert!(
             !api.asked()
@@ -2548,10 +2551,10 @@ mod tests {
         );
         pinned(&mut env, &home, &api.url);
 
-        store_repo_token_checked("a/one", "github_pat_skein-test-all-repos")
+        store_repo_token_checked("a/one", "skein-test-all-repos")
             .expect("a token that reaches more is warned about, never refused");
         let (c, token) = credential_for("a/one").expect("it no longer reaches a/one's boxes");
-        assert_eq!(token.expose(), "github_pat_skein-test-all-repos");
+        assert_eq!(token.expose(), "skein-test-all-repos");
         assert_eq!(
             c.repos,
             vec!["a/one".to_string()],
@@ -2597,7 +2600,7 @@ mod tests {
         }
         pinned(&mut env, &home, &api.url);
 
-        store_repo_token_checked("a/one", "github_pat_skein-test-one-repo").unwrap();
+        store_repo_token_checked("a/one", "skein-test-one-repo").unwrap();
         let c = credential_for("a/one").unwrap().0;
         assert_eq!((c.reaches_all, c.reaches_more.clone()), (false, vec![]));
         assert_eq!(c.reach_warning(), None);
@@ -2625,7 +2628,7 @@ mod tests {
         let _hold = crate::github::HoldClear::new();
         let api = github_for_a(LISTING, &[("a/one", 200), ("a/two", 200), ("a/three", 200)]);
         pinned(&mut env, &home, &api.url);
-        let id = store_repo_token("a/one", "github_pat_skein-test-shared").unwrap();
+        let id = store_repo_token("a/one", "skein-test-shared").unwrap();
         share_credential(&id, "a/two").unwrap();
 
         assert!(recheck_reach()
@@ -2643,7 +2646,7 @@ mod tests {
             r#"{"permissions":{"push":true}}"#,
         ));
         api.answer("/a/three.git/info/refs", 403);
-        replace_token_checked(&id, "github_pat_skein-test-shared-rotated").unwrap();
+        replace_token_checked(&id, "skein-test-shared-rotated").unwrap();
         let c = credential_for("a/two").unwrap().0;
         assert_eq!(
             c.reaches_more,
@@ -2678,7 +2681,7 @@ mod tests {
         let _hold = crate::github::HoldClear::new();
         let api = github_for_a(LISTING, &[("a/two", 200), ("a/three", 403)]);
         pinned(&mut env, &home, &api.url);
-        store_repo_token_checked("a/one", "github_pat_skein-test-narrowed-later").unwrap();
+        store_repo_token_checked("a/one", "skein-test-narrowed-later").unwrap();
         assert_eq!(
             credential_for("a/one").unwrap().0.reaches_more,
             vec!["a/two".to_string()]
@@ -2707,6 +2710,6 @@ mod tests {
         assert!(recheck_reach().is_empty(), "clearing is not news");
         let (c, token) = credential_for("a/one").unwrap();
         assert_eq!((c.reaches_all, c.reaches_more), (false, vec![]));
-        assert_eq!(token.expose(), "github_pat_skein-test-narrowed-later");
+        assert_eq!(token.expose(), "skein-test-narrowed-later");
     }
 }

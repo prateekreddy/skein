@@ -125,7 +125,7 @@ if [ ! -s "${SKEIN_GIT_TOKENS}/${owner}%2F${name}" ] && [ -r "${SKEIN_GIT_TOKENS
   why="$(head -n 1 "${SKEIN_GIT_TOKENS}/why/${owner}%2F${name}" 2>/dev/null)"
 fi
 if [ -n "$why" ]; then
-  printf 'skein: this box was granted write access to %s/%s, but skein has no token to give it: %s. Asking for access again will not help; ask the person to store a token for %s/%s in the cockpit, under Settings → GitHub & keys → Without a GitHub App.\n' \
+  printf 'skein: this box was granted write access to %s/%s, but skein has no token to give it: %s. Asking for access again will not help; ask the person to store a token for %s/%s in the cockpit, under Settings → GitHub & keys → Write tokens.\n' \
     "$owner" "$name" "$why" "$owner" "$name" >&2
 fi
 if [ -z "$token" ]; then

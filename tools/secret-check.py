@@ -140,6 +140,10 @@ EXPOSED = {
     "per caller, because Secret has no Clone; it never becomes a String",
     "src/fleet/credentials.rs::github_export": "written into the box over the crossing's stdin and "
     "read back there from a 0600 file; never argv, never this process's environment",
+    "src/gitgate/credentials.rs::reach_beyond": "read only to compare its first four bytes with "
+    "the classic-token prefixes; nothing is copied, logged or passed on",
+    "src/github.rs::git_config": "git's Basic credential for `github.com`, in curl's config fed over "
+    "stdin like `config` above, so it never reaches argv",
     "src/ai/call.rs::tried": "the value of `Command::env` for GH_TOKEN and GITHUB_TOKEN two lines "
     "down, on the child that needs it — the Rule 4 channel, bound to a name first to trim it once",
 }
@@ -180,6 +184,9 @@ PLACEMENT = {
     "holds the only secrets a box receives, bound read-only into that box alone",
     ("src/gitgate/decide.rs", "{}/git-tokens/{}"): "kept by Rule 1 on purpose: a box's own "
     "`git-tokens/`, the delegated installation tokens bound read-only into that box alone",
+    ("src/gitgate/decide.rs", "{}/git-tokens/why/{}"): "not a credential: one sentence saying "
+    "why a granted repository has no token, beside the box's tokens so the helper that reads them "
+    "can say it; it never holds token bytes",
     ("src/fleet/credentials.rs", "\\\"$HOME\\\"/.cache/skein/review-{call}.token"): "the review "
     "credential, in the box's own private HOME for the life of one call (SKEIN-576): a call into a "
     "box reads it inside that box's namespace, where the fleet's `private/` is covered",

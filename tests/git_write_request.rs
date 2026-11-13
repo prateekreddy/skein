@@ -272,7 +272,7 @@ fn a_grant_with_no_token_says_so_instead_of_sending_the_box_to_ask_again() {
     let said = "skein: this box was granted write access to acme/sibling, but skein has no token \
                 to give it: no GitHub App is set up, and no stored token covers it. Asking for \
                 access again will not help; ask the person to store a token for acme/sibling in \
-                the cockpit, under Settings → GitHub & keys → Without a GitHub App.\n";
+                the cockpit, under Settings → GitHub & keys → Write tokens.\n";
 
     let (out, err) = b.credential_said("github.com", "acme/sibling.git");
     assert_eq!(out, "");

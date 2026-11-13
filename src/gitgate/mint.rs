@@ -137,10 +137,10 @@ pub fn token_blocker(slug: &str) -> Option<String> {
 }
 
 /// The one place in the cockpit a token for any repository can be stored, a managed repo or not:
-/// the form under Settings → GitHub & keys → Without a GitHub App, which is
+/// the form under Settings → GitHub & keys → Write tokens, which is
 /// `/api/fleet/repo-token` and stores a token covering `slug` alone.
 fn store_token_step(slug: &str) -> String {
-    format!("Store a token for {slug} under Settings → GitHub & keys → Without a GitHub App")
+    format!("Store a token for {slug} under Settings → GitHub & keys → Write tokens")
 }
 
 /// What a pending request says beside its Grant control when [`token_blocker`] has an answer, and

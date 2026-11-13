@@ -1191,7 +1191,7 @@ mod tests {
             refused,
             Err("No write token can be made for acme/thing: no GitHub App is set up, and no stored \
                  token covers it. Store a token for acme/thing under Settings → GitHub & keys → \
-                 Without a GitHub App, then grant this."
+                 Write tokens, then grant this."
                 .to_string())
         );
         assert!(grants().is_empty(), "a grant was recorded: {:?}", grants());
@@ -1235,7 +1235,7 @@ mod tests {
             shown.blocked,
             "No write token can be made for acme/thing: no GitHub App is set up, and no stored \
              token covers it. Store a token for acme/thing under Settings → GitHub & keys → \
-             Without a GitHub App, then grant this."
+             Write tokens, then grant this."
         );
 
         tokens_for(&["acme/thing"]);
@@ -1253,8 +1253,7 @@ mod tests {
         assert_eq!(
             with_blocker(granted.clone(), &grants(), now).blocked,
             "Granted, but no token can be made for acme/thing: the App is not installed on \
-             acme/thing. Store a token for acme/thing under Settings → GitHub & keys → Without a \
-             GitHub App."
+             acme/thing. Store a token for acme/thing under Settings → GitHub & keys → Write tokens."
         );
         std::fs::remove_file(&reason).unwrap();
         assert_eq!(with_blocker(granted, &grants(), now).blocked, "");
