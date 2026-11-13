@@ -2045,7 +2045,7 @@ pub fn write_every_box() -> Result<usize, String> {
         })
         .collect();
     if measure_afresh(boxes.iter().map(|(_, _, prev)| prev.as_ref())) {
-        crate::fleet::disturbing(&[crate::signal::Remembered::BoxDisk], || ());
+        crate::fleet::disturbing(&[crate::fleet::Remembered::BoxDisk], || ());
     }
     // One reading of the fleet's disk for every box, so no two boxes are told about two fleets.
     let measured = crate::fleet::fleet_resources().is_some();
@@ -5356,8 +5356,8 @@ mod tests {
     /// names what is gone.
     ///
     /// What would make it fail: the hook holding on the file as it stands (the incident: held for
-    /// 5.4G naming two folders removed a minute before). Watched: with `gone_since_listed` made to
-    /// return False, session s1 was held naming the removed folder and this failed.
+    /// 5.4G naming two folders removed a minute before). Watched: with the hook's check for a removed item
+    /// made to answer no, session s1 was held naming the removed folder and this failed.
     #[test]
     fn nothing_is_held_on_a_file_that_predates_a_removal() {
         let b = Removed::new();

@@ -1253,7 +1253,7 @@ fn a_path_not_on_the_list_is_refused_and_nothing_is_removed() {
 ///
 /// What would make it fail: the tool dropping skein's class (no `finished_work`), or keeping the
 /// list's own order, biggest first (the 4K pip cache first). Watched: with the `rows.sort` line
-/// removed from `clean_rows`, the pip cache came first and this failed.
+/// removed from skein-mcp's listing, the pip cache came first and this failed.
 #[test]
 fn the_list_puts_finished_work_first_and_says_why() {
     let b = Box_::new("skein-tools-it-clean-dead");
