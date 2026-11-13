@@ -100,6 +100,10 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
             "turned_down": c.turned_down,
             // What it can push to and cannot read: check runs, Actions (SKEIN-1338).
             "cannot_read": c.cannot_read,
+            // What else GitHub lets it push to, beyond the repos it is stored for — a classic
+            // token, or the repos found — so each card can say what its boxes can reach with it.
+            "reaches_more": c.reaches_more,
+            "reaches_all": c.reaches_all,
             // Carried so an unusable entry can explain itself. One hand-edited to cover three
             // repositories is listed and refused, and a list that silently omitted it would leave
             // someone staring at a repo whose token "is configured" and does not work.

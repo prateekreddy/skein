@@ -911,7 +911,9 @@ function gitCredRow(c) {
     : c.unchecked ? `not checked yet — GitHub could not be reached when it was saved (${esc(c.unchecked)}); skein asks again within 20 minutes. `
     : c.cannot_read ? `can push, but cannot read CI results — ${esc(c.cannot_read)}; add those permissions to the token on GitHub. `
     : "";
-  const why = check + (c.problem ? `unusable — ${esc(c.problem)}`
+  // Pushes further than it is stored for (`tokenReachNote`): said as well as the rest, not instead.
+  const reach = tokenReachNote(c);
+  const why = check + (reach ? `${reach}. ` : "") + (c.problem ? `unusable — ${esc(c.problem)}`
     : !c.has_token ? "no token stored"
     : c.shared ? `shared on purpose — boxes of each of these repos can push to all of them. Replace it from any of their cards; forgetting it here takes it from all ${(c.repos || []).length}`
     : "");

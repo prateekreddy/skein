@@ -213,7 +213,7 @@ pub fn add_repo_with_token(
     drop(given);
     let saved = match token {
         AddToken::None => Ok(()),
-        AddToken::Paste(t) => crate::gitgate::store_repo_token(&slug, t).map(|_| ()),
+        AddToken::Paste(t) => crate::gitgate::store_repo_token_reaching(&slug, t).map(|_| ()),
         AddToken::Share(credential) => crate::gitgate::share_credential(credential, &slug),
     };
     if let Err(why) = saved {
@@ -637,6 +637,10 @@ mod tests {
             format!("[url \"http://127.0.0.1:{port}/\"]\n\tinsteadOf = https://github.com/\n"),
         )
         .unwrap();
+        // A pasted token is asked what else it can push to before it is saved
+        // (`gitgate::reach_beyond`). Nothing listens here, so that asks nobody, and the test that
+        // wants GitHub to answer points this at its own stub.
+        env.set("SKEIN_GITHUB_API", "http://127.0.0.1:1");
         env.set("GIT_CONFIG_GLOBAL", &config)
             .set("GIT_CONFIG_NOSYSTEM", "1")
             .set("NO_PROXY", "127.0.0.1")

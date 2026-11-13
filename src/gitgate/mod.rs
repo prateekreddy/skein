@@ -32,8 +32,12 @@
 //! credential to hand over; it cannot stop anyone taking the other one. A token covering three
 //! repositories is therefore write access to three repositories for every box that receives it,
 //! however carefully the helper offers it for one. One repo per token means the credential a box
-//! holds is already exactly as narrow as its rights, so nothing has to be trusted to stay in its
-//! lane — and that is the default. Since 2026-09-29 the owner may share one token between repos
+//! holds is as narrow as its rights — **provided the token itself is**: skein stores it for one
+//! repository, but GitHub decides what it reaches, and a fine-grained token made for "All
+//! repositories", or any classic token, reaches far more than the repository it is stored for.
+//! skein asks GitHub what else each stored token can push to, when it is saved and every twenty
+//! minutes, and says so on its cards (`credentials::reach_beyond`); it warns rather than refuses.
+//! That is the default. Since 2026-09-29 the owner may share one token between repos
 //! (SKEIN-1231, "Allow sharing, with a warning"): the add dialog, or since SKEIN-1241 a repo's
 //! card, states that the boxes of every repo sharing it can then push to all of them, and only
 //! that share makes a multi-repo entry
@@ -48,8 +52,9 @@
 //! ever reads a file. No new transport, and nothing to be down.
 //!
 //! **What this gate is, precisely.** Unlike [`crate::substrate`], the boundary here is real: GitHub
-//! enforces it server-side, so a box acting with a token scoped to one repository cannot touch
-//! another with it.
+//! enforces it server-side, so a box acting with a token GitHub scopes to one repository cannot
+//! touch another with it. The scope that counts is the one GitHub holds for the token, not the
+//! repository skein stored it for — see above.
 //!
 //! **And what bounds the box, not just the token — SKEIN-548, now closed for the git path.**
 //! Measured from inside a live box on 2026-09-06/07/11 and again 2026-09-15: the sandbox routes HTTP

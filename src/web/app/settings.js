@@ -477,6 +477,24 @@ function nonGitHubHost(source) {
   const host = (at >= 0 ? afterScheme.slice(at + 1) : afterScheme).split(/[:/]/)[0];
   return host && host.toLowerCase() !== "github.com" ? host : "";
 }
+// **A token GitHub lets push further than skein stores it for** (`gitgate::reach_beyond`, asked
+// when it is saved and every twenty minutes). It keeps working — boxes push with it today — so this
+// says what it lets their boxes do and the two ways to end that. "" when the last check found nothing.
+function tokenReachNote(c) {
+  if (!c || c.problem || !c.has_token) return "";
+  const own = esc(reposPhrase(c.repos && c.repos.length ? c.repos : [c.repo]));
+  if (c.reaches_all) {
+    return `This is a classic token, so the boxes of ${own} can push to every repository your GitHub account can push to. `
+      + `To stop that, replace it with a fine-grained token for ${own} only`;
+  }
+  const more = c.reaches_more || [];
+  if (!more.length) return "";
+  const one = more.length === 1;
+  return `The boxes of ${own} can also push to ${esc(reposPhrase(more))} with this token. `
+    + `To stop that, narrow the token on GitHub to ${own} only. `
+    + `If you want ${one ? "that repo" : "those repos"} to have it, share it with ${one ? "it" : "them"} on purpose from ${one ? "its card" : "their cards"}. `
+    + `skein looks again within 20 minutes`;
+}
 // A repo's write token, on the repo's own card — because "which token does *this* repo push with"
 // is a question about the repo, and answering it three panes away is how it went unfound.
 function repoTokenRow(r) {
@@ -511,6 +529,11 @@ function repoTokenRow(r) {
     // It pushes, but its boxes cannot see whether CI passed (SKEIN-1338).
     : c.cannot_read ? `<div class="set-cred"><span class="sq-state">can't read checks</span><span class="cwhy">It can push, but GitHub won't let it read CI results: ${esc(c.cannot_read)}. Add those permissions to the token on GitHub; skein looks again within 20 minutes</span></div>`
     : "";
+  // It pushes further than it is stored for: said beside whatever else is said, never instead.
+  const reachNote = tokenReachNote(c);
+  const reach = reachNote
+    ? `<div class="set-cred" data-reach><span class="sq-state">reaches more repos</span><span class="cwhy">${reachNote}</span></div>`
+    : "";
   // **Use the token another repo has, from an existing card** (SKEIN-1241, amending SKEIN-1231's
   // "only when adding"). Every repository that gains access is named before the button is pressed,
   // and the host asks GitHub whether the token can push here before anything is saved.
@@ -534,7 +557,7 @@ function repoTokenRow(r) {
       + `<div class="set-cred"><span class="sq-state approved">shared token</span><span class="cwhy">replacing it here replaces it for all ${all}; to stop sharing, paste a token for ${esc(slug)} alone</span></div>`
       + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (paste a token)" autocomplete="off" />`
       + `<button type="button" class="kbtn" data-rotatetoken="${esc(c.id)}" data-slug="${esc(slug)}" data-id="${esc(r.id)}">Replace for all ${all}</button>`
-      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div>${checked}${share}</div>`;
+      + `<button type="button" class="kbtn ghost" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Use for ${esc(slug)} alone</button></div>${checked}${reach}${share}</div>`;
   }
   const state = c && !c.problem && c.has_token
     ? `<span class="sq-state approved">token stored</span><span class="cwhy">boxes push with it, and your queue, reviews and merges here run on it; storing another replaces it</span>`
@@ -551,7 +574,7 @@ function repoTokenRow(r) {
   // is Forget, ahead of the field — so a click on "Write token" deleted the token (SKEIN-1259).
   return `<div class="set-field"><span class="set-title">Write token<span class="rsaved" data-saved="${esc(r.id)}-token">saved</span></span>`
     + `<span class="desc">a fine-grained GitHub token covering <b>${esc(slug)}</b> and nothing else. This repo's boxes push with it, and skein reads your review queue, posts your reviews and merges here with it, ahead of <code>$GH_TOKEN</code> and <code>gh</code>. Stored 0600 on the host and never served back</span>`
-    + `<div class="set-cred">${state}</div>${checked}${appFlag}`
+    + `<div class="set-cred">${state}</div>${checked}${reach}${appFlag}`
     + `<div class="path-row"><input type="password" data-repotoken="${esc(slug)}" data-id="${esc(r.id)}" placeholder="github_pat_… (write to ${esc(slug)})" autocomplete="off" />`
     + `<button type="button" class="kbtn" data-storetoken="${esc(slug)}" data-id="${esc(r.id)}">Store</button></div>${share}</div>`;
 }
