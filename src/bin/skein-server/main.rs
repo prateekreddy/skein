@@ -400,6 +400,11 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
                 for said in skein::gitgate::recheck_unchecked() {
                     eprintln!("skein: {said}");
                 }
+                // And every stored token is asked what else it can push to, so a token made for
+                // "All repositories", or widened on GitHub since, is shown on its card as one.
+                for said in skein::gitgate::recheck_reach() {
+                    eprintln!("skein: {said}");
+                }
             })
             .await;
         }

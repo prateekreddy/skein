@@ -223,7 +223,7 @@ pub(super) fn git_scope_health() -> HealthCheck {
             "Settings → GitHub & keys → add a GitHub App, or a write token on the card of each repo in use under Settings → Repositories",
         ),
         Active { app, tokens } => HealthCheck::satisfied(format!(
-            "on — a box's own token writes only its own repo{}.{}{}",
+            "on — a box's own token writes only its own repo{}.{}{}{}",
             // A shared token is the exception, and the line is untrue without it (SKEIN-1231).
             match crate::gitgate::write_credentials()
                 .iter()
@@ -242,6 +242,22 @@ pub(super) fn git_scope_health() -> HealthCheck {
             match tokens {
                 0 => String::new(),
                 n => format!(" {n} stored repo token(s)"),
+            },
+            // Unless GitHub lets the token push further than it is stored for, which skein found
+            // by asking (`gitgate::reach_beyond`). Said, not refused: those boxes push with it.
+            match crate::gitgate::write_credentials()
+                .iter()
+                .filter(|c| c.problem().is_none())
+                .filter_map(|c| c.reach_warning())
+                .collect::<Vec<_>>()
+            {
+                found if found.is_empty() => String::new(),
+                found => format!(
+                    " But GitHub lets some tokens push further: {}. Narrow each on GitHub, or \
+                     share it with those repos on purpose from their cards in Settings → \
+                     Repositories.",
+                    found.join("; ")
+                ),
             }
         )),
     }

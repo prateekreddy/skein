@@ -38,6 +38,8 @@ const WRONG = "skein-test-token-for-another-repo";
 const UNASKED = "skein-test-saved-while-github-was-down";
 // A token that pushes and cannot read check runs or Actions (SKEIN-1338).
 const NO_CHECKS = "skein-test-token-that-cannot-read-checks";
+// A token GitHub lets push to another of acme's repositories too — one made for "All repositories".
+const REACHES = "skein-test-token-for-all-of-acme";
 
 function git(cwd, ...args) {
   return execFileSync("git", args, {
@@ -105,13 +107,22 @@ function startPrivateHost(fx) {
 
 // GitHub's `GET /repos/{slug}`, for the push check a share and a card's save make. `push` is what
 // the test says it is; a token in `refuse` gets GitHub's 401, and `down` answers every request 503.
-// With `noChecks`, the check-runs and Actions reads a saved token is asked about answer 403.
+// With `noChecks`, the check-runs and Actions reads a saved token is asked about answer 403. With
+// `siblings`, acme lists another repository, and git's push endpoint — which `$SKEIN_GITHUB_API`
+// sends here too — lets `REACHES` push to it and turns every other credential away.
 function startGitHubApi() {
-  const state = { push: false, asked: [], refuse: new Set(), down: false, noChecks: false };
+  const state = { push: false, asked: [], refuse: new Set(), down: false, noChecks: false, siblings: false };
+  const reaches = "Basic " + Buffer.from(`x-access-token:${REACHES}`).toString("base64");
   const server = http.createServer((req, res) => {
     state.asked.push(req.url);
     const auth = req.headers.authorization || "";
+    if (req.url.includes(".git/info/refs")) {
+      res.writeHead(state.siblings && auth === reaches && req.url.startsWith("/acme/elsewhere.git/") ? 200 : 403);
+      return res.end();
+    }
     const [code, answer] = state.down ? [503, { message: "Service Unavailable" }]
+      : state.siblings && req.url.startsWith("/orgs/acme/repos")
+        ? [200, [{ full_name: "acme/second" }, { full_name: "acme/elsewhere" }]]
       : [...state.refuse].some(t => auth.includes(t)) ? [401, { message: "Bad credentials" }]
       : state.noChecks && /\/(check-runs|actions\/runs)(\?|$)/.test(req.url)
         ? [403, { message: "Resource not accessible by personal access token" }]
@@ -318,6 +329,23 @@ try {
   check("and it was saved", tokenFile("acme-second"), NO_CHECKS);
   api.state.noChecks = false;
 
+  // A token GitHub lets push to another of acme's repos is saved, and its card says so and how to
+  // end it. **What would make this fail:** the save not asking what else the token reaches
+  // (`reach_beyond`), `reaches_more` not served by `/api/fleet/git-grants`, or not drawn by
+  // `repoTokenRow`.
+  api.state.siblings = true;
+  await cardBody().locator(`[data-repotoken="acme/second"]`).fill(REACHES);
+  await cardBody().locator("button", { hasText: "Store" }).click();
+  await until(async () => ((await cardBody().locator(".rbody").textContent()) || "").includes("reaches more repos"));
+  check("a token that can push to another repo says on its card which, and the two ways out",
+    ((await cardBody().locator(".rbody").textContent()) || "").replace(/\s+/g, " ")
+      .split("reaches more repos")[1]?.includes("The boxes of acme/second can also push to acme/elsewhere with this token. To stop that, narrow the token on GitHub to acme/second only. If you want that repo to have it, share it with it on purpose from its card. skein looks again within 20 minutes"),
+    true);
+  check("and it was saved, not refused", tokenFile("acme-second"), REACHES);
+  check("asked through git's push endpoint, not the API's permissions",
+    api.state.asked.some(u => u === "/acme/elsewhere.git/info/refs?service=git-receive-pack"), true);
+  api.state.siblings = false;
+
   // --- an existing repo uses the token another repo has, from its card (SKEIN-1241) -------------
   const priv = () => page.locator(`[data-card="private"]`);
   await priv().locator(".rhead").click();
@@ -351,7 +379,7 @@ try {
   // --- no token bytes anywhere a person or a log can read them -------------------------------------
   // **What would make this fail:** a route echoing its request, an error carrying git's command line
   // with a token in a URL, or a page drawing a stored token back.
-  const leaks = where => [LET_IN, WRONG, UNASKED, NO_CHECKS].filter(t => where.includes(t));
+  const leaks = where => [LET_IN, WRONG, UNASKED, NO_CHECKS, REACHES].filter(t => where.includes(t));
   check("no /api/ response carried a token", { answers: answers.length > 10, leaked: leaks(answers.join("\n")) },
     { answers: true, leaked: [] });
   check("nor does the page", leaks(await page.content()), []);

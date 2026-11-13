@@ -8,8 +8,9 @@ use super::*;
 /// A fine-grained PAT its owner minted by hand: for **one** repository, unless they chose to share it.
 ///
 /// The alternative to the App, for someone who would rather not install one across their account at
-/// all: a token they created themselves, scoped in GitHub's own UI to exactly the repositories they
-/// chose. skein never sees anything wider, and cannot — the token *is* the scope.
+/// all: a token they created themselves, scoped in GitHub's own UI to the repositories they chose.
+/// The token *is* the scope, whatever skein stores it for: one made for "All repositories", or a
+/// classic token, can push wherever GitHub lets it — which is why skein asks ([`reach_beyond`]).
 ///
 /// **One repository per token, unless the person shares it on purpose — and sharing has a cost that
 /// is stated before it is made.** A token that reaches several repositories hands every one of them
@@ -38,9 +39,16 @@ use super::*;
 ///   for as long as any repository is left on it.
 ///
 /// The repository names here are a **claim**, not the enforcement. GitHub enforces what the token
-/// can reach; this is how skein knows which repo to hand it to. Getting it wrong costs a token that
-/// does not work, never one that works too well — which is why the share is checked against GitHub
-/// rather than taken on trust.
+/// can reach; this is only how skein knows which repo to hand it to. A claim naming a repo the token
+/// cannot reach costs a token that does not work there. A claim narrower than the token costs one
+/// that works too well: the credential helper offers it to git for the claimed repos alone, but the
+/// box's `gh` shim exports it for every call and anything in the box can read its file, so every
+/// box holding it can push wherever GitHub lets it. So the claim is checked against GitHub both
+/// ways. A share is saved only once GitHub says the token can push to the repository joining
+/// ([`check_token`]). What else it can push to is asked when it is saved and on the
+/// twenty-minute tick ([`reach_beyond`], [`recheck_reach`]), kept as
+/// [`WriteCredential::reaches_more`] and shown on its cards — warned about, not refused, since
+/// its boxes push with it today.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WriteCredential {
     #[serde(default)]
@@ -75,9 +83,38 @@ pub struct WriteCredential {
     /// the twenty-minute tick asks again while it is set, so adding them on GitHub clears it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cannot_read: String,
+    /// GitHub let this token push to these repositories too, though it is not stored for them —
+    /// what [`reach_beyond`] found when it was saved or last rechecked. Every box that holds the
+    /// token can push to them with it, whatever `repos` says. Not a reason to refuse it: it works
+    /// for its own repos, and boxes push with it today. Cleared by a later check that finds none,
+    /// and a repo comes off it when the person shares the token with that repo on purpose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaches_more: Vec<String>,
+    /// A classic token (`ghp_`, or one GitHub answers with OAuth scopes): it reaches every
+    /// repository the account can push to, so nothing narrower can be said about it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reaches_all: bool,
 }
 
 impl WriteCredential {
+    /// What the boxes holding this token can push to beyond what it is stored for, in words, or
+    /// `None` when the last check found nothing — for the health line; the cockpit says it from
+    /// the two fields itself.
+    pub fn reach_warning(&self) -> Option<String> {
+        let own = repos_phrase(&self.repos);
+        match (self.reaches_all, self.reaches_more.as_slice()) {
+            (true, _) => Some(format!(
+                "the token {own} uses is a classic token, so the boxes of {own} can push to every \
+                 repository your GitHub account can push to"
+            )),
+            (false, []) => None,
+            (false, more) => Some(format!(
+                "the boxes of {own} can also push to {} with the token {own} uses",
+                repos_phrase(more)
+            )),
+        }
+    }
+
     /// Why this credential must not be handed to a box, or `None` if it may be.
     ///
     /// Checked when read and not only when written, because `github-pats.json` is an ordinary file
@@ -292,6 +329,17 @@ pub fn store_repo_token(slug: &str, token: &str) -> Result<String, String> {
     store_repo_token_marked(slug, token, &Checked::default())
 }
 
+/// [`store_repo_token`], for a token the add dialog's clone has just shown reaches `slug`: GitHub is
+/// asked first what else it can push to ([`reach_beyond`]), and the entry is written with the
+/// answer, so a token made for "All repositories" says so on its card from the start.
+pub fn store_repo_token_reaching(slug: &str, token: &str) -> Result<String, String> {
+    let checked = Checked {
+        reach: reach_beyond(&Secret::new(token.trim()), &[slug.to_string()]),
+        ..Checked::default()
+    };
+    store_repo_token_marked(slug, token, &checked)
+}
+
 /// [`store_repo_token`], with the entry written already marked [`WriteCredential::unchecked`] when
 /// `unchecked` says why GitHub could not be asked — in the same write, so there is no moment in
 /// which a token nobody checked reads as checked.
@@ -327,6 +375,8 @@ fn store_repo_token_marked(slug: &str, token: &str, checked: &Checked) -> Result
             repos: vec![slug.to_string()],
             unchecked: checked.unchecked.clone(),
             cannot_read: checked.cannot_read.clone(),
+            reaches_more: checked.reach.more.clone(),
+            reaches_all: checked.reach.all,
             ..Default::default()
         });
         Ok(id)
@@ -439,6 +489,8 @@ pub fn share_credential(id: &str, slug: &str) -> Result<(), String> {
             c.repos.push(slug.to_string());
         }
         c.shared = c.repos.len() > 1;
+        // Shared with it on purpose now, so no longer reach the person was not told about.
+        c.reaches_more.retain(|r| !same_repo(r, slug));
         Ok(())
     })
 }
@@ -493,6 +545,7 @@ pub fn join_share(id: &str, slug: &str) -> Result<(), String> {
         if let Some(c) = all.iter_mut().find(|c| c.id == id) {
             c.repos.push(slug.to_string());
             c.shared = c.repos.len() > 1;
+            c.reaches_more.retain(|r| !same_repo(r, slug));
         }
         Ok(())
     })?;
@@ -627,6 +680,185 @@ fn repos_phrase<S: AsRef<str>>(list: &[S]) -> String {
     }
 }
 
+// ───────────────────────────── what else a token can push to ─────────────────────────────
+
+/// What a token can push to beyond the repositories it is stored for, as [`reach_beyond`] found it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reach {
+    /// A classic token: it reaches every repository the account can push to.
+    pub all: bool,
+    /// Repositories it is not stored for that GitHub let it push to.
+    pub more: Vec<String>,
+    /// Every question was answered. When one was not, `more` is what was found — true, but perhaps
+    /// not all — and finding nothing says nothing.
+    pub complete: bool,
+}
+
+/// How many of the owner's other repositories [`reach_beyond`] tries: enough to catch a token made
+/// for "All repositories", few enough that a recheck of every token stays a handful of requests.
+const REACH_PROBES: usize = 10;
+
+/// **Can this token push anywhere it is not stored for?** The stored repository list is only a
+/// claim: the credential helper hands the token to git for those repos, but the box's `gh` sees it
+/// for every call and anything in the box can read its file, so whatever GitHub lets the token do,
+/// every box holding it can do. This derives the answer from GitHub instead of trusting the claim.
+///
+/// * **A classic token reaches everything the account can.** Its prefix says so (`ghp_`, and
+///   `gho_` for the OAuth token `gh auth login` makes), or GitHub does: it answers a classic token
+///   with an `X-OAuth-Scopes` header, and one naming `repo` or `public_repo` can push to every
+///   repository, or every public one, the account can. Flagged without probing.
+/// * **Anything else is tried.** The owners of the repos it covers are asked for their other
+///   repositories — one page, most recently pushed first, the token's own view — and up to
+///   [`REACH_PROBES`] it is not stored for are asked, through git's push endpoint
+///   ([`crate::github::can_push_by_git`]), whether this token may push there.
+///
+/// Never `permissions.push` from `GET /repos/{slug}`: on a public repository that is the account's
+/// role, whatever the token was granted — which is how a token made for one repository read as one
+/// that could push to its organisation's other public repos.
+pub fn reach_beyond(token: &Secret, claimed: &[String]) -> Reach {
+    let mut reach = Reach {
+        complete: true,
+        ..Reach::default()
+    };
+    if ["ghp_", "gho_"]
+        .iter()
+        .any(|p| token.expose().starts_with(p))
+    {
+        reach.all = true;
+        return reach;
+    }
+    let mut owners: Vec<String> = Vec::new();
+    for slug in claimed {
+        let owner = slug.split('/').next().unwrap_or_default().to_lowercase();
+        if !owner.is_empty() && !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    for owner in &owners {
+        match owner_repos(token, owner) {
+            Ok((_, true)) => {
+                reach.all = true;
+                return reach;
+            }
+            Ok((names, false)) => candidates.extend(
+                names
+                    .into_iter()
+                    .filter(|n| !claimed.iter().any(|c| same_repo(c, n))),
+            ),
+            Err(_) => reach.complete = false,
+        }
+    }
+    for slug in candidates.into_iter().take(REACH_PROBES) {
+        match crate::github::can_push_by_git(&slug, token) {
+            Ok(true) => reach.more.push(slug),
+            Ok(false) => {}
+            Err(_) => reach.complete = false,
+        }
+    }
+    reach
+}
+
+/// `owner`'s repositories as `token` sees them — an organisation's, or else a user's — that are not
+/// archived, and whether GitHub answered with the scopes of a classic token that can push.
+fn owner_repos(token: &Secret, owner: &str) -> Result<(Vec<String>, bool), String> {
+    let within = std::time::Duration::from_secs(15);
+    let ask = |kind: &str| {
+        let path = format!(
+            "/{kind}/{}/repos?per_page=30&sort=pushed",
+            crate::github::path_segment(owner)
+        );
+        crate::github::get_json_and_headers(&path, token, within)
+    };
+    let (listed, headers) = match ask("orgs") {
+        Err(e) if rejected(&e).is_some_and(|said| said.starts_with("404")) => ask("users")?,
+        other => other?,
+    };
+    let classic = crate::github::header_in(&headers, "x-oauth-scopes").is_some_and(|scopes| {
+        scopes
+            .split(',')
+            .any(|s| matches!(s.trim(), "repo" | "public_repo"))
+    });
+    let names = listed
+        .as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .filter(|r| !r.get("archived").and_then(|a| a.as_bool()).unwrap_or(false))
+                .filter_map(|r| r.get("full_name").and_then(|n| n.as_str()))
+                .filter(|n| slug_is_nameable(n))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((names, classic))
+}
+
+/// Ask [`reach_beyond`] about every usable stored token, and record what it found — the server's
+/// twenty-minute tick, beside [`recheck_unchecked`]. A token stored before this check existed, or
+/// one widened on GitHub since, is found here; one narrowed since has its flag cleared.
+///
+/// Only a complete answer replaces the flag. One that could not ask everything adds what it found
+/// and takes nothing away, since a question it could not ask is not a "no". A repository the token
+/// is stored for by the time the answer is written — shared with it meanwhile — is never listed.
+/// Written only if the token file is the one asked about, as [`recheck_unchecked`] does. Returns a
+/// sentence for each token whose flag this check raised or changed.
+pub fn recheck_reach() -> Vec<String> {
+    let mut said = Vec::new();
+    for c in write_credentials()
+        .into_iter()
+        .filter(|c| c.problem().is_none() && c.turned_down.is_empty())
+    {
+        let path = credential_token_path(&c.id);
+        let written = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let asked_about = written(&path);
+        let Some(token) = crate::secret::read(&path).ok().flatten() else {
+            continue;
+        };
+        let reach = reach_beyond(&token, &c.repos);
+        if !reach.complete && !reach.all && reach.more.is_empty() {
+            continue;
+        }
+        let mut now = None;
+        let wrote =
+            crate::util::update_json(&credentials_path(), |all: &mut Vec<WriteCredential>| {
+                let same = asked_about.is_some() && written(&path) == asked_about;
+                if let Some(entry) = all.iter_mut().find(|e| e.id == c.id).filter(|_| same) {
+                    let before = (entry.reaches_all, entry.reaches_more.clone());
+                    let found = reach
+                        .more
+                        .iter()
+                        .filter(|r| !entry.repos.iter().any(|own| same_repo(own, r)));
+                    match reach.complete || reach.all {
+                        true => {
+                            entry.reaches_all = reach.all;
+                            entry.reaches_more = match reach.all {
+                                true => Vec::new(),
+                                false => found.cloned().collect(),
+                            };
+                        }
+                        false => {
+                            for r in found {
+                                if !entry.reaches_more.iter().any(|m| same_repo(m, r)) {
+                                    entry.reaches_more.push(r.clone());
+                                }
+                            }
+                        }
+                    }
+                    if (entry.reaches_all, entry.reaches_more.clone()) != before {
+                        now = entry.reach_warning();
+                    }
+                }
+                Ok(())
+            });
+        match wrote {
+            Err(why) => said.push(format!("the token {} uses: {why}", repos_phrase(&c.repos))),
+            Ok(()) => said.extend(now),
+        }
+    }
+    said
+}
+
 /// What the check of a token about to be saved found, for the entry it is saved under.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Checked {
@@ -634,6 +866,9 @@ pub struct Checked {
     pub unchecked: String,
     /// [`WriteCredential::cannot_read`]: what it can push to and not read, or empty.
     pub cannot_read: String,
+    /// [`WriteCredential::reaches_more`] and [`WriteCredential::reaches_all`]: what else it can
+    /// push to.
+    pub reach: Reach,
 }
 
 /// Ask GitHub about `token` for every repository in `slugs`, before it is saved (SKEIN-1239).
@@ -648,11 +883,13 @@ pub fn check_new_token(token: &str, slugs: &[String], kept: &str) -> Result<Chec
     if token.is_empty() {
         return Err("no token was given".into());
     }
-    let answers = ask_all(&Secret::new(token), slugs);
+    let token = Secret::new(token);
+    let answers = ask_all(&token, slugs);
     if answers.turned_down.is_empty() {
         return Ok(Checked {
             unchecked: answers.not_asked.join("; "),
             cannot_read: answers.cannot_read.join("; "),
+            reach: reach_beyond(&token, slugs),
         });
     }
     let whys: Vec<&str> = answers
@@ -720,6 +957,8 @@ pub fn mark_checked(id: &str, checked: &Checked) -> Result<(), String> {
         if let Some(c) = all.iter_mut().find(|c| c.id == id) {
             c.unchecked = checked.unchecked.clone();
             c.cannot_read = checked.cannot_read.clone();
+            c.reaches_more = checked.reach.more.clone();
+            c.reaches_all = checked.reach.all;
             c.turned_down.clear();
         }
         Ok(())
@@ -2147,5 +2386,327 @@ mod tests {
         assert!(join_share(&shared, "a/two")
             .unwrap_err()
             .contains("already uses that token"));
+    }
+
+    // ───────────────────────── what else a stored token can push to ─────────────────────────
+
+    /// One answer of [`Github`]: a path (query left off), its status, its body, and any headers.
+    type Route = (String, u16, String, String);
+
+    /// A GitHub whose answers a test can change between checks, and which writes down every path it
+    /// was asked — so "flagged without probing" is a fact about requests, not about a field. It
+    /// serves the REST API and git's push endpoint alike, as `$SKEIN_GITHUB_API` makes it do for
+    /// [`crate::github::can_push_by_git`]; any path it was not told about is a 404.
+    struct Github {
+        url: String,
+        routes: std::sync::Arc<std::sync::Mutex<Vec<Route>>>,
+        asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Github {
+        fn start(routes: Vec<Route>) -> Github {
+            use std::io::{Read as _, Write as _};
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let routes = std::sync::Arc::new(std::sync::Mutex::new(routes));
+            let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (r, a) = (routes.clone(), asked.clone());
+            std::thread::spawn(move || {
+                for mut stream in listener.incoming().flatten() {
+                    let mut buf = [0u8; 8192];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let url = head.split_whitespace().nth(1).unwrap_or("");
+                    let path = url.split('?').next().unwrap_or("").to_string();
+                    a.lock().unwrap().push(url.to_string());
+                    let (status, body, extra) = r
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(p, ..)| *p == path)
+                        .map(|(_, s, b, h)| (*s, b.clone(), h.clone()))
+                        .unwrap_or((404, r#"{"message":"Not Found"}"#.into(), String::new()));
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra}\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                }
+            });
+            Github {
+                url: format!("http://127.0.0.1:{port}"),
+                routes,
+                asked,
+            }
+        }
+
+        /// Answer `path` with `status` from now on.
+        fn answer(&self, path: &str, status: u16) {
+            let mut routes = self.routes.lock().unwrap();
+            routes.retain(|(p, ..)| p != path);
+            routes.push((path.into(), status, "{}".into(), String::new()));
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    fn route(path: &str, status: u16, body: &str) -> Route {
+        (path.into(), status, body.into(), String::new())
+    }
+
+    /// `a/one` pushes and reads; `a`'s repositories are `listing`; git's push endpoint answers each
+    /// of `pushes` with its status.
+    fn github_for_a(listing: &str, pushes: &[(&str, u16)]) -> Github {
+        let mut routes = vec![
+            route(
+                "/repos/a/one",
+                200,
+                r#"{"permissions":{"push":true},"default_branch":"main"}"#,
+            ),
+            route("/repos/a/one/commits/main/check-runs", 200, "{}"),
+            route("/repos/a/one/actions/runs", 200, "{}"),
+            route("/orgs/a/repos", 200, listing),
+        ];
+        for (slug, status) in pushes {
+            routes.push(route(&format!("/{slug}.git/info/refs"), *status, ""));
+        }
+        Github::start(routes)
+    }
+
+    fn pinned(env: &mut crate::testutil::EnvPins, home: &crate::testutil::TempDir, api: &str) {
+        let home: &std::path::Path = home.as_ref();
+        env.set("SKEIN_FLEET_ROOT", home.join("boxes"));
+        env.set("SKEIN_GITHUB_API", api);
+    }
+
+    const LISTING: &str = r#"[{"full_name":"a/one"},{"full_name":"a/two"},
+        {"full_name":"a/three"},{"full_name":"a/four","archived":true}]"#;
+
+    /// **A classic token is flagged as reaching everything, and nobody is asked to prove it; it is
+    /// still saved and still handed to its repo's boxes.**
+    ///
+    /// What fails it: dropping the `ghp_` prefix from [`reach_beyond`] — the token is then tried
+    /// against `a/two`, found there, and stored as `reaches_more = [a/two]` with `reaches_all`
+    /// false; dropping the `X-OAuth-Scopes` reading — the second token, which has no prefix, is
+    /// likewise tried and listed instead of flagged.
+    #[test]
+    fn a_classic_token_is_flagged_as_reaching_every_repo_without_being_tried() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let api = github_for_a(LISTING, &[("a/two", 200), ("a/three", 200)]);
+        pinned(&mut env, &home, &api.url);
+
+        store_repo_token_checked("a/one", "ghp_skein-test-classic")
+            .expect("a classic token is warned about, never refused");
+        let (c, token) =
+            credential_for("a/one").expect("the classic token is not handed to a/one's boxes");
+        assert_eq!(token.expose(), "ghp_skein-test-classic");
+        assert_eq!((c.reaches_all, c.reaches_more.clone()), (true, vec![]));
+        assert!(
+            !api.asked()
+                .iter()
+                .any(|p| p.contains(".git/info/refs") || p.starts_with("/orgs/")),
+            "a classic token was tried, when its prefix already says what it reaches: {:?}",
+            api.asked()
+        );
+        assert!(c
+            .reach_warning()
+            .unwrap()
+            .contains("can push to every repository your GitHub account can push to"));
+
+        // No prefix, but GitHub answers with the scopes only a classic token has.
+        api.routes.lock().unwrap().iter_mut().for_each(|r| {
+            if r.0 == "/orgs/a/repos" {
+                r.3 = "X-OAuth-Scopes: repo, workflow\r\n".into();
+            }
+        });
+        store_repo_token_checked("a/one", "skein-test-old-style").unwrap();
+        let c = credential_for("a/one").unwrap().0;
+        assert_eq!((c.reaches_all, c.reaches_more), (true, vec![]));
+        assert!(!api.asked().iter().any(|p| p.contains(".git/info/refs")));
+    }
+
+    /// **A token GitHub lets push to a sibling repo is flagged with that sibling, and keeps working;
+    /// one it does not let push is not listed, nor is an archived one tried.**
+    ///
+    /// What fails it: [`crate::github::can_push_by_git`] reading 403 as "can push" — a/three is
+    /// then listed; [`reach_beyond`] not asking at all, or `store_repo_token_marked` not writing
+    /// what it found — `reaches_more` is empty; the save refusing a token that reaches
+    /// more — `store_repo_token_checked` errs and `credential_for` has nothing.
+    #[test]
+    fn a_token_that_can_push_to_a_sibling_is_flagged_with_it_and_still_works() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let api = github_for_a(
+            LISTING,
+            &[("a/two", 200), ("a/three", 403), ("a/four", 200)],
+        );
+        pinned(&mut env, &home, &api.url);
+
+        store_repo_token_checked("a/one", "github_pat_skein-test-all-repos")
+            .expect("a token that reaches more is warned about, never refused");
+        let (c, token) = credential_for("a/one").expect("it no longer reaches a/one's boxes");
+        assert_eq!(token.expose(), "github_pat_skein-test-all-repos");
+        assert_eq!(
+            c.repos,
+            vec!["a/one".to_string()],
+            "the claim itself changed"
+        );
+        assert_eq!(
+            (c.reaches_all, c.reaches_more.clone()),
+            (false, vec!["a/two".to_string()])
+        );
+        assert_eq!(
+            c.reach_warning().as_deref(),
+            Some("the boxes of a/one can also push to a/two with the token a/one uses")
+        );
+        assert!(
+            !api.asked().iter().any(|p| p.starts_with("/a/four.git")),
+            "an archived repo was tried: {:?}",
+            api.asked()
+        );
+        assert!(api
+            .asked()
+            .iter()
+            .any(|p| p == "/a/two.git/info/refs?service=git-receive-pack"));
+    }
+
+    /// **A token that can push to its own repo alone is not flagged — even where the REST API says
+    /// the account may push to the others**, which on a public repo it does whatever the token was
+    /// granted (the oyster-monorepo report).
+    ///
+    /// What fails it: probing with `GET /repos/{slug}`'s `permissions.push` (or [`check_token`])
+    /// instead of git's push endpoint — every sibling here answers `push: true` there, so all
+    /// three would be listed.
+    #[test]
+    fn a_token_that_cannot_push_to_its_siblings_is_not_flagged_whatever_the_account_may_do() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let api = github_for_a(LISTING, &[("a/two", 403), ("a/three", 401)]);
+        for slug in ["a/two", "a/three", "a/four"] {
+            api.routes.lock().unwrap().push(route(
+                &format!("/repos/{slug}"),
+                200,
+                r#"{"permissions":{"push":true}}"#,
+            ));
+        }
+        pinned(&mut env, &home, &api.url);
+
+        store_repo_token_checked("a/one", "github_pat_skein-test-one-repo").unwrap();
+        let c = credential_for("a/one").unwrap().0;
+        assert_eq!((c.reaches_all, c.reaches_more.clone()), (false, vec![]));
+        assert_eq!(c.reach_warning(), None);
+        assert!(
+            api.asked()
+                .iter()
+                .any(|p| p.starts_with("/a/two.git/info/refs")),
+            "the siblings were never asked, so 'not flagged' proves nothing: {:?}",
+            api.asked()
+        );
+    }
+
+    /// **A shared token is flagged only for repos outside its share, and sharing it with the repo
+    /// it was flagged for takes the flag off.**
+    ///
+    /// What fails it: [`reach_beyond`] trying the repos the entry is stored for (no `claimed`
+    /// filter) — a/one and a/two, which it shares, come back as reach when the shared token is
+    /// replaced (the tick's own write-time filter hides them there, so the replace is the half that
+    /// sees it); `mark_checked` not writing the new token's answer — the old flag stays;
+    /// `share_credential` not dropping the repo it now covers from `reaches_more` — a/three stays
+    /// flagged after it joins.
+    #[test]
+    fn a_shared_token_is_flagged_only_for_repos_outside_its_share() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let api = github_for_a(LISTING, &[("a/one", 200), ("a/two", 200), ("a/three", 200)]);
+        pinned(&mut env, &home, &api.url);
+        let id = store_repo_token("a/one", "github_pat_skein-test-shared").unwrap();
+        share_credential(&id, "a/two").unwrap();
+
+        assert!(recheck_reach()
+            .iter()
+            .any(|s| s.contains("can also push to a/three")));
+        let c = credential_for("a/two").unwrap().0;
+        assert_eq!(c.repos, vec!["a/one".to_string(), "a/two".to_string()]);
+        assert_eq!(c.reaches_more, vec!["a/three".to_string()]);
+
+        // Replaced by a token that cannot push to a/three: the check made while saving it is
+        // written over the old token's flag, and the repos it shares are still not reach.
+        api.routes.lock().unwrap().push(route(
+            "/repos/a/two",
+            200,
+            r#"{"permissions":{"push":true}}"#,
+        ));
+        api.answer("/a/three.git/info/refs", 403);
+        replace_token_checked(&id, "github_pat_skein-test-shared-rotated").unwrap();
+        let c = credential_for("a/two").unwrap().0;
+        assert_eq!(
+            c.reaches_more,
+            Vec::<String>::new(),
+            "the replaced token's flag outlived it, or a repo it is shared with was reported"
+        );
+
+        api.answer("/a/three.git/info/refs", 200);
+        recheck_reach();
+        assert_eq!(
+            credential_for("a/two").unwrap().0.reaches_more,
+            vec!["a/three".to_string()]
+        );
+        share_credential(&id, "a/three").unwrap();
+        let c = credential_for("a/three").unwrap().0;
+        assert_eq!(
+            c.reaches_more,
+            Vec::<String>::new(),
+            "shared on purpose, still flagged"
+        );
+    }
+
+    /// **The flag clears when a later check finds nothing — and only then: a check GitHub could not
+    /// answer leaves it, and nothing is ever taken from the boxes.**
+    ///
+    /// What fails it: `recheck_reach` writing only when something was found — the narrowed token
+    /// stays flagged; replacing the flag on an incomplete answer — the round where a/two is not
+    /// answered drops it.
+    #[test]
+    fn the_flag_clears_on_a_later_clean_check_and_not_on_an_unanswered_one() {
+        let (_lock, home, mut env) = fresh_home();
+        let _hold = crate::github::HoldClear::new();
+        let api = github_for_a(LISTING, &[("a/two", 200), ("a/three", 403)]);
+        pinned(&mut env, &home, &api.url);
+        store_repo_token_checked("a/one", "github_pat_skein-test-narrowed-later").unwrap();
+        assert_eq!(
+            credential_for("a/one").unwrap().0.reaches_more,
+            vec!["a/two".to_string()]
+        );
+
+        api.answer("/a/two.git/info/refs", 503);
+        recheck_reach();
+        assert_eq!(
+            credential_for("a/one").unwrap().0.reaches_more,
+            vec!["a/two".to_string()],
+            "a check GitHub did not answer cleared the flag"
+        );
+        // Unanswered for a/two, and a/three lets it in now: what was found is added, and the one
+        // it could not ask about is kept.
+        api.answer("/a/three.git/info/refs", 200);
+        recheck_reach();
+        assert_eq!(
+            credential_for("a/one").unwrap().0.reaches_more,
+            vec!["a/two".to_string(), "a/three".to_string()],
+            "a partial answer replaced the flag rather than adding to it"
+        );
+        api.answer("/a/three.git/info/refs", 403);
+
+        // Narrowed on GitHub: a/two refuses it now.
+        api.answer("/a/two.git/info/refs", 403);
+        assert!(recheck_reach().is_empty(), "clearing is not news");
+        let (c, token) = credential_for("a/one").unwrap();
+        assert_eq!((c.reaches_all, c.reaches_more), (false, vec![]));
+        assert_eq!(token.expose(), "github_pat_skein-test-narrowed-later");
     }
 }

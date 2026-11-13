@@ -38,6 +38,8 @@ const source = [
   "gitLast", "renderReviewIdentityNote",
   // The App misconfigured flag (SKEIN-1344), on the status line and the repo card.
   "appReadsNote", "appReadsFor",
+  // A token GitHub lets push further than it is stored for, on both rows (`gitgate::reach_beyond`).
+  "tokenReachNote",
   // The per-repository "Your GitHub identity" rows (SKEIN-1179) and the words they are drawn in.
   "IDENTITY_WORDS", "renderIdentity",
   // A card with a decision in flight is drawn disabled (SKEIN-1296), a refusal is read by one
@@ -573,6 +575,31 @@ check("an App that cannot read CI here is flagged on the card",
 check("and a repo with its own token is not",
   T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" }).includes("App misconfigured"), false);
 T.setGitLast({ credentials: [], ready: false });
+
+// A token GitHub lets push further than it is stored for: both rows say what that lets the boxes
+// do and the two ways out, and the token is still "stored" — warned about, never refused. Fails if
+// `tokenReachNote` is dropped from either row, or the flag replaces the row's other state.
+T.setCreds([{ id: "acme-thing", repo: "acme/thing", repos: ["acme/thing"], has_token: true, problem: "",
+  reaches_more: ["acme/other", "acme/third"] }]);
+const reaching = T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" });
+check("a card whose token reaches more says which repos its boxes can push to with it",
+  reaching.includes("reaches more repos")
+  && reaching.includes("The boxes of acme/thing can also push to acme/other and acme/third with this token. To stop that, narrow the token on GitHub to acme/thing only. If you want those repos to have it, share it with them on purpose from their cards."),
+  true);
+check("and the token is still the one stored", reaching.includes("token stored"), true);
+const reachingRow = T.gitCredRow({ id: "acme-thing", repo: "acme/thing", repos: ["acme/thing"], label: "", has_token: true, problem: "",
+  reaches_more: ["acme/other"] });
+check("the settings pane says it too, still ready",
+  reachingRow.includes("The boxes of acme/thing can also push to acme/other with this token") && reachingRow.includes("ready")
+  && reachingRow.includes("share it with it on purpose from its card"), true);
+T.setCreds([{ id: "acme-thing", repo: "acme/thing", repos: ["acme/thing"], has_token: true, problem: "", reaches_all: true }]);
+check("a classic token says it reaches every repo the account can push to",
+  T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" })
+    .includes("This is a classic token, so the boxes of acme/thing can push to every repository your GitHub account can push to. To stop that, replace it with a fine-grained token for acme/thing only"),
+  true);
+T.setCreds([{ id: "acme-thing", repo: "acme/thing", repos: ["acme/thing"], has_token: true, problem: "" }]);
+check("and a token that reaches nothing more says nothing about it",
+  T.repoTokenRow({ id: "thing", source: "git@github.com:acme/thing.git", slug: "acme/thing" }).includes("reaches more"), false);
 
 // The regression this row was getting wrong: a repo adopted from a local path whose clone has a
 // GitHub `origin`. The host resolves that and sends the slug; parsing `source` here called it "not

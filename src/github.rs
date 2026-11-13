@@ -265,11 +265,12 @@ fn epoch_now() -> u64 {
 /// [`crate::warden_client::Warden::send_within`] already hold for the fleet, the home and the
 /// warden.
 ///
-/// The guard is here rather than at the six call sites because this is the single place the
-/// default is chosen — and every one of those six hands what it builds straight to [`call`], so
-/// there is no "compute the address without going there" reading to protect, as there is for
-/// [`crate::warden_client::Warden::configured`]. `grep -rn 'api_base' src/` counts nine lines: this
-/// definition, two doc mentions, and six `format!`s that are each an argument to a request.
+/// The guard is here rather than at the call sites because this is the single place the default
+/// is chosen — and every caller hands what it builds straight to a request (`git_base` too, whose
+/// answer is the base of git's push probe), so there is no "compute the address without going
+/// there" reading to protect, as there is for [`crate::warden_client::Warden::configured`]. Read
+/// `grep -rn 'api_base' src/` whole to check it: outside doc comments and tests, every line is a
+/// URL built for a request or `git_base` returning one.
 ///
 /// **What it costs when it is missing is not this test's failure.** An unauthenticated request to
 /// api.github.com is rate-limited per IP, so the budget a stray test spends is the whole box's, and
@@ -401,6 +402,21 @@ fn config(token: &crate::secret::Secret, accept: &str) -> String {
     )
 }
 
+/// The curl options for a call to git's own endpoint on `github.com`, over stdin like [`config`].
+///
+/// git authenticates there with Basic: any username, and the token as the password, which is what
+/// curl's `user` option sends. An empty token is no credential at all, as in [`config`].
+fn git_config(token: &crate::secret::Secret) -> String {
+    let user = match token.expose().is_empty() {
+        true => String::new(),
+        false => format!(
+            "user = \"x-access-token:{}\"\n",
+            token.expose().replace(['"', '\n', '\\'], "")
+        ),
+    };
+    format!("{user}header = \"Accept: */*\"\nheader = \"User-Agent: git/2 (skein)\"\n")
+}
+
 /// One call. Returns the body as text, whatever it is — JSON, a diff, or an error page.
 ///
 /// The status code comes back separately (curl writes it after the body) because the callers need
@@ -446,7 +462,46 @@ fn call_reading_headers(
     timeout: Duration,
     keep_headers: bool,
 ) -> Result<(u16, String, String), String> {
+    let call = Call {
+        accept,
+        timeout,
+        keep_headers,
+        auth: Auth::Api,
+    };
+    call_as(method, url, token, body, call)
+}
+
+/// How a call presents its token: as the REST API's `Bearer`, or as the username and password git
+/// sends to `github.com` — which takes Basic, and answers a `Bearer` header as no credential.
+#[derive(Clone, Copy)]
+enum Auth {
+    Api,
+    Git,
+}
+
+/// The parts of a call that are not the request itself.
+struct Call<'a> {
+    accept: &'a str,
+    timeout: Duration,
+    keep_headers: bool,
+    auth: Auth,
+}
+
+/// [`call_reading_headers`], presenting the token as `how.auth` says.
+fn call_as(
+    method: &str,
+    url: &str,
+    token: &crate::secret::Secret,
+    body: Option<&str>,
+    how: Call,
+) -> Result<(u16, String, String), String> {
     use std::io::Write;
+    let Call {
+        accept,
+        timeout,
+        keep_headers,
+        auth,
+    } = how;
     // The hold, checked before anything is spent. `/rate_limit` is exempt: it is free, and it is
     // the endpoint the hold itself is learned from, so gating it would leave no way back out.
     let exempt = url.ends_with("/rate_limit");
@@ -585,7 +640,11 @@ fn call_reading_headers(
     let _forwarding = crate::util::forwarding(child.id() as libc::pid_t);
     {
         let mut pipe = child.stdin.take().ok_or("curl took no stdin")?;
-        pipe.write_all(config(token, accept).as_bytes())
+        let options = match auth {
+            Auth::Api => config(token, accept),
+            Auth::Git => git_config(token),
+        };
+        pipe.write_all(options.as_bytes())
             .map_err(|e| format!("curl: {e}"))?;
     }
     // The pipes are drained WHILE waiting, and this line is load-bearing: a pipe holds about
@@ -734,6 +793,87 @@ pub(crate) fn expiry_in_headers(headers: &str) -> Option<&str> {
             .eq_ignore_ascii_case("github-authentication-token-expiration")
             .then(|| value.trim())
     })
+}
+
+/// `GET`, as JSON, with the response headers — for the one answer GitHub puts in a header rather
+/// than the body: which OAuth scopes a classic token carries (`X-OAuth-Scopes`), read alongside a
+/// listing the caller wanted anyway, so it costs no request of its own.
+pub(crate) fn get_json_and_headers(
+    path: &str,
+    token: &crate::secret::Secret,
+    timeout: Duration,
+) -> Result<(serde_json::Value, String), String> {
+    let url = format!("{}{path}", api_base());
+    let (status, body, headers) = ask_twice(|| {
+        call_reading_headers(
+            "GET",
+            &url,
+            token,
+            None,
+            "application/vnd.github+json",
+            timeout,
+            true,
+        )
+    })?;
+    json((status, body)).map(|v| (v, headers))
+}
+
+/// A header's value out of a raw header block, by case-insensitive name, trimmed of its `\r`.
+pub(crate) fn header_in(headers: &str, name: &str) -> Option<String> {
+    headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
+}
+
+/// Where git's own endpoints live: `https://github.com`, or — in a world where
+/// `$SKEIN_GITHUB_API` points the API at a stub — that same stub, so a test never reaches the real
+/// `github.com` and needs no second seam. Their paths cannot collide: the API's begin `/repos/`,
+/// `/user`, `/orgs/`, and git's are `/<owner>/<name>.git/…`.
+fn git_base() -> String {
+    match std::env::var("SKEIN_GITHUB_API")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(_) => api_base(),
+        // `api_base` refuses an unpinned test process, so this does too.
+        None if crate::util::in_test() => api_base(),
+        None => "https://github.com".into(),
+    }
+}
+
+/// **Can `token` push to `slug`?** — asked of git's own push endpoint, not the REST API.
+///
+/// `GET /<slug>.git/info/refs?service=git-receive-pack` is the first request every `git push`
+/// over HTTPS makes, and GitHub decides there whether the credential may push: a push that is not
+/// allowed fails at this request, before any data is sent ("The requested URL returned error:
+/// 403"). Without a credential it is a 401 even on a public repository whose fetch half
+/// (`git-upload-pack`) answers anyone — measured from a box on 2026-11-13 against
+/// `octocat/Hello-World`: upload-pack 200, receive-pack 401 with no credential and 401 with a
+/// garbage one. So 200 is "this token can push here", and 401, 403 or 404 are "it cannot".
+///
+/// Not `GET /repos/{slug}`'s `permissions.push`: on a public repository that reports what the
+/// **account** may do there, whatever the token was granted.
+pub(crate) fn can_push_by_git(slug: &str, token: &crate::secret::Secret) -> Result<bool, String> {
+    let url = format!(
+        "{}/{}.git/info/refs?service=git-receive-pack",
+        git_base(),
+        path_segments(slug)
+    );
+    let how = || Call {
+        accept: "*/*",
+        timeout: Duration::from_secs(15),
+        keep_headers: false,
+        auth: Auth::Git,
+    };
+    let (status, body, _) = ask_twice(|| call_as("GET", &url, token, None, how()))?;
+    match status {
+        200..=299 => Ok(true),
+        401 | 403 | 404 => Ok(false),
+        _ => Err(complaint(status, &body)),
+    }
 }
 
 /// [`get_json`], with the caller's own budget. For the endpoints whose answers are measured in
