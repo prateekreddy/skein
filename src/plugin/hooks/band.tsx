@@ -117,7 +117,8 @@ const CLEAN_TIMEOUT_MS = 600_000
 const CLEAN_DESCRIPTION =
   'What in this box can be removed and made again: its download caches, build output and ' +
   "scratchpads, and the repo's shared download cache, each with its size and whether it is safe " +
-  'to remove now. Call it with no paths to see the list; pass paths from that list to remove ' +
+  "to remove now. Items left by finished work, such as a merged branch's build output, come " +
+  'first and say why. Call it with no paths to see the list; pass paths from that list to remove ' +
   'them. The same as the skein_clean tool: nothing else is removed, a link is never followed, ' +
   'and config and logins are never on the list.'
 

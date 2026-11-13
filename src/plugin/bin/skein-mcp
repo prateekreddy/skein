@@ -683,7 +683,7 @@ def clean_rows(sig):
             # holds no cargo lock.
             why = "a process in this box is using it now"
             held.append(len(rows))
-        rows.append({
+        row = {
             "path": path,
             "in_box": in_box(path, views or []),
             "kind": kind,
@@ -692,7 +692,14 @@ def clean_rows(sig):
             "root": box_root,
             "safe_now": why is None,
             "why_not": why,
-        })
+        }
+        # skein's word on finished work (`fleet::tidy::classify`): what the item was left by, and
+        # the worktree that can go with it, which this tool never removes.
+        if it.get("class") == "dead" and isinstance(it.get("dead_because"), str):
+            row["finished_work"] = it["dead_because"]
+            if isinstance(it.get("worktree"), str) and it["worktree"]:
+                row["worktree"] = it["worktree"]
+        rows.append(row)
     if held:
         named = holders([rows[i]["in_box"] for i in held])
         for i in held:
@@ -703,6 +710,8 @@ def clean_rows(sig):
                 rows[i]["why_not"] = "a build is running in it now: %s" % who
             else:
                 rows[i]["why_not"] = "%s in this box is using it now" % who
+    # Finished work first, then the list's own order, biggest first (2026-11-13).
+    rows.sort(key=lambda r: "finished_work" not in r)
     out = {"listed_at": clean.get("at"), "items": rows}
     rc = clean.get("repo_cache")
     if isinstance(rc, dict) and isinstance(rc.get("path"), str):
@@ -1888,7 +1897,8 @@ TOOLS = [
         "description": "What in this box can be removed and made again: its download caches, build "
         "output and scratchpads, the repo's old download cache, and the tool versions in the repo's "
         "tools area nobody has used for a while, each with its size and whether it is safe to remove "
-        "now. Call it with no paths to see the list; pass paths from "
+        "now. Items left by finished work, such as a merged branch's build output, come first and "
+        "say why. Call it with no paths to see the list; pass paths from "
         "that list to remove them. Nothing else is removed, a link is never followed, and config "
         "and logins are never on the list.",
         "inputSchema": {
