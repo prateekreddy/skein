@@ -472,7 +472,8 @@ fn call_reading_headers(
 }
 
 /// How a call presents its token: as the REST API's `Bearer`, or as the username and password git
-/// sends to `github.com` — which takes Basic, and answers a `Bearer` header as no credential.
+/// sends to `github.com`, whose push endpoint challenges for Basic (`WWW-Authenticate: Basic
+/// realm="GitHub"`, measured 2026-11-13).
 #[derive(Clone, Copy)]
 enum Auth {
     Api,
@@ -847,12 +848,13 @@ fn git_base() -> String {
 /// **Can `token` push to `slug`?** — asked of git's own push endpoint, not the REST API.
 ///
 /// `GET /<slug>.git/info/refs?service=git-receive-pack` is the first request every `git push`
-/// over HTTPS makes, and GitHub decides there whether the credential may push: a push that is not
-/// allowed fails at this request, before any data is sent ("The requested URL returned error:
-/// 403"). Without a credential it is a 401 even on a public repository whose fetch half
-/// (`git-upload-pack`) answers anyone — measured from a box on 2026-11-13 against
+/// over HTTPS makes, and GitHub decides there whether the credential may push: a push it will not
+/// allow is refused at this request, before any data is sent, which git reports as "The requested
+/// URL returned error: 403". Without a credential it is a 401 even on a public repository whose
+/// fetch half (`git-upload-pack`) answers anyone — measured from a box on 2026-11-13 against
 /// `octocat/Hello-World`: upload-pack 200, receive-pack 401 with no credential and 401 with a
-/// garbage one. So 200 is "this token can push here", and 401, 403 or 404 are "it cannot".
+/// garbage one. A real token without push rights was not measured: no token here may be spent on
+/// it. So 200 is "this token can push here", and 401, 403 or 404 are "it cannot".
 ///
 /// Not `GET /repos/{slug}`'s `permissions.push`: on a public repository that reports what the
 /// **account** may do there, whatever the token was granted.
