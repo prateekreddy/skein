@@ -1247,6 +1247,55 @@ fn a_path_not_on_the_list_is_refused_and_nothing_is_removed() {
     );
 }
 
+/// **`skein_clean` lists finished work first and says why**, with the worktree that can go with
+/// it, ahead of bigger items that only speed up the next run (2026-11-13: two merged lanes' build
+/// folders, 15G, were listed as plain build output beside the build output the box was using).
+///
+/// What would make it fail: the tool dropping skein's class (no `finished_work`), or keeping the
+/// list's own order, biggest first (the 4K pip cache first). Watched: with the `rows.sort` line
+/// removed from `clean_rows`, the pip cache came first and this failed.
+#[test]
+fn the_list_puts_finished_work_first_and_says_why() {
+    let b = Box_::new("skein-tools-it-clean-dead");
+    let c = Cleanable::plant(&b);
+    b.put("fleet/web-main/tree/.worktrees/a/target/debug/x", "built");
+    let dead = c
+        .root
+        .join("tree/.worktrees/a/target")
+        .display()
+        .to_string();
+    let worktree = c.root.join("tree/.worktrees/a").display().to_string();
+    let file = json!({
+        "at": stamp_ago(5),
+        "disk": {"mb": 2048, "limit_mb": 10240, "fleet": "under", "fleet_over_by_mb": 0},
+        "asks": [],
+        "clean": {
+            "at": stamp_ago(30),
+            "box_root": c.root.display().to_string(),
+            "items": [
+                {"path": c.pip(), "shown": "~/.cache/pip", "kind": "download cache",
+                 "bytes": 8192, "class": "warm"},
+                {"path": dead, "shown": "tree/.worktrees/a/target", "kind": "build output",
+                 "bytes": 4096, "class": "dead", "dead_because": "lane/a is merged into master",
+                 "worktree": worktree},
+            ],
+        },
+    });
+    b.put("state/signals/resources.json", &file.to_string());
+    let listing = b.call("web-main", "skein_clean", json!({}));
+    let items = listing["items"].as_array().expect("a list");
+    assert_eq!(items.len(), 2, "{listing}");
+    assert_eq!(
+        items[0]["path"],
+        json!(dead),
+        "finished work is not first: {listing}"
+    );
+    assert_eq!(items[0]["finished_work"], "lane/a is merged into master");
+    assert_eq!(items[0]["worktree"], json!(worktree));
+    assert_eq!(items[0]["safe_now"], true, "{listing}");
+    assert!(items[1].get("finished_work").is_none(), "{listing}");
+}
+
 /// A process that takes an exclusive `flock` on the file it is given and holds it itself, as cargo
 /// does. Not `flock(1)` handing its descriptor to a child: `/proc/locks` lists a lock under the pid
 /// that took it, and hides it once that pid is gone, so a lock `flock(1)` took and then left to

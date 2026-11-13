@@ -29,6 +29,12 @@
 # most hourly. Whether a disk ask holds at all is skein's call, not this script's: an ask with no
 # `hold` words is one skein wants told and not held.
 #
+# A disk ask is never held, reminded or started on a file that predates a removal (2026-11-13). skein
+# measures the box's disk every five minutes and lists its items as often, so in the minute after
+# the agent clears something the file still asks for it, by path. When anything skein listed in this
+# box is no longer there, the hooks say nothing about disk and record nothing, and skein's next file,
+# a minute away at most, measures afresh and names only what is left.
+#
 # It never stops, kills or slows anything, and a hold never repeats: a deny that repeated would trap
 # an agent that cannot comply, and the kernel's limits hold whether or not the agent acts.
 #
@@ -119,6 +125,33 @@ def silent(s, seen):
     ]
 
 
+def gone_since_listed(s):
+    """Whether an item skein listed in this box is no longer there, as this box sees it: at its own
+    path, which the launcher binds at the same name, or under `$HOME` or `/var/tmp` for the box's
+    `home` and `vartmp`. False when the list's box directory is not to be seen here at all, so a box
+    that cannot see its own paths keeps every hold it had."""
+    clean = s.get("clean") if isinstance(s, dict) else None
+    if not isinstance(clean, dict):
+        return False
+    root = clean.get("box_root")
+    if not isinstance(root, str) or not root.startswith("/") or not os.path.isdir(root):
+        return False
+    root = root.rstrip("/")
+    views = [(root + "/home", os.environ.get("HOME", "")), (root + "/vartmp", "/var/tmp")]
+    for it in clean.get("items") or []:
+        path = it.get("path") if isinstance(it, dict) else None
+        if not isinstance(path, str) or not path.startswith(root + "/"):
+            continue
+        seen = [path] + [
+            view + path[len(prefix):]
+            for prefix, view in views
+            if view and (path == prefix or path.startswith(prefix + "/"))
+        ]
+        if not any(os.path.lexists(p) for p in seen):
+            return True
+    return False
+
+
 def hook_input():
     try:
         return json.load(sys.stdin)
@@ -150,10 +183,14 @@ def fresh_notes(s, seen):
     """The notes this session has not been told, less the box-once notes the box has been told,
     and less those it cannot record for the box: one said and not recorded would be said again."""
     told = shown(box_file())
+    # A disk note names paths, so none is said on a file that predates a removal; unrecorded, it
+    # is said from the next.
+    stale = gone_since_listed(s)
     fresh = [
         n for n in notes(s)
         if n["crossing_id"] not in seen
         and not (n.get("kind") in BOX_ONCE and n["crossing_id"] in told)
+        and not (stale and str(n.get("kind", "")).startswith("disk"))
     ]
     once = [n["crossing_id"] for n in fresh if n.get("kind") in BOX_ONCE]
     if once and not record(box_file(), once):
@@ -227,7 +264,8 @@ def context(event, lines):
 def session_start():
     path = shown_file(hook_input().get("session_id", ""))
     s = signals()
-    told = [a for a in asks(s) if a.get("start")]
+    stale = gone_since_listed(s)
+    told = [a for a in asks(s) if a.get("start") and not (stale and a["kind"] == "disk")]
     seen = shown(path) if path else set()
     fresh = fresh_notes(s, seen) if path else []
     ids = [a["crossing_id"] for a in told] + [n["crossing_id"] for n in fresh] + silent(s, seen)
@@ -249,6 +287,10 @@ def pre_tool_use():
     if quiet:
         record(path, quiet)
     unshown = [a for a in asks(s) if a["crossing_id"] not in seen and a.get("hold")]
+    # Not on a file that predates a removal: it may ask for what is gone, by name. Unrecorded, so
+    # the next file holds if the box is still over.
+    if any(a["kind"] == "disk" for a in unshown) and gone_since_listed(s):
+        unshown = [a for a in unshown if a["kind"] != "disk"]
     now, said = time.time(), disk_said(path)
     # A disk hold within the hour: this crossing waits, unrecorded, and holds a call once the hour
     # is up if it still stands.
@@ -280,13 +322,14 @@ def prompt():
     said = disk_said(path) if path else {}
     lines = []
     s = signals()
+    stale = gone_since_listed(s)
     for a in asks(s):
         if not a.get("remind"):
             continue
         if a["kind"] == "disk":
             # Hourly, and only once the hour is recorded: a reminder that could not be recorded
-            # would be given on every prompt.
-            if not path or recent(said, "warned", now):
+            # would be given on every prompt. Never on a file that predates a removal.
+            if not path or stale or recent(said, "warned", now):
                 continue
             if not disk_record(path, dict(said, warned=now)):
                 continue

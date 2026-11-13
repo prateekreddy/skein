@@ -4,8 +4,9 @@
 //! Every item on [`box_cleanables`]' list gets a class:
 //!
 //!   * **dead**: it belongs to something finished. The build output of a linked worktree whose
-//!     branch is merged into the default branch's remote head, whose pull request is merged or
-//!     closed, or whose upstream git marks gone; build output under a checkout's `.worktrees/<name>`
+//!     branch is merged into the default branch's remote head or into the box's own checkout of
+//!     the default branch, whose pull request is merged or closed, or whose upstream git marks
+//!     gone; build output under a checkout's `.worktrees/<name>`
 //!     when that worktree is no longer there; the scratchpads of ended sessions; and a download
 //!     cache the box no longer uses because its repo's tools area holds that cache now.
 //!   * **warm**: everything else. It speeds up the next run, so it is kept until the disk is short.
@@ -15,6 +16,13 @@
 //! that check is skipped rather than guessed. Ancestry alone is not enough either: a branch made a
 //! moment ago from the remote head is its ancestor too, so ancestry counts only for a branch whose
 //! reflog shows a commit made on it.
+//!
+//! **Merged here counts.** A coordinator merges its lanes into its own checkout of the default
+//! branch and pushes later, or never (2026-11-13: two merged lanes' build folders, 15G, were offered
+//! as plain build output on a box at 23.9G of its 10G). A branch whose every commit is in the main
+//! checkout's branch, when that branch is the default one, is finished for its worktree and its
+//! build output: nothing in them is not also in that branch. It is not finished for the branch
+//! itself, which may still need pushing, and skein never offers the branch.
 //!
 //! **Source is never dead.** A worktree's own files are not on the list and never will be. Its
 //! regenerable output is dead only when its branch is finished and nothing in it is uncommitted or
@@ -189,6 +197,9 @@ struct Ref {
     track: String,
     /// Commits on the branch the default remote head does not have, when there is one.
     ahead: Option<u64>,
+    /// Commits on the branch the main checkout's default branch does not have, when the main
+    /// checkout has the default branch checked out.
+    ahead_here: Option<u64>,
 }
 
 /// One repository: its default remote head and its branches.
@@ -196,6 +207,9 @@ struct Ref {
 struct Repo {
     /// `refs/remotes/origin/HEAD`'s target, or `origin/main` or `origin/master`. Empty when none.
     base: String,
+    /// The branch the main checkout has checked out, when it is the default one: the remote
+    /// head's name, or `main` or `master` with no remote head. Empty otherwise, or when bare.
+    here: String,
     refs: HashMap<String, Ref>,
 }
 
@@ -225,8 +239,8 @@ fn prelude(box_dir: &Path, inbox: &InBox) -> String {
 }
 
 /// The first script: for each linked worktree, its repository, branch and whether it has commits
-/// of its own, read from its git files; then, once per repository, the default remote head and
-/// one `git for-each-ref` over its branches.
+/// of its own, read from its git files; then, once per repository, the default remote head, the
+/// main checkout's branch when it is the default one, and one `git for-each-ref` over its branches.
 fn refs_script(box_dir: &Path, inbox: &InBox, worktrees: &[&Path]) -> String {
     let mut s = prelude(box_dir, inbox);
     s.push_str("cs=\n");
@@ -256,9 +270,12 @@ fi
   [ -n "$c" ] || continue
   d=$(git --git-dir="$c" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null) || d=
   if [ -z "$d" ]; then for x in main master; do if git --git-dir="$c" rev-parse -q --verify "refs/remotes/origin/$x" >/dev/null 2>&1; then d="refs/remotes/origin/$x"; break; fi; done; fi
-  printf 'repo\t%s\t%s\n' "$c" "$d"
+  m=; if [ "$(git --git-dir="$c" config --bool core.bare 2>/dev/null)" != true ]; then m=$(git --git-dir="$c" symbolic-ref -q --short HEAD 2>/dev/null) || m=; fi
+  case "$d:$m" in ?*:*) [ "$m" = "${d#refs/remotes/origin/}" ] || m= ;; :main|:master) ;; *) m= ;; esac
+  printf 'repo\t%s\t%s\t%s\n' "$c" "$d" "$m"
   f='%(refname:lstrip=2)%09%(objectname)%09%(upstream)%09%(upstream:track,nobracket)'
-  if [ -n "$d" ]; then a="$f%09%(ahead-behind:$d)"; else a="$f"; fi
+  if [ -n "$d" ]; then a="$f%09%(ahead-behind:$d)"; else a="$f%09-"; fi
+  if [ -n "$m" ]; then a="$a%09%(ahead-behind:refs/heads/$m)"; fi
   { git -c core.fsmonitor=false --git-dir="$c" for-each-ref --format="$a" refs/heads 2>/dev/null || git -c core.fsmonitor=false --git-dir="$c" for-each-ref --format="$f" refs/heads 2>/dev/null; } | while IFS= read -r l; do printf 'ref\t%s\n' "$l"; done
 done
 "#,
@@ -282,25 +299,29 @@ fn parse_refs(out: &str) -> (HashMap<String, Worktree>, HashMap<String, Repo>) {
                     },
                 );
             }
-            ["repo", c, d] => {
-                repos.entry(c.to_string()).or_default().base = d.to_string();
+            ["repo", c, d, here @ ..] => {
+                let repo = repos.entry(c.to_string()).or_default();
+                repo.base = d.to_string();
+                repo.here = here.first().map(|h| h.to_string()).unwrap_or_default();
                 current = Some(c.to_string());
             }
             ["ref", name, tip, upstream, track, rest @ ..] => {
                 let Some(repo) = current.as_ref().and_then(|c| repos.get_mut(c)) else {
                     continue;
                 };
-                let ahead = rest
-                    .first()
-                    .and_then(|ab| ab.split_whitespace().next())
-                    .and_then(|a| a.parse().ok());
+                let ahead_of = |at: usize| {
+                    rest.get(at)
+                        .and_then(|ab| ab.split_whitespace().next())
+                        .and_then(|a| a.parse().ok())
+                };
                 repo.refs.insert(
                     name.to_string(),
                     Ref {
                         tip: tip.to_string(),
                         upstream: upstream.to_string(),
                         track: track.to_string(),
-                        ahead,
+                        ahead: ahead_of(0),
+                        ahead_here: ahead_of(1),
                     },
                 );
             }
@@ -472,6 +493,9 @@ pub fn classify(
         base: &'a str,
         finished: Option<String>,
         by_prs: bool,
+        /// Finished by being merged into the main checkout's default branch: its commits are
+        /// there, so it is not unfinished for want of a push.
+        here: bool,
     }
     let mut branches: Vec<Branch> = Vec::new();
     for w in &worktrees {
@@ -485,14 +509,18 @@ pub fn classify(
             continue;
         };
         let default = repo.base.rsplit_once("origin/").map_or("", |(_, b)| b);
-        if wt.branch.is_empty() || wt.branch == default {
+        if wt.branch.is_empty() || wt.branch == default || wt.branch == repo.here {
             continue;
         }
         let b = said(&wt.branch);
+        let mut here = false;
         let finished = if wt.own && !repo.base.is_empty() && r.ahead == Some(0) {
             Some(format!("{b} is merged"))
         } else if r.track == "gone" {
             Some(format!("{b}'s upstream is gone"))
+        } else if wt.own && !repo.here.is_empty() && r.ahead_here == Some(0) {
+            here = true;
+            Some(format!("{b} is merged into {}", said(&repo.here)))
         } else {
             None
         };
@@ -503,6 +531,7 @@ pub fn classify(
             base: &repo.base,
             finished,
             by_prs: false,
+            here,
         });
     }
     let key = |b: &Branch| (name.clone(), b.wt.repo.clone(), b.wt.branch.clone());
@@ -564,8 +593,10 @@ pub fn classify(
         };
         // Unpushed: ahead of its upstream while it still has one, or, with none, commits the
         // default remote head does not have, unless its merged or closed pull request is at its
-        // tip, which says they were pushed.
+        // tip, which says they were pushed. A branch merged into the main checkout's default
+        // branch has every commit there, which is what pushing would keep.
         let unpushed = match (b.r.upstream.is_empty(), b.r.track.as_str()) {
+            _ if b.here => false,
             (false, "gone") => false,
             (false, track) => track.contains("ahead"),
             (true, _) => !b.by_prs && !b.base.is_empty() && b.r.ahead.is_none_or(|a| a > 0),
@@ -975,6 +1006,73 @@ mod tests {
         );
         assert_eq!(got[&live].class, WARM, "{:?}", got[&live]);
         assert_eq!(got[&fresh].class, WARM, "{:?}", got[&fresh]);
+    }
+
+    /// **A branch merged into the box's own master and not pushed is finished for its worktree's
+    /// output**, which is dead and names the branch it is merged into, with the worktree offered;
+    /// while a branch with a commit made since the merge, one never merged, and one made a moment
+    /// ago from master stay warm, and so does a merged one while the main checkout is on another
+    /// branch (2026-11-13: a coordinator's two merged lanes, 15G, were offered as plain build
+    /// output).
+    ///
+    /// What would make it fail: ancestry read only against `origin/HEAD` (`lane/a` warm, the
+    /// incident); the unpushed rule applied to it (warm again, since `origin` has none of its
+    /// commits); ancestry counted without a commit of the branch's own (`lane/fresh` dead); the
+    /// main checkout's branch not compared with the default one (`lane/a` dead off `side`).
+    #[test]
+    fn a_branch_merged_into_the_boxs_own_master_has_dead_output() {
+        let b = Box_::new();
+        let merged = b.lane("a", true);
+        let after = b.lane("later", true);
+        let live = b.lane("b", true);
+        let fresh = b.lane("fresh", false);
+        let local_merge = |n: &str| {
+            git(
+                &b.tree,
+                &[
+                    "merge",
+                    "-q",
+                    "--no-ff",
+                    "-m",
+                    "merge",
+                    &format!("lane/{n}"),
+                ],
+            )
+        };
+        local_merge("a");
+        local_merge("later");
+        std::fs::write(b.worktree("later").join("more"), "more\n").unwrap();
+        git(&b.worktree("later"), &["add", "more"]);
+        git(&b.worktree("later"), &["commit", "-qm", "more"]);
+        let items = [
+            (merged.as_str(), "build output"),
+            (after.as_str(), "build output"),
+            (live.as_str(), "build output"),
+            (fresh.as_str(), "build output"),
+        ];
+        let got = b.classify(&items, false, &mut GhCache::default(), 0);
+        assert_eq!(
+            got[&merged],
+            Classed {
+                class: DEAD,
+                because: "lane/a is merged into master".into(),
+                worktree: b.worktree("a").display().to_string(),
+            }
+        );
+        for (path, what) in [
+            (&after, "a commit since"),
+            (&live, "never merged"),
+            (&fresh, "fresh"),
+        ] {
+            assert_eq!(got[path].class, WARM, "{what}: {:?}", got[path]);
+        }
+
+        git(&b.tree, &["checkout", "-q", "-b", "side"]);
+        let off = b.classify(&items[..1], false, &mut GhCache::default(), 0);
+        assert_eq!(
+            off[&merged].class, WARM,
+            "merged into a branch that is not the default one"
+        );
     }
 
     /// **A squash-merged branch, which is no ancestor of the remote head, is dead through its pull

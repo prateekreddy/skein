@@ -88,6 +88,13 @@ pub const TIDY_MIN_BYTES: u64 = 500 * 1024 * 1024;
 /// session, so this is per box.
 pub const TIDY_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How much of what was in use must come free, while a disk ask stands, before the box is told so
+/// at its next turn rather than at the ask's next hourly reminder (2026-11-13: a coordinator told
+/// "0.3G can be cleared now" while its lanes built was not told again when the builds ended, and
+/// 15G sat clearable until the hour was up). The same floor as [`TIDY_MIN_BYTES`]: less is not
+/// worth a turn's tokens.
+pub const FREED_MIN_BYTES: u64 = 500 * 1024 * 1024;
+
 /// The kinds an ask can be. **There is no `cpu`**, and the plugin's hook holds only for these.
 pub const ASK_KINDS: [&str; 3] = ["disk", "memory", "pids"];
 
@@ -296,6 +303,10 @@ pub struct Note {
     /// has dropped under the line and crossed it once more.
     #[serde(default)]
     pub text: String,
+    /// For a `disk-freed` note, the items it has told of that are still listed, so an item is
+    /// told of once however often a build starts and ends in it. Empty for every other kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// A box's disk ask as its signal file says it. A contract like [`CleanList`]: fields are only
@@ -839,9 +850,59 @@ fn tidy_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note>
             since: out.at.clone(),
             crossing_id: format!("disk-tidy-{}", r.at.timestamp_millis()),
             text,
+            ..Default::default()
         }),
         None => None,
     }
+}
+
+/// The note for what has come free (2026-11-13): while a disk ask stands, items that were in use
+/// on the last tick and can be removed now, coming to at least [`FREED_MIN_BYTES`], are told at
+/// the box's next turn. A new fact, so a new crossing, outside the ask's hourly cadence; the ask
+/// itself, its crossing and its hold are untouched (owner, SKEIN-1475: a build ending inside a held
+/// crossing is the same crossing). Each item is told of once while it is listed, so a lane whose
+/// build starts and stops all afternoon is not told each time. Carried silent between crossings,
+/// and gone with the ask. Unlisted, it is carried as it was.
+fn freed_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note> {
+    let before = prev.and_then(|p| p.notes.iter().find(|n| n.kind == "disk-freed"));
+    if !out.asks.iter().any(|a| a.kind == "disk") {
+        return None;
+    }
+    let Some(clean) = r.clean.as_ref() else {
+        return before.cloned();
+    };
+    let listed = |p: &str| clean.items.iter().any(|i| i.path == p);
+    let mut told: Vec<String> = before
+        .map(|n| n.paths.iter().filter(|p| listed(p)).cloned().collect())
+        .unwrap_or_default();
+    let was_live = |p: &str| {
+        prev.and_then(|s| s.clean.as_ref())
+            .is_some_and(|c| c.items.iter().any(|i| i.path == p && i.live))
+    };
+    let freed: Vec<CleanItem> = removable_now(Some(clean))
+        .into_iter()
+        .filter(|i| was_live(&i.path) && !told.contains(&i.path))
+        .collect();
+    let bytes: u64 = freed.iter().map(|i| i.bytes).sum();
+    let text = match bytes >= FREED_MIN_BYTES {
+        true => words::freed(&freed),
+        false => String::new(),
+    };
+    if !text.is_empty() {
+        told.extend(freed.iter().map(|i| i.path.clone()));
+        return Some(Note {
+            kind: "disk-freed".into(),
+            since: out.at.clone(),
+            crossing_id: format!("disk-freed-{}", r.at.timestamp_millis()),
+            text,
+            paths: told,
+        });
+    }
+    before.map(|n| Note {
+        text: String::new(),
+        paths: told,
+        ..n.clone()
+    })
 }
 
 /// Box `name`'s freshly listed items, each with its class and when it was last used
@@ -1075,12 +1136,16 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
                 since,
                 crossing_id,
                 text,
+                ..Default::default()
             });
         }
         Band::Unknown => out.notes.extend(prev_note.cloned()),
         Band::NotAsked => {}
     }
     if let Some(note) = tidy_note(prev, r, &out) {
+        out.notes.push(note);
+    }
+    if let Some(note) = freed_note(prev, r, &out) {
         out.notes.push(note);
     }
     match memory_band(cg, throttled_per_min, prev_rate) {
@@ -1245,19 +1310,74 @@ mod words {
             .filter(|i| nameable(&i.shown) && nameable(&i.path))
             .take(3)
             .collect();
-        let sized: Vec<String> = named
+        if named.is_empty() {
+            return CLEAN.to_string();
+        }
+        // Finished work first, and said to be (2026-11-13): a lane's merged build folder is not
+        // the same ask as the build output the box is using.
+        let (dead, warm): (Vec<&CleanItem>, Vec<&CleanItem>) = named
             .iter()
-            .map(|i| format!("{} ({})", i.shown, gib_up(i.bytes.div_ceil(1024 * 1024))))
-            .collect();
-        let list = match sized.as_slice() {
-            [] => return CLEAN.to_string(),
-            [one] => one.clone(),
-            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            .partition(|i| i.class == crate::fleet::tidy::DEAD);
+        let warm_list = and_list(warm.iter().map(|i| sized(i)).collect());
+        let list = match (dead.is_empty(), warm.is_empty()) {
+            (true, _) => warm_list,
+            (false, true) => format!(
+                "finished work: {}",
+                and_list(dead.iter().map(|i| sized(i)).collect())
+            ),
+            (false, false) => format!(
+                "finished work: {}, then {warm_list}",
+                and_list(dead.iter().map(|i| sized(i)).collect())
+            ),
         };
         let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
         format!(
             "{CLEAN} The first to go {} {list}; to remove {} now, call `skein_clean` with {}.",
             if named.len() == 1 { "is" } else { "are" },
+            if named.len() == 1 { "it" } else { "them" },
+            serde_json::json!({ "paths": paths }),
+        )
+    }
+
+    /// An item as the words name it: `~/.cache/pip (3.2G)`, and for a dead one why, as
+    /// `.worktrees/a/target (7.7G, lane/a is merged)`.
+    fn sized(i: &CleanItem) -> String {
+        let size = gib_up(i.bytes.div_ceil(MIB));
+        match (i.class == crate::fleet::tidy::DEAD, i.dead_because.as_str()) {
+            (true, why) if !why.is_empty() => format!("{} ({size}, {why})", i.shown),
+            _ => format!("{} ({size})", i.shown),
+        }
+    }
+
+    /// `a`, `a and b`, `a, b and c`.
+    fn and_list(items: Vec<String>) -> String {
+        match items.as_slice() {
+            [] => String::new(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    }
+
+    /// The note for what has come free while a disk ask stands ([`freed_note`]): the items, each
+    /// with its size and, when dead, why, how much that comes to, and the exact `skein_clean` call.
+    /// Empty when none can be named.
+    pub(super) fn freed(items: &[CleanItem]) -> String {
+        let named: Vec<&CleanItem> = items
+            .iter()
+            .filter(|i| nameable(&i.shown) && nameable(&i.path))
+            .take(TIDY_NAMED)
+            .collect();
+        if named.is_empty() {
+            return String::new();
+        }
+        let bytes: u64 = named.iter().map(|i| i.bytes).sum();
+        let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
+        format!(
+            "skein: {} {} no longer in use, so {} more of this box's disk can be cleared now. To \
+             remove {}, call `skein_clean` with {}.",
+            and_list(named.iter().map(|i| sized(i)).collect()),
+            if named.len() == 1 { "is" } else { "are" },
+            gib_up(bytes.div_ceil(MIB)),
             if named.len() == 1 { "it" } else { "them" },
             serde_json::json!({ "paths": paths }),
         )
@@ -1314,17 +1434,7 @@ mod words {
         if named.is_empty() {
             return String::new();
         }
-        let listed: Vec<String> = named
-            .iter()
-            .map(|i| {
-                format!(
-                    "{} ({}, {})",
-                    i.shown,
-                    gib_up(i.bytes.div_ceil(MIB)),
-                    i.dead_because
-                )
-            })
-            .collect();
+        let listed: Vec<String> = named.iter().map(|i| sized(i)).collect();
         let paths: Vec<&str> = named.iter().map(|i| i.path.as_str()).collect();
         let mut text = format!(
             "skein: housekeeping. These are left from finished work and can go: {}. To remove \
@@ -1846,6 +1956,7 @@ pub(crate) fn clean_list(
             }
         }
     };
+    drop_gone(&mut list);
     mark_live(&mut list, name, procs);
     if let Some(rc) = list.repo_cache.as_mut() {
         let (running, unknown) = crate::fleet::others_of_box(name, liveness);
@@ -1856,6 +1967,32 @@ pub(crate) fn clean_list(
         }
     }
     Some(list)
+}
+
+/// Whether an item on `list` is no longer there: the box removed it since skein listed it.
+fn any_gone(list: &CleanList) -> bool {
+    list.items
+        .iter()
+        .any(|i| std::fs::symlink_metadata(&i.path).is_err())
+}
+
+/// Whether this tick must measure the fleet's disk afresh: a box removed something its last file
+/// listed, so the disk figure, up to five minutes old, still counts it, and an ask made on it
+/// would ask for what is gone (2026-11-13: a box that had just freed 15.5G was held for 5.4G
+/// more). One fleet walk, the one the figure takes every five minutes anyway, and only on a tick
+/// that finds something gone.
+fn measure_afresh<'a>(prevs: impl IntoIterator<Item = Option<&'a Signals>>) -> bool {
+    prevs
+        .into_iter()
+        .any(|p| p.and_then(|p| p.clean.as_ref()).is_some_and(any_gone))
+}
+
+/// Drop the items that are no longer there, checked every tick: a carried list is up to
+/// [`CLEAN_LIST_EVERY`] old, and an ask must never name a path the box has already removed
+/// (2026-11-13: a command was held naming two 7G build folders the box had removed a minute before).
+fn drop_gone(list: &mut CleanList) {
+    list.items
+        .retain(|i| std::fs::symlink_metadata(&i.path).is_ok());
 }
 
 /// Mark each of box `name`'s items live or not, read every tick like the repo's other boxes in
@@ -1899,6 +2036,17 @@ fn mark_live(list: &mut CleanList, name: &str, procs: &mut Option<crate::fleet::
 pub fn write_every_box() -> Result<usize, String> {
     let root = crate::fleet::box_state_root();
     let entries = std::fs::read_dir(&root).map_err(|e| format!("{root}: {e}"))?;
+    let boxes: Vec<(String, PathBuf, Option<Signals>)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            (!name.starts_with('.') && entry.path().is_dir())
+                .then(|| (name, entry.path(), read(&entry.path())))
+        })
+        .collect();
+    if measure_afresh(boxes.iter().map(|(_, _, prev)| prev.as_ref())) {
+        crate::fleet::disturbing(&[crate::signal::Remembered::BoxDisk], || ());
+    }
     // One reading of the fleet's disk for every box, so no two boxes are told about two fleets.
     let measured = crate::fleet::fleet_resources().is_some();
     let demand = crate::health::disk_demand();
@@ -1911,13 +2059,7 @@ pub fn write_every_box() -> Result<usize, String> {
     let at = Utc::now();
     let mut written = 0;
     let mut failed = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if name.starts_with('.') || !entry.path().is_dir() {
-            continue;
-        }
+    for (name, path, prev) in boxes {
         let reading = Reading {
             at,
             disk_mb: usage.get(&name).copied(),
@@ -1929,7 +2071,7 @@ pub fn write_every_box() -> Result<usize, String> {
             cgroup: read_cgroup(Path::new(&crate::fleet::box_cgroup(&name))),
             clean: clean_list(
                 &name,
-                read(&entry.path()).and_then(|p| p.clean).as_ref(),
+                prev.and_then(|p| p.clean).as_ref(),
                 &liveness,
                 at,
                 &mut repo_caches,
@@ -1955,7 +2097,7 @@ pub fn write_every_box() -> Result<usize, String> {
             })
             .collect();
         let disk_ask = crate::diskask::for_box(&name).map(DiskAskView::from);
-        match write_box_with(&entry.path(), &reading, updates, disk_ask) {
+        match write_box_with(&path, &reading, updates, disk_ask) {
             Ok(_) => written += 1,
             Err(e) => failed.push(format!("{name}: {e}")),
         }
@@ -4970,11 +5112,13 @@ mod tests {
         assert!(!again.text.is_empty());
     }
 
-    /// **Over the share, the disk ask names dead items first, then warm ones least recently used
-    /// first**, whatever their size (owner, 2026-11-06).
+    /// **Over the share, the disk ask names dead items first, as finished work and why, then warm
+    /// ones least recently used first**, whatever their size (owner, 2026-11-06; 2026-11-13: a
+    /// coordinator's merged lanes were named like the build output it was using).
     ///
     /// What would make it fail: `removable_now` not sorting (the list's own order, biggest first,
-    /// names the 4.0G playwright cache first); warm items sorted newest first. Watched: with the
+    /// names the 4.0G playwright cache first); warm items sorted newest first; `clean_hint` naming a
+    /// dead item without saying it is finished work, or without its reason. Watched: with the
     /// `by_tidiness` call dropped from `removable_now`, this failed naming
     /// ~/.cache/ms-playwright first.
     #[test]
@@ -5007,8 +5151,9 @@ mod tests {
             .expect("no disk ask");
         assert!(
             ask.hold.contains(
-                "The first to go are web-main/tree/.worktrees/a/target (1.0G), \
-                 web-main/tree/target (3.0G) and ~/.cache/ms-playwright (4.0G)"
+                "The first to go are finished work: web-main/tree/.worktrees/a/target (1.0G, \
+                 lane/a is merged), then web-main/tree/target (3.0G) and ~/.cache/ms-playwright \
+                 (4.0G); to remove them now"
             ),
             "{}",
             ask.hold
@@ -5038,5 +5183,249 @@ mod tests {
         assert_eq!(h.context("prompt", "s1"), None);
         assert_eq!(h.context("session-start", "s2"), None, "told again in s2");
         assert_eq!(h.context("prompt", "s3"), None, "told again in s3");
+    }
+
+    // --------------------------------------------------------------------------------------------
+    // What a removal and a finished build change (2026-11-13)
+    // --------------------------------------------------------------------------------------------
+
+    fn freed_of(s: &Signals) -> Option<&Note> {
+        s.notes.iter().find(|n| n.kind == "disk-freed")
+    }
+
+    /// **While a disk ask stands, a build ending frees its folder and that is told as a new fact,
+    /// once**: a new `disk-freed` crossing naming what came free and the call that removes it,
+    /// while the ask keeps its crossing and its hold (owner, SKEIN-1475). Less than 500 MB is not
+    /// told; a folder already told of is not told again when its build starts and ends again; and
+    /// with the ask gone, so is the note.
+    ///
+    /// What would make it fail: no note (the incident: 0.3G said while the lanes built, nothing
+    /// when they finished); [`FREED_MIN_BYTES`] at 0 (the 300M folder told); the told paths not
+    /// kept (a second crossing for the same folder); the ask's crossing minted anew when the build
+    /// ends. Watched: with `freed_note`'s push dropped from `next`, this failed at the first
+    /// `expect`; with `FREED_MIN_BYTES` 0 it failed on the 300M folder; with `told` reset to empty
+    /// each tick it failed on the rebuilt folder.
+    #[test]
+    fn a_build_ending_while_asked_is_told_once_as_a_new_fact() {
+        let small = |live| CleanItem {
+            live,
+            ..item("web-main/tree/.worktrees/s/target", "build output", 300)
+        };
+        let target = |live| CleanItem {
+            live,
+            ..item("web-main/tree/target", "build output", 3072)
+        };
+        let files = run(&[
+            over_with(0, 2048, vec![target(true), small(true)]),
+            over_with(1, 2048, vec![target(true), small(false)]),
+            over_with(2, 2048, vec![target(false), small(false)]),
+            over_with(3, 2048, vec![target(true), small(false)]),
+            over_with(4, 2048, vec![target(false), small(false)]),
+        ]);
+        assert_eq!(freed_of(&files[0]), None);
+        assert_eq!(freed_of(&files[1]), None, "300M coming free was told");
+        let note = freed_of(&files[2])
+            .expect("a 3G build ending was not told")
+            .clone();
+        assert_eq!(
+            note.text,
+            "skein: web-main/tree/target (3.0G) is no longer in use, so 3.0G more of this box's \
+             disk can be cleared now. To remove it, call `skein_clean` with \
+             {\"paths\":[\"/fleet/web-main/tree/target\"]}."
+        );
+        for later in &files[3..] {
+            let carried = freed_of(later).expect("the note was dropped while the ask stands");
+            assert_eq!(
+                (carried.crossing_id.as_str(), carried.text.as_str()),
+                (note.crossing_id.as_str(), ""),
+                "the same folder was told of again"
+            );
+        }
+        let ids: Vec<String> = files.iter().map(|f| disk_ask(f).crossing_id).collect();
+        assert!(ids.iter().all(|id| *id == ids[0]), "{ids:?}");
+        assert!(files.iter().all(|f| !disk_ask(f).hold.is_empty()));
+
+        let under = next(Some(&files[4]), &under_share(5, vec![target(false)]));
+        assert_eq!(freed_of(&under), None, "the note outlived the ask");
+    }
+
+    /// **The shipped hook tells a build's end at the next prompt, inside the hour** in which the
+    /// ask's own reminder is not repeated, and then not again.
+    ///
+    /// What would make it fail: the note given the disk ask's hourly limit in `skein-resources`, or
+    /// not said at all because its kind is filtered. Watched: with the prompt hook's notes said
+    /// only outside the hour since the last disk reminder, nothing was said and this failed.
+    #[test]
+    fn the_hook_tells_a_finished_build_at_the_next_prompt() {
+        let h = hooked();
+        let now = Utc::now();
+        let write = |secs: i64, live: bool| {
+            write_box(
+                &h.state,
+                &Reading {
+                    at: now + chrono::Duration::seconds(secs),
+                    ..over_with(
+                        0,
+                        2048,
+                        vec![CleanItem {
+                            live,
+                            ..running_target(3072)
+                        }],
+                    )
+                },
+            )
+            .unwrap()
+        };
+        let building = write(0, true);
+        assert_eq!(
+            h.context("prompt", "s1").as_deref(),
+            disk_ask(&building).remind.as_deref(),
+            "the ask's reminder, which starts its hour"
+        );
+        let ended = write(60, false);
+        let text = freed_of(&ended).expect("no note").text.clone();
+        assert_eq!(h.context("prompt", "s1"), Some(text));
+        assert_eq!(h.context("prompt", "s1"), None, "told twice");
+    }
+
+    /// A box directory with two build folders of a merged lane each, and a file skein wrote at
+    /// `secs` from now, over its 10G share by `excess` MiB, listing those of `names` given.
+    struct Removed {
+        h: Hooked,
+        _dir: crate::testutil::TempDir,
+        root: PathBuf,
+    }
+
+    impl Removed {
+        fn new() -> Removed {
+            let dir = crate::testutil::tempdir();
+            let base: &Path = dir.as_ref();
+            let root = base.join("web-main");
+            for n in ["a", "b"] {
+                let t = root.join(format!("tree/.worktrees/{n}/target"));
+                std::fs::create_dir_all(&t).unwrap();
+                std::fs::write(t.join("x"), "built").unwrap();
+            }
+            Removed {
+                h: hooked(),
+                _dir: dir,
+                root,
+            }
+        }
+
+        fn target(&self, n: &str) -> String {
+            self.root
+                .join(format!("tree/.worktrees/{n}/target"))
+                .display()
+                .to_string()
+        }
+
+        fn write(&self, secs: i64, excess: u64, names: &[&str]) -> Signals {
+            let at = Utc::now() + chrono::Duration::seconds(secs);
+            let items: Vec<CleanItem> = names
+                .iter()
+                .map(|n| CleanItem {
+                    path: self.target(n),
+                    shown: format!("tree/.worktrees/{n}/target"),
+                    kind: "build output".into(),
+                    bytes: 7 * GIB,
+                    ..Default::default()
+                })
+                .collect();
+            write_box(
+                &self.h.state,
+                &Reading {
+                    at,
+                    clean: Some(CleanList {
+                        at: stamp(at),
+                        box_root: self.root.display().to_string(),
+                        items,
+                        repo_cache: None,
+                        repo_tools: None,
+                    }),
+                    ..over_allowance(0, excess)
+                },
+            )
+            .unwrap()
+        }
+    }
+
+    /// **No command is held, and no disk reminder given, on a file that predates a removal**: the
+    /// agent removed a folder the file names, so its figure and its words are out of date. The
+    /// next file, which no longer lists the folder, holds if the box is still over, and never
+    /// names what is gone.
+    ///
+    /// What would make it fail: the hook holding on the file as it stands (the incident: held for
+    /// 5.4G naming two folders removed a minute before). Watched: with `gone_since_listed` made to
+    /// return False, session s1 was held naming the removed folder and this failed.
+    #[test]
+    fn nothing_is_held_on_a_file_that_predates_a_removal() {
+        let b = Removed::new();
+        b.write(0, 13 * 1024, &["a", "b"]);
+        let before = b.h.tool("s0").expect("the file holds while both are there");
+        assert!(before.contains(&b.target("a")), "{before}");
+
+        std::fs::remove_dir_all(b.target("a")).unwrap();
+        assert_eq!(
+            b.h.tool("s1"),
+            None,
+            "held on a file that names a removed folder"
+        );
+        assert_eq!(b.h.context("prompt", "s1"), None, "reminded from it");
+
+        b.write(60, 6 * 1024, &["b"]);
+        let after = b.h.tool("s1").expect("the next file, still over, holds");
+        assert!(
+            !after.contains(&b.target("a")),
+            "named what is gone: {after}"
+        );
+        assert!(after.contains(&b.target("b")), "{after}");
+    }
+
+    /// **A carried list drops what the box has removed, on the next tick, and that tick measures
+    /// the disk afresh**, rather than waiting out the five minutes until the box is listed again.
+    ///
+    /// What would make it fail: the carried list kept whole (it names the removed cache);
+    /// `measure_afresh` not looking at the items (the figure stays up to five minutes old). The
+    /// gate it clears is `fleet::DISK_GATE`, which `cfg!(test)` turns off, so what is asserted is
+    /// the decision to clear it. Watched: with `drop_gone` not called, the second list still
+    /// named ~/.cache/pip and this failed.
+    #[test]
+    fn a_removed_item_leaves_the_list_and_the_disk_is_measured_afresh() {
+        let _lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let _pins = repo_fleet(dir.as_ref());
+        let list = |prev: Option<&CleanList>, minute: i64| {
+            clean_list(
+                "web-main",
+                prev,
+                &std::collections::HashMap::new(),
+                at(minute),
+                &mut BTreeMap::new(),
+                &mut BTreeMap::new(),
+                &mut Some(crate::fleet::BoxProcesses::default()),
+            )
+            .unwrap()
+        };
+        let first = list(None, 0);
+        let file = Signals {
+            clean: Some(first.clone()),
+            ..Default::default()
+        };
+        assert_eq!(first.items.len(), 1, "{:?}", first.items);
+        assert!(!measure_afresh([Some(&file)]), "nothing is gone yet");
+
+        let base: &Path = dir.as_ref();
+        std::fs::remove_dir_all(base.join("fleet/web-main/home/.cache/pip")).unwrap();
+        assert!(
+            measure_afresh([None, Some(&file)]),
+            "a removal kept the old figure"
+        );
+        let second = list(Some(&first), 1);
+        assert_eq!(
+            second.at, first.at,
+            "listed again, so the carried list is not what ran"
+        );
+        assert!(second.items.is_empty(), "{:?}", second.items);
     }
 }
