@@ -611,6 +611,9 @@ fn a_decision_is_the_answer_skein_requests_reports() {
         state: "pending".into(),
         ..Default::default()
     };
+    // A stored token for the repository, so the write has something to place: with none and no
+    // GitHub App, `gitgate::decide` refuses to grant it.
+    skein::gitgate::store_repo_token("thing/example", "skein-test-pat").expect("a stored token");
     // No sandbox: the courtesy write-back into the box's file fails and is ignored.
     skein::substrate::decide("no-such-sandbox", &package, false, false).expect("decided");
     skein::gitgate::decide("no-such-sandbox", &write, true, Some(24)).expect("decided");

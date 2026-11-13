@@ -53,6 +53,9 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
             "granted": g.granted,
             "expires": g.expires,
             "live": g.is_live(now),
+            // Why a live grant placed no token in its box, in the words the cockpit shows; empty
+            // when it may work. The refresher's own answer when it has run, else the setup check.
+            "no_token": skein::gitgate::grant_without_token(g, now).unwrap_or_default(),
         })).collect::<Vec<_>>(),
         "app_ready": skein::gitgate::app_credentials().is_ok(),
         // Not a credential — the id is public, and the settings screen names it so "scoped" can say

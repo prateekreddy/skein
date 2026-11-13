@@ -115,6 +115,21 @@ pub fn token_file(box_name: &str, slug: &str) -> String {
     )
 }
 
+/// Where the host says why a box holds no token for a repository it was granted: `why/<slug>` in
+/// the same directory as [`token_file`], spelled the same way, one line of plain words.
+///
+/// The box reads it and never writes it: it is in the box's own state, which the box sees
+/// read-only. `git-credential-skein.sh` prints it when git asks for that repository, so an agent
+/// told "granted" is not then told to ask for access it already has. [`refresh_tokens`] writes it
+/// when a mint for a granted repository fails and removes it when one succeeds or the grant goes.
+pub fn token_reason_file(box_name: &str, slug: &str) -> String {
+    format!(
+        "{}/git-tokens/why/{}",
+        crate::fleet::box_state(box_name),
+        slug.replace('/', "%2F")
+    )
+}
+
 // ───────────────────────────── the queue ─────────────────────────────
 
 /// Parse a JSON array of requests, the shape `boxfile::drop_box_objects` reads the queue into.
@@ -157,7 +172,31 @@ fn queued() -> Vec<Request> {
 /// Every access request the fleet knows about, oldest first.
 pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
     crate::place::standing_in(sandbox)?;
-    Ok(decided_over(queued()))
+    let now = chrono::Utc::now();
+    let grants = grants();
+    Ok(decided_over(queued())
+        .into_iter()
+        .map(|r| with_blocker(r, &grants, now))
+        .collect())
+}
+
+/// Say on the row why it cannot be granted yet, or why its grant has no token — the host's words
+/// every time, whatever the box wrote in that field.
+///
+/// A pending request carries [`token_blocker`]'s answer, so the Grant control can say why pressing
+/// it would fail before anyone presses it. A granted one carries [`grant_without_token`]'s while its
+/// grant is live, so an approval that placed nothing does not read as done.
+fn with_blocker(mut r: Request, grants: &[Grant], now: chrono::DateTime<chrono::Utc>) -> Request {
+    r.blocked = match r.state.as_str() {
+        "pending" => token_blocker(&r.repo).map(|why| cannot_grant(&r.repo, &why)),
+        "granted" => grants
+            .iter()
+            .find(|g| g.box_name == r.box_name && same_repo(&g.repo, &r.repo))
+            .and_then(|g| grant_without_token(g, now)),
+        _ => None,
+    }
+    .unwrap_or_default();
+    r
 }
 
 /// The host's answer wins over the box's copy of it, request by request (SKEIN-940).
@@ -309,6 +348,17 @@ pub fn decide(
             ))
         }
     }
+    // **Nothing is granted that cannot be given** (the live case of 2026-11-13). With no App and no
+    // stored token covering the repository, [`refresh_tokens`] can only fail to mint, and that
+    // failure reached nobody: the owner saw "granted", the box was told "granted", and git went on
+    // saying it had no token. So the request stays waiting, nothing is recorded and no answer is
+    // sent, and the refusal says what to store. A configured App counts as "may work" without
+    // asking GitHub; whether it is installed there is the refresher's to find out and record.
+    if approve {
+        if let Some(why) = token_blocker(&rendered.repo) {
+            return Err(cannot_grant(&rendered.repo, &why));
+        }
+    }
     let state = if approve { "granted" } else { "denied" };
     // The grant first, because it is what skein acts on: an answer recorded as granted with no
     // grant behind it would be a row telling its owner something that is not true.
@@ -412,6 +462,7 @@ mod tests {
         env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
         std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
         std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+        tokens_for(&["acme/web"]);
 
         for (id, approve, word) in [
             ("20260924-100000-1", true, "granted"),
@@ -463,6 +514,7 @@ mod tests {
         env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
         std::fs::create_dir_all(home.join("boxes/other-box/inbox")).unwrap();
         std::fs::create_dir_all(home.join("boxes/web-main/inbox")).unwrap();
+        tokens_for(&["acme/web", "acme/other"]);
 
         for (id, repo, approve) in [
             ("20260924-120000-1", "acme/web", true),
@@ -564,6 +616,7 @@ mod tests {
         // skein. The grant is written on the host under `$SKEIN_HOME`, so nothing asserted here
         // carries the root: the fixture only has to keep the read off somebody's infrastructure.
         std::env::set_var("SKEIN_FLEET_ROOT", home.join("fleet"));
+        tokens_for(&["acme/web"]);
 
         let rendered = Request {
             id: "20260812-101010-1".into(),
@@ -904,6 +957,7 @@ mod tests {
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", dir.join("home"));
         env.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        tokens_for(&["acme/thing", "acme/other"]);
         (lock, dir, env)
     }
 
@@ -920,6 +974,7 @@ mod tests {
                 _ => "2026-09-22T12:00:01Z".into(),
             },
             state: state.into(),
+            blocked: String::new(),
         }
     }
 
@@ -1103,5 +1158,105 @@ mod tests {
             grants_before,
             "a request whose answer skein could not read was granted anyway"
         );
+    }
+
+    /// The fleet of 2026-11-13: no GitHub App, and no stored token covering the repository a box
+    /// asked for. Pins only the paths, unlike [`fresh_fleet`], which stores tokens.
+    fn fleet_with_no_way_to_mint() -> (
+        crate::testutil::EnvGuard,
+        crate::testutil::TempDir,
+        crate::testutil::EnvPins,
+    ) {
+        let lock = crate::testutil::env_lock();
+        let dir = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", dir.join("home"));
+        env.set("SKEIN_FLEET_ROOT", dir.join("fleet"));
+        std::fs::create_dir_all(dir.join("home/boxes/web-main/inbox")).unwrap();
+        (lock, dir, env)
+    }
+
+    /// **Approving what nothing can mint a token for is refused, and the request stays waiting**:
+    /// no grant recorded, no answer filed, nothing in the box's inbox. Deny still works. A stored
+    /// token covering the repository, or a configured App, lets the approval through, with no
+    /// network call.
+    #[test]
+    fn a_grant_no_credential_could_serve_is_refused_and_the_request_keeps_waiting() {
+        let (_lock, dir, _env) = fleet_with_no_way_to_mint();
+        let _crossing = crate::place::seam::doing_nothing();
+        let asked = asked_by("web-main", "20261113-100505-1", "acme/thing", "pending");
+
+        let refused = decide("example-fleet", &asked, true, Some(24));
+        assert_eq!(
+            refused,
+            Err("No write token can be made for acme/thing: no GitHub App is set up, and no stored \
+                 token covers it. Store a token for acme/thing under Settings → GitHub & keys → \
+                 Without a GitHub App, then grant this."
+                .to_string())
+        );
+        assert!(grants().is_empty(), "a grant was recorded: {:?}", grants());
+        let path = decision_path(&asked.box_name, &asked.id).unwrap();
+        assert!(!path.exists(), "an answer was recorded for a refused grant");
+        let inbox = dir.join("home/boxes/web-main/inbox");
+        assert_eq!(
+            std::fs::read_dir(&inbox).unwrap().count(),
+            0,
+            "the box was told"
+        );
+
+        let other = asked_by("web-main", "20261113-100505-2", "acme/thing", "pending");
+        let denied = decide("example-fleet", &other, false, None).expect("deny still works");
+        assert_eq!(denied.state, "denied");
+
+        // A configured App counts as "may work": its id and a key file, and nothing asked of GitHub.
+        let key = dir.join("home/app.pem");
+        std::fs::write(&key, "not read by this check").unwrap();
+        std::fs::write(
+            dir.join("home/config.json"),
+            serde_json::json!({ "github_app_id": "123", "github_app_key": key }).to_string(),
+        )
+        .unwrap();
+        decide("example-fleet", &asked, true, Some(24)).expect("an App is configured");
+        assert_eq!(grants().len(), 1);
+    }
+
+    /// **A waiting request says why it cannot be granted yet, and a live grant with no token
+    /// says so**, in the host's words and whatever the box wrote in that field. A stored token
+    /// clears the first; the reason the refresher left beside the box's tokens is the second's.
+    #[test]
+    fn the_listing_says_why_a_request_cannot_be_granted_and_why_a_grant_has_no_token() {
+        let (_lock, _dir, _env) = fleet_with_no_way_to_mint();
+        let now = chrono::Utc::now();
+        let mut asked = asked_by("web-main", "20261113-100505-3", "acme/thing", "pending");
+        asked.blocked = "whatever the box says".into();
+
+        let shown = with_blocker(asked.clone(), &grants(), now);
+        assert_eq!(
+            shown.blocked,
+            "No write token can be made for acme/thing: no GitHub App is set up, and no stored \
+             token covers it. Store a token for acme/thing under Settings → GitHub & keys → \
+             Without a GitHub App, then grant this."
+        );
+
+        tokens_for(&["acme/thing"]);
+        assert_eq!(with_blocker(asked.clone(), &grants(), now).blocked, "");
+
+        // Granted, live, and the refresher could not mint: its reason is what the row says.
+        record(&asked, Some(24)).unwrap();
+        let reason = std::path::PathBuf::from(token_reason_file("web-main", "acme/thing"));
+        std::fs::create_dir_all(reason.parent().unwrap()).unwrap();
+        std::fs::write(&reason, "the App is not installed on acme/thing\n").unwrap();
+        let granted = Request {
+            state: "granted".into(),
+            ..asked.clone()
+        };
+        assert_eq!(
+            with_blocker(granted.clone(), &grants(), now).blocked,
+            "Granted, but no token can be made for acme/thing: the App is not installed on \
+             acme/thing. Store a token for acme/thing under Settings → GitHub & keys → Without a \
+             GitHub App."
+        );
+        std::fs::remove_file(&reason).unwrap();
+        assert_eq!(with_blocker(granted, &grants(), now).blocked, "");
     }
 }

@@ -10525,17 +10525,23 @@ function gitqCard(r) {
   const key = (r.box || "") + "/" + r.id;
   if (pending) gitqShown.set(key, { box: r.box || "", repo: r.repo || "" });
   const busy = busyAttr("gitq", key);
+  // The host's sentence for why this cannot be granted yet, or why its grant placed no token
+  // (`gitgate::list`, `blocked`). Pending, Grant is drawn disabled beside it, because pressing can
+  // only be refused; Deny still works.
+  const blocked = (r.blocked || "").trim();
+  const grantOff = busy || (pending && blocked ? " disabled" : "");
   return `
     <div class="msg" data-card="${esc(key)}">
       <div class="sq-pkgs">${esc(r.repo || "?")}</div>
       <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
+      ${blocked ? `<div class="sq-meta gq-blocked">${esc(blocked)}</div>` : ""}
       <div class="sq-row">
         <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
         ${pending ? `
           <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}"${busy} /> hours
             <input type="checkbox" id="gq-keep-${esc(key)}"${busy} /> keep indefinitely</label>
-          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)"${busy}>Grant write</button>
+          <button class="kbtn primary" onclick="decideGitq(${esc(JSON.stringify(key))}, true)"${grantOff}${blocked ? ` title="${esc(blocked)}"` : ""}>Grant write</button>
           <button class="kbtn ghost" onclick="decideGitq(${esc(JSON.stringify(key))}, false)"${busy}>Deny</button>
           ${sendingNote("gitq", key)}` : ""}
       </div>
@@ -10554,6 +10560,7 @@ function gitqGrantRow(g) {
         <span class="sq-meta">${when}</span>
         ${g.live ? `<button class="kbtn ghost" onclick="revokeGitq(${esc(JSON.stringify(g.box))},${esc(JSON.stringify(g.repo))})">Revoke</button>` : ""}
       </div>
+      ${g.live && g.no_token ? `<div class="sq-meta gq-blocked">${esc(g.no_token)}</div>` : ""}
     </div>`;
 }
 

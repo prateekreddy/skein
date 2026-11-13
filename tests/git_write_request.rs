@@ -256,6 +256,42 @@ fn a_github_repo_with_no_token_is_named_on_stderr_and_nothing_else_is() {
     assert_eq!(b.credential_said("gitlab.com", "a/b.git").1, "");
 }
 
+/// **A box granted a repository the host could not mint for is told the grant exists and what the
+/// person must do**, in place of the line that sends it to ask for access it already has — and
+/// still told it when a read token answers, because a push with that is refused all the same.
+#[test]
+fn a_grant_with_no_token_says_so_instead_of_sending_the_box_to_ask_again() {
+    let b = Box_::new("granted-no-token");
+    let why = b.tokens.join("why");
+    fs::create_dir_all(&why).unwrap();
+    fs::write(
+        why.join("acme%2Fsibling"),
+        "no GitHub App is set up, and no stored token covers it\n",
+    )
+    .unwrap();
+    let said = "skein: this box was granted write access to acme/sibling, but skein has no token \
+                to give it: no GitHub App is set up, and no stored token covers it. Asking for \
+                access again will not help; ask the person to store a token for acme/sibling in \
+                the cockpit, under Settings → GitHub & keys → Without a GitHub App.\n";
+
+    let (out, err) = b.credential_said("github.com", "acme/sibling.git");
+    assert_eq!(out, "");
+    assert_eq!(err, said);
+
+    b.place_read("acme", "READ-ACME");
+    let (out, err) = b.credential_said("github.com", "acme/sibling.git");
+    assert!(out.contains("password=READ-ACME"), "{out}");
+    assert_eq!(err, said);
+
+    b.place_token("acme/sibling", "APP-TOKEN-FOR-SIBLING");
+    let (out, err) = b.credential_said("github.com", "acme/sibling.git");
+    assert!(out.contains("password=APP-TOKEN-FOR-SIBLING"), "{out}");
+    assert_eq!(
+        err, "",
+        "a repo with its token in place was still explained"
+    );
+}
+
 #[test]
 fn a_read_token_covers_its_owner_and_stops_there() {
     // The App's installation list is the control: one read token per owner, so an org the App is

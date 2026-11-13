@@ -283,6 +283,29 @@ check("and the reason, which is the whole basis for deciding", card.includes("fi
 const decided = T.gitqCard(ask("a", { state: "granted" }));
 check("a granted request has no Grant button left", decided.includes("Grant write"), false);
 
+// --- a request nothing can mint a token for says so, by a Grant that is off ----------------------
+// The sentence is the host's (`gitgate::list`, `blocked`); the card prints it and turns Grant off,
+// because pressing can only be refused. Deny is still a control.
+//
+// Fails on: the sentence not drawn; Grant drawn enabled beside it; Deny lost or disabled with it;
+// Grant disabled on a request that carries no reason.
+{
+  const why = "No write token can be made for acme/thing: no GitHub App is set up, and no stored token covers it. Store a token for acme/thing under Settings → GitHub & keys → Without a GitHub App, then grant this.";
+  const esc = t => t.replace(/&/g, "&amp;"); // the only character of these the card escapes
+  T.reset();
+  const off = T.gitqCard(ask("a", { blocked: why }));
+  check("a request that cannot be granted yet shows why", off.includes(esc(why)), true);
+  check("and its Grant is disabled", /\)" disabled[^>]*>Grant write</.test(off), true);
+  check("while Deny can still be pressed", press(off, "Deny"), undefined);
+  check("and denies", T.sent()[0] && T.sent()[0].body.approve, false);
+  check("an ordinary request's Grant is not disabled", /disabled[^>]*>Grant write</.test(T.gitqCard(ask("b"))), false);
+
+  const g = { box: "web-main", repo: "acme/thing", live: true, granted: "", expires: "" };
+  const late = "Granted, but no token can be made for acme/thing: no GitHub App is set up, and no stored token covers it. Store a token for acme/thing under Settings → GitHub & keys → Without a GitHub App.";
+  check("a live grant with no token says so", T.gitqGrantRow({ ...g, no_token: late }).includes(esc(late)), true);
+  check("an expired one does not", T.gitqGrantRow({ ...g, live: false, no_token: late }).includes("no token"), false);
+}
+
 // --- and it escapes them, because the box wrote them ---------------------------------------------
 //
 // `reason` is "the whole basis for deciding" and it is free text composed by the box asking for a
