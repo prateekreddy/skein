@@ -31,6 +31,12 @@ function makeFixture() {
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ fleet_sandbox: "example" }));
   fs.writeFileSync(path.join(home, "repos.json"), "[]");
   fs.writeFileSync(path.join(root, "sandboxes.json"), "{}");
+  // A stored token for the repository asked for, as `gitgate::store_repo_token` writes one, so the
+  // row is grantable: with no token and no App the host draws Grant disabled (`token_blocker`).
+  fs.writeFileSync(path.join(home, "github-pats.json"),
+    JSON.stringify([{ id: "acme-thing", label: "acme/thing", repos: ["acme/thing"] }]));
+  fs.mkdirSync(path.join(home, "github-pats"), { recursive: true });
+  fs.writeFileSync(path.join(home, "github-pats", "acme-thing"), "skein-test-pat", { mode: 0o600 });
   // The box's ask, where `gitgate::requests_dir` reads it: one directory per box.
   const asked = path.join(fleet, ".skein", "gitgate", "requests", BOX);
   fs.mkdirSync(asked, { recursive: true });

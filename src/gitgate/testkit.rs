@@ -22,3 +22,11 @@ pub(super) fn fresh_home() -> (
     env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
     (lock, home, env)
 }
+
+/// A stored token for each of `slugs`, so a grant for any of them has something to place: without
+/// one, and with no GitHub App, [`super::decide`] refuses to approve (`token_blocker`).
+pub(super) fn tokens_for(slugs: &[&str]) {
+    for slug in slugs {
+        super::store_repo_token(slug, "skein-test-pat").expect("a stored token");
+    }
+}

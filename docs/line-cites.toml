@@ -1473,19 +1473,19 @@ cited_by = ["docs/decisions/one-identity.md"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:127"]
+["src/gitgate/mint.rs:206"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub & keys → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:136"]
+["src/gitgate/mint.rs:215"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub & keys → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:140"]
+["src/gitgate/mint.rs:219"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:304"]
+["src/gitgate/mint.rs:383"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2185,7 +2185,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:1148"]
+["src/web/app/panels.js:1155"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 

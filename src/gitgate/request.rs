@@ -45,6 +45,11 @@ pub struct Request {
     pub state: String,
     #[serde(default)]
     pub decided: String,
+    /// Why a pending request cannot be granted yet, or why a granted one's box has no token for
+    /// it: one sentence for the cockpit, empty when there is nothing to say. **Set by [`list`] from
+    /// the host's own state and never read from the box's file**, which may say anything here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub blocked: String,
 }
 
 impl Request {

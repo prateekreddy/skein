@@ -114,7 +114,22 @@ done
 # 'https://github.com/…'" — name neither the cause nor the fix. A submodule from another repository
 # is the usual way in. The line names only the repository git asked about, which git already
 # printed; nothing about any other repository's token is said, nor whether one exists.
+#
+# **Unless this box was granted the repository and the host could not make it a token.** The host
+# then leaves one line saying why at why/<owner>%2F<name> (`gitgate::token_reason_file`), and the
+# usual line would send the agent to ask for access it already holds. This says the grant exists
+# and what the person has to do instead, whether or not a read token answers below it, because a
+# push with that read token is refused all the same.
+why=''
+if [ ! -s "${SKEIN_GIT_TOKENS}/${owner}%2F${name}" ] && [ -r "${SKEIN_GIT_TOKENS}/why/${owner}%2F${name}" ]; then
+  why="$(head -n 1 "${SKEIN_GIT_TOKENS}/why/${owner}%2F${name}" 2>/dev/null)"
+fi
+if [ -n "$why" ]; then
+  printf 'skein: this box was granted write access to %s/%s, but skein has no token to give it: %s. Asking for access again will not help; ask the person to store a token for %s/%s in the cockpit, under Settings → GitHub & keys → Without a GitHub App.\n' \
+    "$owner" "$name" "$why" "$owner" "$name" >&2
+fi
 if [ -z "$token" ]; then
+  [ -n "$why" ] && exit 0
   printf 'skein: this box has no GitHub token for %s/%s, so git cannot sign in to it. To reach it, ask the person to add %s/%s as a repo in the cockpit, share a write token with it from its card, or store a read-only token under Settings → GitHub & keys.\n' \
     "$owner" "$name" "$owner" "$name" >&2
   exit 0

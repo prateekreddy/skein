@@ -108,6 +108,85 @@ pub fn can_issue_write_tokens() -> bool {
             .any(|c| c.problem().is_none() && credential_has_token(&c.id))
 }
 
+/// Why no write token can be made for `slug`, or `None` when one may be.
+///
+/// Asked before a person grants a box write access to `slug` ([`decide`]), and shown beside the
+/// request ([`list`]), so an approval that could never place a token is refused rather than
+/// recorded and then failed quietly in [`refresh_tokens`]. **No network call**: a usable stored
+/// token that covers `slug`, or a GitHub App that is configured at all, counts as "may work". The
+/// App may still not be installed on `slug`, which only a mint can say, and the refresher records
+/// that answer for the box ([`token_reason_file`]).
+///
+/// The same two sources [`mint_token`] tries, in its order, so this cannot pass a repository the
+/// mint will refuse for want of a credential.
+pub fn token_blocker(slug: &str) -> Option<String> {
+    if write_credentials()
+        .iter()
+        .any(|c| c.covers(slug) && credential_has_token(&c.id))
+    {
+        return None;
+    }
+    let app = match app_credentials() {
+        Ok(_) => return None,
+        Err(_) if crate::config::load_config().github_app_id.trim().is_empty() => {
+            "no GitHub App is set up".to_string()
+        }
+        Err(why) => why,
+    };
+    Some(format!("{app}, and no stored token covers it"))
+}
+
+/// The one place in the cockpit a token for any repository can be stored, a managed repo or not:
+/// the form under Settings → GitHub & keys → Without a GitHub App, which is
+/// `/api/fleet/repo-token` and stores a token covering `slug` alone.
+fn store_token_step(slug: &str) -> String {
+    format!("Store a token for {slug} under Settings → GitHub & keys → Without a GitHub App")
+}
+
+/// What a pending request says beside its Grant control when [`token_blocker`] has an answer, and
+/// what [`decide`] refuses with.
+pub(super) fn cannot_grant(slug: &str, why: &str) -> String {
+    format!(
+        "No write token can be made for {slug}: {why}. {}, then grant this.",
+        store_token_step(slug)
+    )
+}
+
+/// What a live grant whose box has no token for it says, in the cockpit, with the reason the
+/// refresher recorded or [`token_blocker`]'s.
+fn granted_without_token(slug: &str, why: &str) -> String {
+    format!(
+        "Granted, but no token can be made for {slug}: {why}. {}.",
+        store_token_step(slug)
+    )
+}
+
+/// Why `grant` is live and its box still has no token for it, as the cockpit says it — or `None`
+/// for an expired grant, or one that may work.
+///
+/// The refresher's own answer first, from the reason file it left beside the box's tokens: that is
+/// what actually happened at the last mint, an App not installed on the repository included. Until
+/// a refresh has run, [`token_blocker`]'s.
+pub fn grant_without_token(grant: &Grant, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    if !grant.is_live(now) {
+        return None;
+    }
+    let why = recorded_token_reason(&grant.box_name, &grant.repo)
+        .or_else(|| token_blocker(&grant.repo))?;
+    Some(granted_without_token(&grant.repo, &why))
+}
+
+/// The reason the refresher recorded for `box_name` having no token for `slug`, if it did. Read by
+/// [`crate::boxfile::read_in`]'s rules, because it is in a box's state directory: a link or an
+/// oversized file there reads as nothing.
+fn recorded_token_reason(box_name: &str, slug: &str) -> Option<String> {
+    let file = std::path::PathBuf::from(token_reason_file(box_name, slug));
+    let text =
+        crate::boxfile::read_in(file.parent()?, &file.file_name()?.to_string_lossy(), 4096).ok()?;
+    let line = text.lines().next().unwrap_or("").trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
 /// The App this fleet mints write tokens with, or why it cannot.
 ///
 /// The id is in `config.json` and the key is a path, because that file is written 0644 and
@@ -400,8 +479,8 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // revoke takes effect even if GitHub is unreachable this tick.
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if entry.file_name() == "read" {
-                continue; // pruned against its own list below
+            if entry.file_name() == "read" || entry.file_name() == "why" {
+                continue; // each pruned against its own list
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let slug = name.replace("%2F", "/");
@@ -412,6 +491,41 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
             }
         }
     }
+
+    // A reason left for a repository this box no longer wants goes with it, so a revoked grant does
+    // not leave git explaining why a token it should not want is missing.
+    let why_dir = dir.join("why");
+    if let Ok(entries) = std::fs::read_dir(&why_dir) {
+        for entry in entries.flatten() {
+            let slug = entry.file_name().to_string_lossy().replace("%2F", "/");
+            if !want.iter().any(|w| same_repo(w, &slug)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    // **What the box is told when a granted repository gets no token** (the live case of
+    // 2026-11-13): the mint's failure used to go into `problems` alone, which only the server log
+    // reads, so a box granted access was told by git that it had no token and to ask for access it
+    // already had. The reason goes in the box's own token directory, which it reads and cannot
+    // write, and the credential helper says it. Not for the box's own repository: that one was
+    // never asked for, and its failure is the fleet's setup, which the cockpit already shows.
+    let own_slug = box_repo_slug(box_name);
+    let explain = |slug: &str, why: Option<&str>| -> Result<(), String> {
+        let path = std::path::PathBuf::from(token_reason_file(box_name, slug));
+        match why {
+            None => match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(format!("{}: {e}", path.display()))
+                }
+                _ => Ok(()),
+            },
+            Some(why) => {
+                std::fs::create_dir_all(&why_dir).map_err(|e| e.to_string())?;
+                let line = why.replace('\n', " ");
+                crate::util::write_atomic(&path, &why_dir, format!("{line}\n").as_bytes())
+            }
+        }
+    };
 
     // 0600 is not a boundary *between boxes* — they share a uid — and this does not pretend
     // otherwise. It keeps the token out of anything that walks the tree without meaning to, and out
@@ -429,7 +543,17 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
         // refresh — App tokens last an hour — so writing one is not an event. Being given one for a
         // repo it did not have is.
         let had = path.exists();
-        match mint_token(slug) {
+        let minted = mint_token(slug);
+        let why = match &minted {
+            Err(e) if !same_repo(slug, &own_slug) => Some(token_blocker(slug).unwrap_or(e.clone())),
+            _ => None,
+        };
+        if let Err(e) = explain(slug, why.as_deref()) {
+            problems.push(format!(
+                "{slug}: could not tell the box why it has no token: {e}"
+            ));
+        }
+        match minted {
             Ok(token) => match write(&path, &token) {
                 Err(e) => problems.push(format!("{slug}: {e}")),
                 Ok(()) if !had => granted.push(slug.clone()),
@@ -732,6 +856,70 @@ mod tests {
         env.set("SKEIN_GITHUB_API", &api);
         mint_token("a/one").unwrap();
         assert!(app_cannot_read().is_empty(), "{:?}", app_cannot_read());
+    }
+
+    /// **A granted repository the host cannot mint for tells the box why, and the box's own
+    /// repository never does.** The reason sits beside the box's tokens, where the credential
+    /// helper reads it; it goes when the grant goes, and when a token is placed.
+    #[test]
+    fn a_granted_repo_with_no_token_leaves_the_box_a_reason_and_its_own_repo_never_does() {
+        let (_lock, _home, _env) = fresh_home();
+        let _warden = crate::testutil::no_warden();
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "worker".into(),
+            source: "https://github.com/a/one.git".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+        set_write_credential("mine", "one repo", &["a/one".into()]).unwrap();
+        set_credential_token("mine", "skein-test-pat-ONE").unwrap();
+        let grant = Request {
+            id: "20261113-100505-1".into(),
+            box_name: "worker".into(),
+            repo: "b/two".into(),
+            ..Default::default()
+        };
+        record(&grant, Some(24)).unwrap();
+        let reason = |slug: &str| std::fs::read_to_string(token_reason_file("worker", slug)).ok();
+        let token = |slug: &str| std::path::Path::new(&token_file("worker", slug)).exists();
+
+        refresh_tokens("worker");
+        assert_eq!(
+            reason("b/two").as_deref(),
+            Some("no GitHub App is set up, and no stored token covers it\n")
+        );
+        assert!(!token("b/two") && token("a/one"));
+        assert_eq!(reason("a/one"), None);
+
+        revoke("worker", "b/two").unwrap();
+        refresh_tokens("worker");
+        assert_eq!(
+            reason("b/two"),
+            None,
+            "a revoked grant left its reason behind"
+        );
+
+        record(&grant, Some(24)).unwrap();
+        refresh_tokens("worker");
+        assert!(reason("b/two").is_some());
+        store_repo_token("b/two", "skein-test-pat-TWO").unwrap();
+        refresh_tokens("worker");
+        assert!(token("b/two"));
+        assert_eq!(
+            reason("b/two"),
+            None,
+            "a placed token left its reason behind"
+        );
+
+        // The box's own repository can no longer be minted for, and is not a grant.
+        remove_write_credential("mine").unwrap();
+        refresh_tokens("worker");
+        assert!(!token("a/one"));
+        assert_eq!(
+            reason("a/one"),
+            None,
+            "the box's own repo was explained as a grant"
+        );
     }
 
     /// A token directory that is a symbolic link stops the placement, rather than redirecting it.

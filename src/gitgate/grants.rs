@@ -129,6 +129,7 @@ mod tests {
             asked: chrono::Utc::now().to_rfc3339(),
             state: "pending".into(),
             decided: String::new(),
+            blocked: String::new(),
         };
         record(&asked("web-main", "acme/web"), Some(4)).unwrap();
         record(&asked("api-main", "acme/api"), None).unwrap();
