@@ -2898,7 +2898,8 @@ unset uncovered
 # depot entry and its command is the link npm made in that entry. So a box runs exactly the version
 # skein rolled out, at the path its PATH already names, and a rollout changes nothing under a running
 # box: it changes what the NEXT start binds, and the box is shown "restart to apply". A CLI with
-# nothing rolled out is the sandbox's own copy, as before. What was bound is reported on the
+# nothing rolled out is the sandbox's own copy, followed live as a box with nothing rolled out
+# follows it (`share_item` below says why). What was bound is reported on the
 # `SKEIN_VERSIONS` line below, and the placement record keeps it.
 #
 # `SKEIN_NPM_PREFIX` exists for the fleet tests, which cannot write the real prefix; skein never
@@ -2953,13 +2954,20 @@ if [ -d "$npm_prefix" ] && [ "${#cli_rows[@]}" -gt 0 ]; then
     managed_pkgs+="$pkg "; managed_cmds+="$cmd "
   done
   binds+=(--tmpfs "$npm_prefix" --dir "$npm_prefix/bin" --dir "$npm_prefix/lib/node_modules")
-  # `share_item <path>`: the sandbox's own item, at its own path, read-only; a link as the same link.
+  # **The sandbox's own items follow the sandbox, live** (SKEIN-1487). The whole prefix is bound
+  # read-only at `.skein-sandbox` inside the projection, and each item that is not a rolled-out CLI
+  # is a link to its own path there, so it reads whatever the sandbox has now: the same as a box
+  # with nothing rolled out, which binds the prefix itself. The first cut copied each item as it
+  # was at the box's start, a link as the same link text and a directory as a bind of that one
+  # directory. A staged install (`skein_npm_install`) then moves `bin/claude` to a new
+  # `lib/.skein-v.*` and removes the old one, and on 2026-11-13 every box started before that
+  # install was left with a `claude` naming an emptied directory: the session it was in kept
+  # running, and every new one said "waiting for claude" and then "not on this box".
+  live_prefix="$npm_prefix/.skein-sandbox"
+  binds+=(--ro-bind "$npm_prefix" "$live_prefix")
+  # `share_item <path>`: the sandbox's own item, at its own path, as a link to it in the live view.
   share_item() {
-    if [ -L "$1" ]; then
-      binds+=(--symlink "$(readlink -- "$1")" "$1")
-    else
-      binds+=(--ro-bind "$1" "$1")
-    fi
+    binds+=(--symlink "$live_prefix${1#"$npm_prefix"}" "$1")
   }
   for item in "$npm_prefix"/* "$npm_prefix"/.[!.]*; do
     [ -e "$item" ] || [ -L "$item" ] || continue
@@ -3003,7 +3011,7 @@ if [ -d "$npm_prefix" ] && [ "${#cli_rows[@]}" -gt 0 ]; then
 elif [ -d "$npm_prefix" ] && [ "$npm_prefix" != /usr/local/share/npm-global ]; then
   binds+=(--ro-bind "$npm_prefix" "$npm_prefix")
 fi
-unset cli_rows row rt pkg cmd entry link item one mod scoped managed_pkgs managed_cmds
+unset cli_rows row rt pkg cmd entry link item one mod scoped managed_pkgs managed_cmds live_prefix
 unset SKEIN_NPM_PREFIX
 
 # --- the fleet's Rust toolchain: on every box's PATH, changed by none of them (SKEIN-1337) ---------

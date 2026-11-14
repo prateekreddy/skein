@@ -413,6 +413,139 @@ fn a_claude_entry_waits_for_its_typescript_and_is_retested_when_it_arrives() {
     );
 }
 
+/// Install `version` of claude-code into the fixture prefix the way the fleet does, with
+/// `src/package-install.sh`'s `skein_npm_install`. A stub `npm` stands for the registry: it lays
+/// the package into the prefix it is given, as `npm install -g --prefix` does, and its binary says
+/// `version`.
+fn install_sandbox_claude(root: &Path, prefix: &Path, version: &str) {
+    let stubs = root.join("npm-stub");
+    fs::create_dir_all(&stubs).unwrap();
+    let pkg = "lib/node_modules/@anthropic-ai/claude-code";
+    fs::write(
+        stubs.join("npm"),
+        format!(
+            r#"#!/bin/sh
+case "$1 $2" in "config get") echo '{live}'; exit 0 ;; esac
+prefix='{live}'
+while [ $# -gt 0 ]; do case "$1" in --prefix) prefix=$2; shift ;; --globalconfig) shift ;; esac; shift; done
+mkdir -p "$prefix/{pkg}/bin" "$prefix/bin"
+printf '#!/bin/sh\necho %s\n' "$FAKE_VERSION" >"$prefix/{pkg}/bin/claude.exe"
+chmod +x "$prefix/{pkg}/bin/claude.exe"
+ln -sfn ../{pkg}/bin/claude.exe "$prefix/bin/claude"
+"#,
+            live = prefix.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(stubs.join("npm"), fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "{}\nskein_npm_install \"$TMPDIR/npm.log\" @anthropic-ai/claude-code",
+            include_str!("../../src/package-install.sh")
+        ))
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+        .env("TMPDIR", root)
+        .env("FAKE_VERSION", version)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "skein_npm_install of {version} failed: {}",
+        fs::read_to_string(root.join("npm.log")).unwrap_or_default()
+    );
+}
+
+/// **A box running the sandbox's own claude keeps finding it when the sandbox installs a new one**
+/// (SKEIN-1487). A rolled-out codex is what makes the launcher project the prefix, as it did for
+/// every box of the fleet when this was found; claude, with nothing rolled out, is the sandbox's.
+///
+/// The sandbox's claude is put in place the way the fleet puts it, by `skein_npm_install`, which
+/// leaves `bin/claude` a link into `lib/.skein-v.<id>`. A box starts and runs it. Then a second
+/// install moves the link to a new prefix and removes the first, as the fleet's update of
+/// 2026-11-13 did, and `claude` is run again inside the box that is still running: what a new agent
+/// session in it would run.
+///
+/// What would make it fail: a projection that copies each of the sandbox's items as it was at the
+/// box's start (the link text, or a bind of the one `.skein-v` directory): the box's `claude` then
+/// names a removed directory, and `after` is "not found". Or an install that no longer removes the
+/// old prefix would leave it passing for the wrong reason, so the removal is asserted first.
+#[test]
+fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
+    let _env = env_lock();
+    let _real = skein::place::seam::real_crossings();
+    if !bwrap_works() || !have("tmux") || !have("nsenter") {
+        return skip(
+            "this machine cannot make a bwrap namespace, or lacks tmux or nsenter, so whether a \
+             running box keeps the sandbox's claude across an install was NOT exercised",
+        );
+    }
+    let (root, prefix, _pins) = versions_fleet("clilive");
+    install_sandbox_claude(&root, &prefix, "first-install");
+    let codex = publish_cli(&root, "codex", "1.0.0");
+    versions::rollout("codex", &codex).expect("roll out codex 1.0.0");
+    let p = prefix.display().to_string();
+    let agent = format!(
+        "{{ printf 'cli %s\\n' \"$('{p}/bin/claude' 2>&1)\"; }} > /tmp/c.tmp \
+         && mv /tmp/c.tmp /tmp/c.report; exec sleep 300"
+    );
+    let name = "clilive-main";
+    let (launched, anchor, report) = start(name, false, &prefix, &agent, "c");
+    let in_box = || {
+        own_sandbox(FLEET)
+            .exec(
+                &format!(
+                    "nsenter -t {anchor} -U -m --preserve-credentials sh -c \"'{p}/bin/claude' 2>&1\""
+                ),
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| e)
+            .trim()
+            .to_string()
+    };
+    let before = in_box();
+    let first_prefixes = skein_prefixes(&prefix);
+
+    install_sandbox_claude(&root, &prefix, "second-install");
+    let after = in_box();
+    let second_prefixes = skein_prefixes(&prefix);
+    end(name, anchor);
+
+    assert_eq!(
+        versions::versions_from_launch(&launched),
+        Some(std::collections::BTreeMap::from([(
+            "codex".to_string(),
+            codex.clone()
+        )])),
+        "the box was not started with the prefix projected, so this proves nothing: {launched}"
+    );
+    assert_eq!(field(&report, "cli"), "first-install", "{report:?}");
+    assert_eq!(before, "first-install");
+    assert!(
+        first_prefixes.len() == 1
+            && second_prefixes.len() == 1
+            && first_prefixes != second_prefixes,
+        "the second install did not replace and remove the first's prefix, so the box was never \
+         left with a removed one: {first_prefixes:?} then {second_prefixes:?}"
+    );
+    assert_eq!(
+        after, "second-install",
+        "after the sandbox installed a new claude, the running box's claude no longer runs, so \
+         every new agent session in it would say \"waiting for claude\""
+    );
+}
+
+/// The staged install prefixes under `prefix/lib`, by name.
+fn skein_prefixes(prefix: &Path) -> Vec<String> {
+    fs::read_dir(prefix.join("lib"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".skein-v."))
+        .collect()
+}
+
 /// **A box records the versions it was started on; a rollout makes a running box "restart to
 /// apply" without touching what it runs; an idle box is then restarted onto the new version, and a
 /// working box is not** (the owner's decisions 1 and 2).
