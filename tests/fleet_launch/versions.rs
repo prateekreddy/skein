@@ -475,10 +475,10 @@ ln -sfn ../{pkg}/bin/claude.exe "$prefix/bin/claude"
 fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
     let _env = env_lock();
     let _real = skein::place::seam::real_crossings();
-    if !bwrap_works() || !have("tmux") || !have("nsenter") {
+    if !bwrap_works() || !have("tmux") {
         return skip(
-            "this machine cannot make a bwrap namespace, or lacks tmux or nsenter, so whether a \
-             running box keeps the sandbox's claude across an install was NOT exercised",
+            "this machine cannot make a bwrap namespace, or lacks tmux, so whether a running box \
+             keeps the sandbox's claude across an install was NOT exercised",
         );
     }
     let (root, prefix, _pins) = versions_fleet("clilive");
