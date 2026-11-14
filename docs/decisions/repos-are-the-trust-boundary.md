@@ -114,7 +114,7 @@ puts it.
   `a_tool_installed_into_the_area_survives_a_box_restart`,
   `the_caches_are_on_the_trees_file_system_and_pnpm_hard_links_into_a_worktree` and
   `a_link_where_the_area_should_be_is_refused` (`tests/isolation_bwrap/repocache.rs`); its bind is
-  `src/box-session.sh:2641` and the tools are pointed at it at `src/box-session.sh:4087`. Which
+  `src/box-session.sh:2641` and the tools are pointed at it at `src/box-session.sh:4095`. Which
   caches follow which kind, and no box gets a compiler wrapper: bwrap test
   `a_repos_kinds_decide_its_caches_and_no_box_gets_a_compiler_wrapper`; the kinds a box is handed:
   tests `a_checkouts_kinds_are_read_off_its_files` (`src/repos/kinds.rs`) and

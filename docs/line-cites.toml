@@ -870,35 +870,35 @@ cited_by = ["docs/threat-model.md"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3002"]
+["src/box-session.sh:3010"]
 line = "binds+=(--remount-ro \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3004"]
+["src/box-session.sh:3012"]
 line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3343"]
+["src/box-session.sh:3351"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3471"]
+["src/box-session.sh:3479"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3914"]
+["src/box-session.sh:3922"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3978"]
+["src/box-session.sh:3986"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:4021"]
+["src/box-session.sh:4029"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:4087"]
+["src/box-session.sh:4095"]
 line = "export SKEIN_REPO_TOOLS=\"$repo_tools\" CARGO_INSTALL_ROOT=\"$repo_tools/tools\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
