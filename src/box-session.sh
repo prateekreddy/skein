@@ -108,11 +108,12 @@ set -uo pipefail
 #     another when it starts itself if they ever disagreed.
 #     `tests/isolation_bwrap/path.rs::a_box_session_and_a_crossing_into_it_agree_on_the_boxs_path`
 #     measures both and fails on the difference.
-#   * It is exported INSIDE the `bash -lc`, not here and not through `--setenv`. A login shell
-#     sources the profile BEFORE it runs the command string, so an export in that block wins over
-#     any profile — including one a future substrate does have, which neither of the other two
-#     spellings would. Exporting it here would be worse than useless: it would put a box-writable
-#     directory in front of `bwrap` itself, which is the whole of ISO-1.
+#   * It is exported INSIDE the block `bwrap` runs, not here and not through `--setenv`. That block
+#     was a login shell, and the export was placed after the profile it sourced so that no profile
+#     could undo it. It sources no profile at all now (SKEIN-1492, at the foot of this file), so
+#     nothing a box writes runs before the export or before the box's tmux server starts. Exporting
+#     it here would be worse than useless: it would put a box-writable directory in front of
+#     `bwrap` itself, which is the whole of ISO-1.
 #
 # That export stopped SKEIN's own scripts being one of the things a box can decide. `overlay_paths`
 # and the `--ro-bind` beside it finish the other half: neither entry of `box_path` is writable from
@@ -810,10 +811,20 @@ inherited_env=(
   # Which sandbox this is. The probes fall back to SANDBOX_VM_ID for an identity outside a fleet.
   SANDBOX_ID SANDBOX_NAME SANDBOX_VM_ID
   # The sandbox's layout: npm's global prefix (where the agent CLI is installed, second on every
-  # box's PATH), the file every non-interactive bash sources, and the per-user runtime directory
-  # the peer network's sockets live in.
-  NPM_CONFIG_PREFIX BASH_ENV XDG_RUNTIME_DIR
+  # box's PATH) and the per-user runtime directory the peer network's sockets live in.
+  #
+  # NOT `BASH_ENV`, and not `ENV`, which were here as "the file every non-interactive bash
+  # sources" (SKEIN-1491). In this sandbox that file is `/etc/sandbox-persistent.sh`, owned by the
+  # uid every box runs as, so a box that inherited the name ran whatever any other box had written
+  # there, in every `bash -c` it started. The file itself is covered further down, at
+  # `shell_env_file`, because the sandbox's `/etc/profile.d` names it again for every login shell.
+  NPM_CONFIG_PREFIX XDG_RUNTIME_DIR
 )
+# The sandbox's persistent-environment file, under a name a test can point elsewhere (it must not
+# write the real one). Read here, before the filter below removes the name, into a variable that is
+# not exported, so no box sees the seam. Unset in production. The cover is at `shell_env_file`
+# further down.
+shell_env_file="${SKEIN_SHELL_ENV_FILE:-/etc/sandbox-persistent.sh}"
 # First the names bash cannot hold as variables, because `unset` cannot reach them: an entry whose
 # name is not an identifier — `CARGO_BIN_EXE_skein-server`, or an exported function's
 # `BASH_FUNC_<name>%%` — is passed through to every child untouched. None of them can be on the list,
@@ -2798,6 +2809,36 @@ esac
 # directory while its registry was private.
 [ "$peers" = "1" ] || binds+=(--tmpfs "$peer_socks")
 
+# --- The file the sandbox has every bash source (SKEIN-1491) --------------------------------------
+#
+# `/etc/sandbox-persistent.sh` belongs to the sandbox, not to skein. `/etc/profile.d` and
+# `/etc/bash.bashrc` source it in every login and every interactive shell, and export
+# `BASH_ENV` naming it, so every non-interactive bash sources it too. It is owned by the uid every
+# box runs as, and `--dev-bind / /` left it writable in every box: one line appended by one box ran
+# in every later bash of every box of every repository.
+#
+# So a box gets an EMPTY, READ-ONLY file there instead of the sandbox's. Empty and not the
+# sandbox's own copy read-only, for two reasons. A box started before this cover existed could
+# write the real file, and what it wrote is still in it. And a box is given the sandbox's
+# environment by `inherited_env` above, a list of names, and this file would be a second way in
+# that the list does not govern. Measured in this sandbox on 2026-11-17: the file is 0 bytes, so
+# nothing a box has today comes from it.
+#
+# `--ro-bind-data` copies what the descriptor holds, which is nothing, into a file bwrap keeps
+# itself and binds read-only, so there is no source file a box could reach by another path. Only
+# where the file exists as a regular file: bwrap would otherwise create the mount point, and with
+# `/` bound whole that is a write into the sandbox's own `/etc`. Where it is absent there is
+# nothing for a profile to source, and `/etc` is not a directory a box can make it in.
+#
+# Not for the workshop box, which is given the sandbox as it is (as the `/run` cover above is not).
+# `tests/fleet_launch/shellenv.rs` writes to the file from inside a real box and reads it back.
+if [ "${SKEIN_BOX_PRIVILEGED-}" != "1" ] && [ -f "$shell_env_file" ] && [ ! -L "$shell_env_file" ]; then
+  exec {shell_env_fd}</dev/null
+  binds+=(--ro-bind-data "$shell_env_fd" "$shell_env_file")
+  unset shell_env_fd
+fi
+unset shell_env_file
+
 # What this box was actually BORN with, reported the way the ceiling and the launcher revision are.
 #
 # The switch lives in `repos.json`, and flipping it changes not one byte of this script — so
@@ -3988,16 +4029,26 @@ exec bwrap \
   --bind-fd "${tmp_at##*/}" /tmp \
   "${binds[@]}" \
   -- \
-  bash -lc '
+  bash --noprofile --norc -c '
     tmux_bin="$1"; session="$2"; sock="$3"; pidfile="$4"; tree="$5"; box_path="$6"; repo_tools="$7"
     rustup_home="$8"; repo_kinds="$9"
     shift 9
+    # NOT a login shell, and that is the point of the spelling above (SKEIN-1492). This block is the
+    # launcher talking: its stdout is the channel skein reads the anchor from. As bash -lc it
+    # sourced ~/.bash_profile out of the box own home first, a file the box writes, so the box had
+    # the first word on that channel and, with a trap on EXIT, the last. It sources nothing now:
+    # no profile, no rc file, and no BASH_ENV, which the list at the top no longer inherits. The
+    # agent still gets a login shell, because the pane command skein passes is itself bash -lc,
+    # and what that one prints goes to the pane.
+    #
+    # That is not what skein rests on. A process in this box can still write to this shell stdout
+    # through /proc, so skein checks at fleet scope that the pid named here is in this box
+    # (anchor_belongs_probe in src/place/record.rs) and records nothing if it is not.
+    #
     # The box own PATH, decided at the top of this file and handed across as a positional.
     #
-    # HERE and not before the exec, and not with bwrap --setenv, for the two reasons written up
-    # there: this is a LOGIN shell, so the profile has already been sourced by the time this line
-    # runs and an export here is the only one of the three spellings a profile cannot undo — and
-    # setting it before the exec would resolve bwrap itself through a box-writable directory.
+    # HERE and not before the exec, and not with bwrap --setenv: setting it before the exec would
+    # resolve bwrap itself through a box-writable directory.
     #
     # What it reaches is everything, which is the point. tmux inherits it, the server the next line
     # starts inherits it from tmux, and the pane command -- the agent -- inherits it from the
@@ -4023,9 +4074,8 @@ exec bwrap \
     # version: a box is still told when it is behind, which is what must stay true while the
     # installing moves to skein.
     #
-    # Exported HERE for the reason the paragraph above gives about PATH -- a login shell sources
-    # the profile before it runs this command string, so an export in this block is the one
-    # spelling a profile cannot undo -- and it reaches the agent down the same tmux chain.
+    # Exported HERE for the reason the paragraph above gives about PATH, and it reaches the agent
+    # down the same tmux chain.
     export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
     # The fleet shared Rust toolchain, whose bin is already on box_path (SKEIN-1337). Exported here
     # for the same reason as the two above. CARGO_HOME is the box own, unless the repo download
@@ -4129,8 +4179,8 @@ exec bwrap \
     # to start — while the client still exits 0. Silent, and it reads exactly like a namespace
     # restriction. Unset it: this box session is not nested inside anything.
     unset TMUX TMUX_TMPDIR
-    # cd here rather than relying on bwrap --chdir: this is a LOGIN shell, and sourcing the
-    # profile can move it. Observed doing exactly that — the box started at / instead of its tree.
+    # cd here rather than relying on bwrap --chdir. This was a login shell once, and sourcing the
+    # profile moved it: the box started at / instead of its tree.
     cd "$tree" || exit 1
     "$tmux_bin" -S "$sock" new-session -d -s "$session" -- "$@" || exit 1
     # The anchor. A namespace lives as long as some process is in it, and the tmux server
@@ -4147,7 +4197,7 @@ exec bwrap \
     # A confused deputy walking straight through the file cover above.
     #
     # (No apostrophes and no single quotes in here: the whole block is one single-quoted argument
-    # to bash -lc, so either one ends it early. Caught by a box that tried to cd to its pidfile.)
+    # to bash, so either one ends it early. Caught by a box that tried to cd to its pidfile.)
     anchor="$("$tmux_bin" -S "$sock" display -p "#{pid}")" || exit 1
     printf "%s\n" "$anchor" > "$pidfile"
     printf "SKEIN_ANCHOR %s\n" "$anchor"

@@ -143,6 +143,65 @@ pub(crate) fn anchor_probe(pid: u32) -> String {
     )
 }
 
+/// The shell that says whether `pid` is a process of the box whose `/tmp` is the directory
+/// `box_tmp`: one line, `SKEIN_BELONGS <verdict> <starttime>` (SKEIN-1492).
+///
+/// Run in the SANDBOX, like [`anchor_probe`], and for the launch path: there the pid is what the
+/// launcher's stdout said, and a box can write to that stdout. Every box shares one PID namespace,
+/// so the pid it writes can be a sibling's tmux server, or a process of skein's own outside every
+/// box, and a crossing into "this box" would then land there.
+///
+/// The verdicts, and `own` is the only one a caller may record:
+///
+///   * `gone`: no such process.
+///   * `unreadable`: its mount namespace cannot be read, which is a process of another user.
+///   * `fleet`: it is in the mount namespace this probe runs in, so it is outside every box.
+///   * `foreign`: what it sees at `/tmp` is not this box's `tmp` directory.
+///   * `own`: it is in another mount namespace, and `/tmp` there is this box's `tmp`.
+///
+/// **Why `/tmp`.** The launcher binds each box's own `tmp` over `/tmp` in every box, the workshop
+/// box included (`--bind-fd … /tmp` on the launcher's `exec bwrap`), and in no other namespace. So
+/// `/proc/<pid>/root/tmp` and `<box root>/tmp` are one directory, by device and inode, exactly
+/// for a process of this box. A box cannot make that true of a process it does not own: it would
+/// have to change what a sibling's namespace has mounted at `/tmp`. It can make it false of its
+/// own, and then it is its own start that is refused.
+///
+/// Neither `stat` follows a link in the last component. `<box root>/tmp` is a name in a directory
+/// the box writes, and a link left there to a sibling's `tmp` would otherwise make the sibling's
+/// processes read as this box's.
+///
+/// The start time is printed so the caller can require that the process it checked is the process
+/// [`anchor_probe`] then stamps.
+pub(crate) fn anchor_belongs_probe(pid: u32, box_tmp: &str) -> String {
+    format!(
+        "skein_p=/proc/{pid}; skein_t={tmp}\n\
+         skein_s=\"$(sed -n 's/.*) //p' \"$skein_p/stat\" 2>/dev/null | cut -d' ' -f20)\"\n\
+         skein_v=own\n\
+         if [ -z \"$skein_s\" ]; then skein_v=gone\n\
+         elif ! skein_ns=\"$(readlink \"$skein_p/ns/mnt\" 2>/dev/null)\" || [ -z \"$skein_ns\" ]; \
+         then skein_v=unreadable\n\
+         elif [ \"$skein_ns\" = \"$(readlink /proc/self/ns/mnt 2>/dev/null)\" ]; then skein_v=fleet\n\
+         else\n\
+           skein_a=\"$(stat -c %d:%i \"$skein_p/root/tmp\" 2>/dev/null)\"\n\
+           skein_b=\"$(stat -c %d:%i \"$skein_t\" 2>/dev/null)\"\n\
+           if [ -z \"$skein_a\" ] || [ \"$skein_a\" != \"$skein_b\" ] || [ -L \"$skein_t\" ] \
+              || [ ! -d \"$skein_t\" ]; then skein_v=foreign; fi\n\
+         fi\n\
+         printf 'SKEIN_BELONGS %s %s\\n' \"$skein_v\" \"${{skein_s:-0}}\"",
+        tmp = crate::util::sh_quote(box_tmp),
+    )
+}
+
+/// Read what [`anchor_belongs_probe`] printed: `(verdict, starttime)`, or `None` if it said
+/// nothing. The first such line, which is the probe's own: nothing after it is read.
+pub(crate) fn parse_anchor_belongs(out: &str) -> Option<(String, u64)> {
+    let said = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("SKEIN_BELONGS "))?;
+    let (verdict, start) = said.trim().split_once(' ')?;
+    Some((verdict.to_string(), start.trim().parse().ok()?))
+}
+
 /// Which boxes are running, decided in this process with nothing forked.
 ///
 /// It was the local half of a pair: `fleet::fleet_liveness` chose between this and a generated

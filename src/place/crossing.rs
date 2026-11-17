@@ -348,7 +348,7 @@ fn parse_session_cache_names(script: &str) -> Vec<String> {
 /// `nsenter` or `bash` in front of the hop would read (`LD_*`, `BASH_ENV`, `ENV`, `IFS`,
 /// `SHELLOPTS`, `BASHOPTS`). The value is the box's session's, which a box can influence.
 ///
-/// Parsed strictly: the block from the line `bash -lc '` to the line that opens `' bash `, with
+/// Parsed strictly: the block from the line `bash --noprofile --norc -c '` to the line that opens `' bash `, with
 /// `\` continuations joined, comments dropped, and every word after an `export` a shell
 /// identifier, alone or with `=`. `the_names_a_crossing_takes_from_the_session_are_every_export`
 /// pins what this reads today.
@@ -359,7 +359,7 @@ pub fn session_exports() -> &'static [String] {
 
 /// The line that opens the session block, as `src/box-session.sh` spells it, and the start of the
 /// line that closes it.
-const SESSION_OPEN: &str = "bash -lc '";
+const SESSION_OPEN: &str = "bash --noprofile --norc -c '";
 const SESSION_CLOSE: &str = "' bash ";
 
 /// The one value of `PATH` the session block may export: the launcher's `box_path`, which
@@ -723,8 +723,11 @@ mod tests {
                 "{name} points the session at the repo cache and a crossing does not carry it"
             );
         }
-        let block =
-            |body: &str| format!("  bash -lc '\n    export PATH=\"$box_path\"\n{body}  ' bash x\n");
+        let block = |body: &str| {
+            format!(
+                "  bash --noprofile --norc -c '\n    export PATH=\"$box_path\"\n{body}  ' bash x\n"
+            )
+        };
         assert_eq!(
             parse_session_exports(&block(
                 "    # export SKEIN_TEST_COMMENT=1\n\

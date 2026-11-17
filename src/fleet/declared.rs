@@ -479,7 +479,9 @@ mod tests {
             } else if all.contains("/proc/4242/stat") || all.contains("/proc/4243/stat") {
                 "echo 'boot-b 900'".to_string()
             } else if all.contains("/proc/5001/stat") {
-                "echo 'boot-b 901'".to_string()
+                // The relaunch's anchor is the box's word, so the stamp asks first whether that
+                // process is in the box (SKEIN-1492): the verdict, then the stamp itself.
+                "echo 'SKEIN_BELONGS own 901'; echo 'boot-b 901'".to_string()
             } else {
                 String::new()
             };

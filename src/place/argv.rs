@@ -46,7 +46,8 @@ impl Place {
         }
     }
 
-    /// The two argv elements that put the rest of a crossing on a **fixed** PATH (ISO-1).
+    /// The argv elements that put the rest of a crossing on a **fixed** PATH (ISO-1), and take
+    /// `BASH_ENV` and `ENV` out of its environment (SKEIN-1491).
     ///
     /// One function because [`Self::enter`] and [`Self::shell`] both need it, and they are two
     /// halves of one property: everything skein runs at fleet scope resolves its programs from
@@ -58,8 +59,26 @@ impl Place {
     /// program rather than five, it is the same one [`Self::shell`] has always been exposed to, and
     /// spelling it `/usr/bin/env` would trade a PATH lookup for a hard-coded location nothing else
     /// in this tree assumes. Said out loud rather than left for a reader to find.
+    ///
+    /// **`-u BASH_ENV -u ENV`, because a fixed PATH decides which `bash` runs and not what it
+    /// reads first.** A non-interactive bash sources the file `BASH_ENV` names before the first
+    /// line of its script. In the fleet sandbox that is `/etc/sandbox-persistent.sh`, a file owned
+    /// by the uid every box runs as, and `skein-server` inherits the name from the session it was
+    /// started in. So every fleet-scope `bash -c`, the shell in front of every crossing and the
+    /// launcher itself would run what a box had written there, outside every namespace. `env`
+    /// is spawned directly, with no shell in front of it, so nothing reads the file before the
+    /// name is gone. `ENV` is the same door for a POSIX-mode shell. The launcher keeps a box from
+    /// writing the file as well (`shell_env_file` in `src/box-session.sh`); this is the half that
+    /// does not depend on every box having been restarted since.
     fn path_pin() -> Vec<String> {
-        vec!["env".into(), format!("PATH={FLEET_PATH}")]
+        vec![
+            "env".into(),
+            "-u".into(),
+            "BASH_ENV".into(),
+            "-u".into(),
+            "ENV".into(),
+            format!("PATH={FLEET_PATH}"),
+        ]
     }
 
     /// The `nsenter` hop that puts a command inside this box's namespace — empty when the sandbox
@@ -644,6 +663,10 @@ mod tests {
             ours.exec_argv("echo hi"),
             [
                 "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "bash",
                 "-c",
@@ -705,6 +728,10 @@ mod tests {
             p.exec_argv("echo hi"),
             [
                 "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "bash",
                 "-c",
@@ -718,6 +745,10 @@ mod tests {
             p.write_argv("cat > f"),
             [
                 "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "bash",
                 "-c",
@@ -775,10 +806,24 @@ mod tests {
         // unpinned they resolved from the PATH of whoever spawned this — a person's shell, for
         // `skein attach`. Asserted by value rather than by presence: an `env` with some other
         // PATH in it would satisfy a `contains("env")`.
-        assert_eq!(&argv[..2], ["env", &format!("PATH={FLEET_PATH}")]);
+        //
+        // **And `BASH_ENV` and `ENV` are gone before that bash starts** (SKEIN-1491): it would
+        // otherwise source the file the sandbox names there, which every box can write, ahead of
+        // the guard. `tests/fleet_launch/shellenv.rs` runs this against a planted file.
+        assert_eq!(
+            &argv[..6],
+            [
+                "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
+                &format!("PATH={FLEET_PATH}")
+            ]
+        );
         // A shell, because the anchor check has to run in the process that crosses. The caller's
         // argv rides in as `"$@"`, so nothing between here and `nsenter` re-quotes it.
-        assert_eq!(&argv[2..4], ["bash", "-c"]);
+        assert_eq!(&argv[6..8], ["bash", "-c"]);
         // The far side of the hop, by value: the box's HOME, its name, **its PATH**, and its tree.
         // The PATH's directories are spelled out rather than built from the constants, so that
         // changing either constant has to be a deliberate edit to a string a reader can compare
@@ -817,9 +862,9 @@ mod tests {
             path.ends_with(FLEET_PATH),
             "and the root-owned directories are still behind it: {path}"
         );
-        assert_eq!(&argv[5..8], ["bash", "bash", "-lc"]);
+        assert_eq!(&argv[9..12], ["bash", "bash", "-lc"]);
 
-        let crossing = &argv[4];
+        let crossing = &argv[8];
         // The order is the property: refuse, THEN cross. Reversed, the check is a log line.
         let checked = crossing
             .find("skein_start=")
@@ -856,8 +901,17 @@ mod tests {
         // be true is that the body lands inside the box's namespace rather than the sandbox's.
         let w = p.write_argv("cat > f");
         assert_eq!(
-            &w[..4],
-            ["env", &format!("PATH={FLEET_PATH}"), "bash", "-c"]
+            &w[..8],
+            [
+                "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
+                &format!("PATH={FLEET_PATH}"),
+                "bash",
+                "-c"
+            ]
         );
         assert!(w.iter().any(|a| a.contains("--preserve-credentials")));
         // And a streamed copy enters the namespace too, or it would `cat` the wrong /tmp entirely.
@@ -880,13 +934,23 @@ mod tests {
         let skein_home = crate::testutil::tempdir();
         std::env::set_var("SKEIN_HOME", &skein_home);
         let p = shared("", 0);
-        // Index 4, because the crossing is the third element of `bash -c <crossing> bash …` and
-        // that shell is behind the PATH pin `enter` puts in front of every crossing (SKEIN-832).
-        // There is still no hop in front of THAT (SKEIN-576) — the pin is two argv elements, not a
+        // Index 8, because the crossing is the third element of `bash -c <crossing> bash …` and
+        // that shell is behind the pin `enter` puts in front of every crossing (SKEIN-832). There
+        // is still no hop in front of THAT (SKEIN-576) — the pin is six argv elements, not a
         // machine boundary.
         let argv = p.exec_argv("git status");
-        assert_eq!(&argv[..2], ["env", &format!("PATH={FLEET_PATH}")]);
-        let crossing = argv[4].clone();
+        assert_eq!(
+            &argv[..6],
+            [
+                "env",
+                "-u",
+                "BASH_ENV",
+                "-u",
+                "ENV",
+                &format!("PATH={FLEET_PATH}")
+            ]
+        );
+        let crossing = argv[8].clone();
         assert!(
             crossing.contains("exit 78") && !crossing.contains("nsenter --user"),
             "an unprovable address must not reach nsenter at all: {crossing}"

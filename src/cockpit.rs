@@ -823,6 +823,26 @@ mod tests {
         );
     }
 
+    /// **The shell-environment file the launcher covers is the sandbox's real one** (SKEIN-1491).
+    ///
+    /// `$SKEIN_SHELL_ENV_FILE` exists so `tests/fleet_launch/shellenv.rs` can plant a line in a
+    /// file of its own and ask a real box whether it can write or run it; the real file is the
+    /// live sandbox's. The same condition as the seam above: honest only while the default is the
+    /// path production has.
+    ///
+    /// **What would make this fail:** changing the fallback, or making the variable mandatory.
+    #[test]
+    fn the_shell_environment_cover_still_defaults_to_the_sandboxs_own_file() {
+        let launcher = include_str!("box-session.sh");
+        assert!(
+            launcher.contains(
+                r#"shell_env_file="${SKEIN_SHELL_ENV_FILE:-/etc/sandbox-persistent.sh}""#
+            ),
+            "the file the launcher covers is no longer `/etc/sandbox-persistent.sh` when nobody \
+             overrides it, so the cover and its test are aimed at a file no sandbox sources"
+        );
+    }
+
     /// **Discovery and transport are never independently switchable** (§9.5 R11, SKEIN-572).
     ///
     /// The mount test in `tests/isolation_bwrap/` is the real one — it runs bwrap and asks the
