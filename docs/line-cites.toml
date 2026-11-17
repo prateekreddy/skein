@@ -773,132 +773,132 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub scoped: Option<bool>,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/box-session.sh:130"]
+["src/box-session.sh:131"]
 line = "box_path=\"$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.repo-tools/tools/bin:$HOME/.cargo/bin:$HOME/.skein-bin:$PATH\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:947"]
+["src/box-session.sh:979"]
 line = "own_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:970"]
+["src/box-session.sh:1002"]
 line = "pin_dir() {"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1049"]
+["src/box-session.sh:1081"]
 line = "open_new \"$tmp_at\" skein-start-id && printf '%s\\n' \"$start_id\" >&\"$new_fd\" && land_new =rw || { drop_new; exit 1; }"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1120"]
+["src/box-session.sh:1152"]
 line = "seed_paths=(\".codex\" \".gitconfig\" \".bashrc\" \".profile\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1165"]
+["src/box-session.sh:1197"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1294"]
+["src/box-session.sh:1326"]
 line = "login_life() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/box-session.sh:1492"]
+["src/box-session.sh:1524"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1708"]
+["src/box-session.sh:1740"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1856"]
+["src/box-session.sh:1888"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1890"]
+["src/box-session.sh:1922"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2240"]
+["src/box-session.sh:2272"]
 line = "if [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then"
 window = "# launcher, the credential helper and the substrate queue all live there).\u000bif [ \"${SKEIN_BOX_PRIVILEGED-}\" != \"1\" ]; then\u000b# Whether anything told this box which mounts are its own — decided HERE, well before the banner"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2287"]
+["src/box-session.sh:2319"]
 line = "binds+=(--tmpfs \"$fleet_root_dir\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2330"]
+["src/box-session.sh:2362"]
 line = "[ -d \"$private\" ] && binds+=(--tmpfs \"$private\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2397"]
+["src/box-session.sh:2429"]
 line = "binds+=(--tmpfs \"$state_parent\" --ro-bind \"$state\" \"$state\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2421"]
+["src/box-session.sh:2453"]
 line = "# Absent variable ⇒ no cover, deliberately. A launcher already installed in a running sandbox"
 cited_by = ["docs/architecture.md"]
 
-["src/box-session.sh:2446"]
+["src/box-session.sh:2478"]
 line = "binds+=(--tmpfs \"$fleet_mount\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2454"]
+["src/box-session.sh:2486"]
 line = "binds+=(--bind \"$SKEIN_BOX_STORE\" \"$SKEIN_BOX_STORE\")"
 cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2463"]
+["src/box-session.sh:2495"]
 line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
 cited_by = ["docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2590"]
+["src/box-session.sh:2622"]
 line = "[ -n \"$repo_cache\" ] && binds+=(--bind \"$repo_cache\" \"$repo_cache\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2641"]
+["src/box-session.sh:2673"]
 line = "binds+=(--bind-fd \"$repo_tools_fd\" \"$HOME/.repo-tools\")"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
-["src/box-session.sh:2735"]
+["src/box-session.sh:2767"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2736"]
+["src/box-session.sh:2768"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2799"]
+["src/box-session.sh:2831"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3010"]
+["src/box-session.sh:3072"]
 line = "binds+=(--remount-ro \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3012"]
+["src/box-session.sh:3074"]
 line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3351"]
+["src/box-session.sh:3413"]
 line = "if [ \"${SKEIN_GIT_SCOPE-repo}\" != \"fleet\" ]; then"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3479"]
+["src/box-session.sh:3541"]
 line = "binds+=(--ro-bind-fd \"$new_fd\" \"$SSH_AUTH_SOCK\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3922"]
+["src/box-session.sh:3984"]
 line = "# No --unshare-pid: the pid recorded below has to be the pid skein sees from outside, or nsenter has"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3986"]
+["src/box-session.sh:4048"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:4029"]
+["src/box-session.sh:4100"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:4095"]
+["src/box-session.sh:4166"]
 line = "export SKEIN_REPO_TOOLS=\"$repo_tools\" CARGO_INSTALL_ROOT=\"$repo_tools/tools\" \\"
 cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
@@ -1434,19 +1434,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/stop.rs:262"]
+["src/fleet/stop.rs:274"]
 line = "/// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`."
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/stop.rs:304"]
+["src/fleet/stop.rs:358"]
 line = "\"{name}'s placement record predates the anchor check, so skein cannot prove the \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/stop.rs:310"]
+["src/fleet/stop.rs:364"]
 line = "\"{name}'s anchor belongs to an earlier boot of the sandbox, so that pid now names \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/stop.rs:316"]
+["src/fleet/stop.rs:370"]
 line = "\"{name}'s anchor pid has been reused by a different process since skein recorded it; \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1620,7 +1620,7 @@ cited_by = ["docs/inventory.md"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
-["src/place/argv.rs:331"]
+["src/place/argv.rs:350"]
 line = "gone and so is everything else that was running in it — start them again with: skein \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1628,7 +1628,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "/// `CAP_SYS_ADMIN` in its own user namespace, so it can mount over its view of `/proc` and answer"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/place/record.rs:289"]
+["src/place/record.rs:348"]
 line = ".filter(|sandbox| !sandbox.is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1668,7 +1668,7 @@ cited_by = ["docs/decisions/one-identity.md"]
 line = "/// GraphQL, because REST cannot rebase: `PUT …/update-branch` takes `expected_head_sha` and merges,"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/prwork/perform.rs:1410"]
+["src/prwork/perform.rs:1413"]
 line = "// The step was decided about `abc1234`; the pull request in hand has moved to `def5678`."
 cited_by = ["docs/citations.toml"]
 

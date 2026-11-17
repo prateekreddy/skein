@@ -597,13 +597,15 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     // ---- the whole-box restart, and what the box cannot forge about it (SKEIN-1326) ----
     // The box is recorded as started under an older launcher and restarted through
     // `sandbox::restart_box`, the path `skein restart` and the cockpit's Restart both take. And the
-    // box is given a say it must not have: a `~/.bash_profile` in its own private home, which the
-    // launcher's `bash -lc` inside the namespace sources, printing a revision of its own onto the
-    // same stdout skein reads the launcher's off.
+    // box is given a say it must not have: a `~/.bash_profile` in its own private home, printing a
+    // revision of its own. The launcher's block inside the namespace was a login shell and sourced
+    // it, onto the same stdout skein reads the launcher's off; it sources no profile now
+    // (SKEIN-1492), and only the pane's own login shell runs it.
     //
-    // What would make this fail: `launcher_from_launch` taking the last line (the record then holds
-    // the box's word, `forged-by-the-box`); `restart_box` not stopping the box (the anchor is the
-    // old one) or not starting it again (no record, or the old launcher still in it).
+    // What would make this fail: the launcher's block spelled `bash -lc` again AND
+    // `launcher_from_launch` taking the last line (the record then holds the box's word,
+    // `forged-by-the-box`); `restart_box` not stopping the box (the anchor is the old one) or not
+    // starting it again (no record, or the old launcher still in it).
     let before = shared_record(name).expect("the box is placed");
     record_place(
         name,

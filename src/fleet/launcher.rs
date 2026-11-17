@@ -182,10 +182,15 @@ fn stamped_launcher() -> String {
 /// Empty where no launcher answered — a record from before this, a launcher too old to print it, or
 /// the adoption path. Read as *unknown*, not as *capped*: the whole point is that a box with no
 /// ceiling is invisible, and defaulting to the reassuring answer would rebuild that.
+///
+/// **The first line, not the last**, for the reason [`launcher_from_launch`] gives (SKEIN-1492).
+/// The launcher prints its own line before the box's namespace exists, so the first one is the
+/// launcher's; a later `SKEIN_LIMITS capped …` is one the box can print, and read last-wins it
+/// would let a box with no ceiling be reported as having one.
 pub fn limits_from_launch(out: &str) -> String {
     out.lines()
         .filter_map(|l| l.trim().strip_prefix("SKEIN_LIMITS "))
-        .next_back()
+        .next()
         .map(|state| state.trim().to_string())
         .unwrap_or_default()
 }
@@ -727,6 +732,15 @@ mod tests {
         assert_eq!(
             limits_from_launch("SKEIN_ANCHOR 42\nSKEIN_LIMITS capped max=1G\n"),
             "capped max=1G"
+        );
+        // The launcher's line is printed before the box exists, so it is the first; one after it
+        // is the box's. Fails if `limits_from_launch` takes the last line (SKEIN-1492).
+        assert_eq!(
+            limits_from_launch(
+                "SKEIN_LIMITS uncapped no-cgroup-delegation\nSKEIN_LIMITS capped max=1G\n"
+            ),
+            "uncapped no-cgroup-delegation",
+            "a box that printed its own SKEIN_LIMITS line was reported as having a ceiling"
         );
         assert_eq!(
             limits_from_launch("SKEIN_ANCHOR 42\n"),

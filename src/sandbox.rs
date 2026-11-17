@@ -2232,12 +2232,13 @@ mod tests {
                 argv[0], "env",
                 "an attach no longer pins PATH before it crosses: {argv:?}"
             );
+            // `-u BASH_ENV -u ENV` sits between the two (SKEIN-1491), so the PATH is the sixth.
             assert!(
-                argv[1].starts_with("PATH="),
+                argv[5].starts_with("PATH="),
                 "an attach's pin is not a PATH: {argv:?}"
             );
             assert_eq!(
-                &argv[2..4],
+                &argv[6..8],
                 ["bash", "-c"],
                 "the attach begins with the shell that checks the anchor before it crosses"
             );

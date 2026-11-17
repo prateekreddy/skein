@@ -97,11 +97,13 @@ fn write_remote(root: &Path) -> String {
     remote.to_string_lossy().into_owned()
 }
 
+mod anchor;
 mod browsers;
 mod environment;
 mod fixture;
 mod lifecycle;
 mod onboarding;
+mod shellenv;
 mod start;
 mod sudo;
 mod swapped;

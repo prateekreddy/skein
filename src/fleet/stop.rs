@@ -240,8 +240,14 @@ pub(super) fn session_reach(
 
 /// What the launcher printed on stdout, or an error naming what it printed instead.
 ///
-/// The marker rather than "the last line": the launcher runs a login shell inside the box, and a
-/// profile that echoes anything at all would otherwise become the pid skein enters.
+/// The marker rather than "the last line", so that a stray number is not an anchor.
+///
+/// **What this returns is a claim, and the marker does not make it more than one** (SKEIN-1492).
+/// The line is printed inside the box's namespace. It was printed by a login shell, so the box's
+/// own `~/.bash_profile` could print a marker line of its own, and with a trap on `EXIT` print it
+/// last. The launcher's block sources no profile now, and a process in the box can still write to
+/// that shell's stdout through `/proc`. So nothing may record this pid before [`stamp_anchor`] has
+/// checked, from outside every box, that it is a process of the box that was started.
 pub fn anchor_from_launch(out: &str) -> Result<u32, String> {
     out.lines()
         .filter_map(|l| l.trim().strip_prefix("SKEIN_ANCHOR "))
@@ -255,16 +261,64 @@ pub fn anchor_from_launch(out: &str) -> Result<u32, String> {
         })
 }
 
-/// Ask the sandbox what `pid` is, and stamp it.
+/// Ask the sandbox whether `ns_pid` is a process of the box `name`, and stamp it only if it is.
+///
+/// For the launch path, where `ns_pid` is what the launcher's stdout said
+/// ([`anchor_from_launch`]) and is therefore the box's word. Every box shares one PID namespace,
+/// so the pid can be a sibling box's tmux server, or a process of skein's own; recorded, it is
+/// where every later crossing into `name` lands and what a stop of `name` kills (SKEIN-1492).
+/// [`crate::place::anchor_belongs_probe`] is the check and says why it is `/tmp` that is compared.
 ///
 /// One `sbx exec` on the launch path, which is not a hot path — and it has to be a separate one
 /// from the launch itself, because the answer has to come from OUTSIDE every box namespace. A box
 /// holds `CAP_SYS_ADMIN` in its own user namespace and can mount over its view of `/proc`.
-pub(super) fn stamp_anchor(
-    sandbox: &str,
-    name: &str,
-    ns_pid: u32,
-) -> Result<(String, u64), String> {
+///
+/// The check and the stamp are one script, and the start time is read by both: a pid that named
+/// one process when it was checked and another when it was stamped is refused.
+pub fn stamp_anchor(sandbox: &str, name: &str, ns_pid: u32) -> Result<(String, u64), String> {
+    let script = format!(
+        "{}\n{}",
+        crate::place::anchor_belongs_probe(ns_pid, &format!("{}/tmp", box_root(name))),
+        anchor_probe(ns_pid)
+    );
+    let out = own_sandbox(sandbox).exec(&script, Duration::from_secs(10))?;
+    let refused = |what: &str| {
+        format!(
+            "{name}'s launcher reported pid {ns_pid} as its anchor and {what}, so skein has \
+             recorded no address for {name}; restart it with `skein restart {name}`"
+        )
+    };
+    let (verdict, checked) = crate::place::parse_anchor_belongs(&out).ok_or_else(|| {
+        format!(
+            "the sandbox could not say whether pid {ns_pid} is a process of {name}, so {name} \
+             has no usable address"
+        )
+    })?;
+    match verdict.as_str() {
+        "own" => {}
+        "gone" => return Err(refused("no such process exists")),
+        "fleet" => return Err(refused("that process is outside every box")),
+        "foreign" => return Err(refused("that process is not in this box")),
+        _ => {
+            return Err(refused(
+                "the sandbox cannot read which namespace that process is in",
+            ))
+        }
+    }
+    let (generation, start) = parse_anchor_probe(&out).ok_or_else(|| {
+        format!("the sandbox could not say what pid {ns_pid} is, so {name} has no usable address")
+    })?;
+    if start != checked {
+        return Err(refused("that pid changed hands while it was being checked"));
+    }
+    Ok((generation, start))
+}
+
+/// Ask the sandbox what the pid skein already recorded is now: `(boot id, start time)`.
+///
+/// No belonging check, unlike [`stamp_anchor`]: the pid here is skein's own record and not the
+/// box's word, and [`anchor_matches`] compares the answer with that record.
+fn recorded_anchor_now(sandbox: &str, name: &str, ns_pid: u32) -> Result<(String, u64), String> {
     let out = own_sandbox(sandbox).exec(&anchor_probe(ns_pid), Duration::from_secs(10))?;
     parse_anchor_probe(&out).ok_or_else(|| {
         format!("the sandbox could not say what pid {ns_pid} is, so {name} has no usable address")
@@ -287,7 +341,7 @@ pub(super) fn adopt_anchor(sandbox: &str, name: &str) -> Result<(u32, String, u6
              that did not come from the box; restart it with `skein restart {name}`"
         )
     })?;
-    let seen = stamp_anchor(sandbox, name, record.ns_pid)?;
+    let seen = recorded_anchor_now(sandbox, name, record.ns_pid)?;
     anchor_matches(name, &record, &seen)?;
     Ok((record.ns_pid, seen.0, seen.1))
 }
@@ -326,10 +380,9 @@ mod tests {
 
     /// The anchor is whatever the launcher *marked*, not whatever it printed last.
     ///
-    /// The launcher runs a login shell inside the box, so the box's own `.profile` gets to write to
-    /// that stream first. Taking the last line would let a box choose the pid skein enters by
-    /// echoing a number on login — the same confused deputy the pidfile gave it, through the
-    /// channel that replaced the pidfile.
+    /// This keeps a stray number from being read as a pid, and that is all it does: a box that
+    /// prints the marker itself is not stopped here. That is `stamp_anchor`'s check, which
+    /// `tests/fleet_launch/anchor.rs` runs against real boxes (SKEIN-1492).
     #[test]
     fn the_launcher_report_is_read_by_its_marker_and_not_by_position() {
         assert_eq!(anchor_from_launch("SKEIN_ANCHOR 4242\n").unwrap(), 4242);

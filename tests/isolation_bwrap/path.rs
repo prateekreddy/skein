@@ -258,12 +258,15 @@ fn a_planted_nsenter_is_not_what_a_crossing_runs() {
             && !name.is_empty()
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     };
+    // The pin also unsets two names, `-u BASH_ENV -u ENV`, ahead of its assignment (SKEIN-1491),
+    // and those go with it: left in front, they would be run as the command.
     let unpinned: Vec<String> = if argv[0] == "env" {
-        argv.iter()
-            .skip(1)
-            .skip_while(|a| assignment(a))
-            .cloned()
-            .collect()
+        let mut rest = argv[1..].iter().peekable();
+        while rest.peek().is_some_and(|a| *a == "-u") {
+            rest.next();
+            rest.next();
+        }
+        rest.skip_while(|a| assignment(a)).cloned().collect()
     } else {
         argv.clone()
     };
@@ -287,10 +290,15 @@ fn a_planted_nsenter_is_not_what_a_crossing_runs() {
         argv[0], "env",
         "a crossing no longer begins with a PATH pin: {argv:?}"
     );
+    let pinned = argv
+        .iter()
+        .skip(1)
+        .find(|a| assignment(a))
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        argv[1].starts_with("PATH=") && !argv[1].contains(&bin.display().to_string()),
-        "a crossing's pin is not a PATH, or it carries the box-writable directory itself: {}",
-        argv[1]
+        pinned.starts_with("PATH=") && !pinned.contains(&bin.display().to_string()),
+        "a crossing's pin is not a PATH, or it carries the box-writable directory itself: {pinned}"
     );
 
     match was_home {
@@ -373,7 +381,7 @@ fn launcher_fixed_path() -> String {
 
 /// The launcher's final `exec bwrap` — the whole of it, to end of file.
 ///
-/// This is the one block in `box-session.sh` that *starts a box*: the namespace, the login shell
+/// This is the one block in `box-session.sh` that *starts a box*: the namespace, the shell
 /// inside it, the tmux server that anchors it, and the pane the agent runs in. Lifted rather than
 /// reproduced so that a change to any of those is a change to what these tests run.
 fn session_block() -> String {
@@ -384,7 +392,11 @@ fn session_block() -> String {
         .position(|l| *l == "exec bwrap \\")
         .expect("the launcher's final `exec bwrap` moved");
     let block = lines[from..].join("\n");
-    for landmark in ["bash -lc", "new-session", "\"${pane_cmd[@]}\""] {
+    for landmark in [
+        "bash --noprofile --norc -c",
+        "new-session",
+        "\"${pane_cmd[@]}\"",
+    ] {
         assert!(
             block.contains(landmark),
             "the lifted session block no longer holds `{landmark}`, so this harness is running \
@@ -398,6 +410,10 @@ fn session_block() -> String {
 struct Resolved {
     path: String,
     resolved: String,
+    /// What a LOGIN shell started in the same pane resolved the name to. The launcher's own block
+    /// sources no profile (SKEIN-1492), so this is what shows a planted profile is one a login
+    /// shell in this box does read.
+    login: String,
 }
 
 /// A box being started for real: the launcher's own `exec bwrap` block, with three identically
@@ -416,7 +432,8 @@ struct Started {
     /// Bound over `/etc/profile.d`, holding a script that puts a fourth directory at the head of
     /// PATH. The substrate has no such script (`grep -rn PATH /etc/profile /etc/profile.d/` is
     /// empty here, which is half of why SKEIN-851 existed) — it is planted so that "a login shell
-    /// rebuilds PATH from the profile" is a thing this test can make TRUE and then watch lose.
+    /// rebuilds PATH from the profile" is a thing this test can make TRUE, and then show that the
+    /// launcher's own block is not such a shell.
     profile_decoy: PathBuf,
     tmux_bin: String,
 }
@@ -544,6 +561,7 @@ impl Started {
             "{{ printf 'PATH %s\\n' \"$PATH\"\n\
              printf 'resolved %s\\n' \"$(command -v {PROBE_BIN} || echo none)\"\n\
              printf 'ran %s\\n' \"$({PROBE_BIN} 2>/dev/null || echo none)\"\n\
+             printf 'login %s\\n' \"$(bash -lc 'command -v {PROBE_BIN} || echo none')\"\n\
              }} > /tmp/session-path.part\n\
              mv /tmp/session-path.part /tmp/session-path.report\n\
              exec sleep 20\n"
@@ -644,7 +662,12 @@ impl Started {
              file that answered is not the file that ran and neither half of this test means what \
              it says"
         );
-        Resolved { path, resolved }
+        let login = answer(&text, "login").to_string();
+        Resolved {
+            path,
+            resolved,
+            login,
+        }
     }
 }
 
@@ -674,14 +697,19 @@ impl Started {
 /// | run | block | `/etc/profile.d` planted | what answers |
 /// |---|---|---|---|
 /// | 1 | the PATH export **stripped** | no | `/usr/local/sbin` — the first entry of the fixed six |
-/// | 2 | the PATH export **stripped** | yes | the profile's directory, ahead of all six |
+/// | 2 | the PATH export **stripped** | yes | `/usr/local/sbin` still; a login shell in the pane answers the profile's directory |
 /// | 3 | **as the launcher is** | yes | the box's own `~/.local/bin` |
 ///
 /// Run 1 is not a contrivance: it is precisely the session a freshly installed launcher would have
-/// started before this fix, and what it resolves is the defect. Run 2 makes "a login shell rebuilds
-/// PATH from the profile" *true* — it is false on this substrate — so that run 3 proves the export
-/// is placed where even a substrate that did have such a profile could not undo it. That is why the
-/// export is inside the `bash -lc` and not before the `exec` and not a `--setenv`.
+/// started before this fix, and what it resolves is the defect.
+///
+/// **Run 2 is the launcher's block sourcing no profile** (SKEIN-1492). That block was `bash -lc`,
+/// a login shell, and run 2 then answered the profile's directory: the profile ran before the
+/// launcher's own lines, on the stdout skein reads the box's anchor from, and a box writes a
+/// profile of its own in its home. The block is `bash --noprofile --norc -c` now. So run 2 plants
+/// a profile that really does rebuild PATH, shows it working in a login shell started in the same
+/// pane, and shows the session the launcher started untouched by it. Run 3 is then the export
+/// alone deciding the session's PATH.
 ///
 /// The stripped block is **derived from the real one** and tolerates finding nothing to strip, for
 /// the reason [`a_planted_nsenter_is_not_what_a_crossing_runs`] gives: if the fix is ever removed,
@@ -695,9 +723,9 @@ impl Started {
 /// part worth knowing:
 ///
 ///   * **Deleting `export PATH="$box_path"`** from the session block — run 3's resolution
-///     assertion, naming the **profile** decoy. Not the substrate one, which is what a first draft
-///     of this comment claimed: run 3 is the run with the profile planted, and the profile sits
-///     ahead of all six.
+///     assertion, naming the substrate decoy.
+///   * **Spelling the block `bash -lc` again** — run 2's absence assertion, naming the profile
+///     decoy (SKEIN-1492).
 ///   * **Dropping `"$box_path"`** from the positionals — the box does not start at all. `box_path`
 ///     becomes the pane command's first word, `shift 6` eats it, and tmux is handed a fragment. It
 ///     fails on the harness's own "the box did not start", not on a PATH assertion, and that is
@@ -718,7 +746,7 @@ impl Started {
 ///     the host's `/etc/profile.d` and a host may append to PATH there.
 ///   * **Neutering the strip**, so run 1 is the fixed launcher — run 1's presence assertion, whose
 ///     message counts the lines it removed (`0`) and so says which of the two it is.
-///   * **Taking the profile bind off run 2** — run 2's presence assertion.
+///   * **Taking the profile bind off run 2** — run 2's presence assertion, the login shell's.
 ///   * **Giving the box's copy an unusable shebang** — the `resolved`/`ran` cross-check in
 ///     [`Started::run`], which is the only thing standing between `command -v` answering about a
 ///     name and a binary having actually executed.
@@ -758,18 +786,25 @@ fn the_agent_session_a_box_starts_runs_on_the_boxs_own_path() {
         before.path
     );
 
-    // Run 2 — the same, with a profile that really does rebuild PATH.
+    // Run 2 — the same, with a profile that really does rebuild PATH. First that it does, for a
+    // login shell in this very box; then that the launcher's own block never read it.
     let profiled = started.run(&stripped, true);
     assert_eq!(
-        profiled.resolved,
+        profiled.login,
         started
             .profile_decoy
             .join(PROBE_BIN)
             .to_string_lossy()
             .into_owned(),
-        "the planted `/etc/profile.d` script was never read, so run 3 cannot show the export \
-         beating a profile and the reason it is placed inside the `bash -lc` goes untested. The \
-         session ran on {}",
+        "the planted `/etc/profile.d` script was not read even by a login shell in the box, so the \
+         assertion below would pass whatever shell the launcher's block is"
+    );
+    assert_eq!(
+        profiled.resolved,
+        format!("/usr/local/sbin/{PROBE_BIN}"),
+        "the launcher's session block sourced a profile before it ran: with a profile planted, \
+         the session it started resolved `{PROBE_BIN}` through it. A box writes a profile of its \
+         own, and that block's stdout is where skein reads the box's anchor. The session ran on {}",
         profiled.path
     );
 
