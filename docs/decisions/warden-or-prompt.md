@@ -13,16 +13,16 @@ Which route is taken is detected, never configured.
 **Why.** Some people will not install anything on their own machine. `sbx` is already required, so
 asking them to run the commands skein wants costs them nothing more, and people who do run a warden
 get those prompts done for them. The middle case is already real, not hypothetical: a warden can be
-built with some doers compiled out (`docs/architecture.md:676`, §8.3), and a create-only warden
+built with some doers compiled out (`docs/architecture.md:695`, §8.3), and a create-only warden
 means create is done and destroy is prompted. Two global modes cannot say that, and they would put
 the prompt behind an opt-in — which is how a fallback rots, because the people who need it on the
-day are the ones who never turned it on (`src/warden_client.rs:1097-1104`).
+day are the ones who never turned it on (`src/warden_client.rs:1109-1116`).
 
 **Rules out.**
 
 - Calling the warden dead, or the prompt a stopgap. A change to one privileged act keeps both routes
   working.
-- A setting or a first-run question that picks a route (`src/warden_client.rs:1106`).
+- A setting or a first-run question that picks a route (`src/warden_client.rs:1118`).
 - Reading the warden's advertised capability list to decide. A warden that advertises an act and
   then refuses it falls through to a prompt exactly as one that never claimed it.
 - A prompt that only says what to type. Every prompt carries the command, why skein wants it, and
@@ -31,9 +31,9 @@ day are the ones who never turned it on (`src/warden_client.rs:1097-1104`).
 
 **Enforced at.**
 
-- `src/warden_client.rs:1128` — `perform`, the rule, which every privileged caller goes through:
+- `src/warden_client.rs:1140` — `perform`, the rule, which every privileged caller goes through:
   `src/fleet/create.rs:467` and `src/fleet/resize.rs:679`.
-- `src/warden_client.rs:1051` — `Prompt`, whose three fields are the three parts.
-- `src/warden_client.rs:1739` — the test that every act's prompt carries all three, and renders the
+- `src/warden_client.rs:1063` — `Prompt`, whose three fields are the three parts.
+- `src/warden_client.rs:1756` — the test that every act's prompt carries all three, and renders the
   cost of declining where it can be seen.
 - `docs/architecture.md:625` — §8, the warden's design.

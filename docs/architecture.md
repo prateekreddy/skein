@@ -670,8 +670,27 @@ itself on deleting the transport-failure-versus-command-failure distinction; tha
 **safety property**, not redundancy, and moving to HTTP relocates the hazard rather than removing it.
 Operation ids, and the warden answers a repeated id with the original outcome — which means the
 warden has **durable state of its own**, on the host: an outcome store keyed by operation id, with a
-retention window (an id older than the window is answered "unknown", never re-executed). It is a
-module in §14 and a thing to back up, not an implementation detail.
+retention window (an id older than the window is answered "unknown" rather than re-executed). It is
+a module in §14 and a thing to back up, not an implementation detail.
+
+**A record answers a repeat only while the host is still as that run left it** (SKEIN-1493). The id
+is derived from the work, so it says what is asked and not which time: `destroy skein-fleet` is one
+id for ever, and a create with the same arguments is another. Answered from the record
+unconditionally, the second resize of a fleet was told "destroyed" with nobody asked and nothing
+run, and after the window it was "unknown" for good. So before a finished record is used the warden
+looks — `sbx ls` for create and destroy, `sbx ports` for the two port doers (`warden/src/doer.rs`,
+`undone`). The sandbox a destroy removed is still gone: that is a retry, and it is answered. It is
+standing again: the record is about a fleet that no longer exists, so it is retired with a
+`superseded` line in the audit log, and the request is put to a person like a first one. A listing
+that cannot be read is neither answer; nothing is replayed and nothing runs.
+
+The property is therefore **one approval, one execution**, and it does not depend on the caller
+remembering which attempt it is on — which skein could not do across a destroy, because the destroy
+ends it. A caller that crashed after sending a destroy and retries once the fleet has been recreated
+does not get the old "destroyed", and does not get a second destroy either: it gets the approval
+prompt, and the person at the host decides. An operation still in flight is the one case the host is
+not asked about: a warden killed inside `sbx` leaves the command running, and a host half way
+through a destroy reads like one nobody has touched, so that stays "undecided".
 
 ### 8.3 Capabilities are compiled
 
@@ -2399,7 +2418,8 @@ timeout on a warden request, and §8.2's operation ids are what answer it there.
 distinction without carrying the safety property forward is how this becomes worse than what it
 replaced. It is carried and it is checked: `warden_client::operation_id` is **derived** from the
 verb, the sandbox and the argv rather than minted per attempt — so a retry after a restart names the
-same operation instead of making a second one — and `Answered::happened` is three-valued, with
+same operation instead of making a second one, and §8.2 says what keeps a later request for the same
+work from being answered as that retry — and `Answered::happened` is three-valued, with
 `Undecided` and `Unknown` mapping to `None` and never to `false`, because for a destroy "we do not
 know" and "it did not happen" license opposite actions.
 

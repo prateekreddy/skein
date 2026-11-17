@@ -216,7 +216,18 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     let mut cmd = CommandBuilder::new(warden_bin.to_str().unwrap());
     cmd.env("SKEIN_WARDEN_PORT", ASK_THE_OS);
     cmd.env("SKEIN_WARDEN_HOME", root.join("state").to_str().unwrap());
-    cmd.env("SKEIN_WARDEN_LS_CMD", "printf '[]'");
+    // **The listing follows the create**, because the retry below is answered from the record only
+    // while the sandbox the create made is still on the host (SKEIN-1493). It was a fixed
+    // `printf '[]'`: a host on which the fleet never appears, where the honest answer to the retry
+    // is to ask again. `recording_sbx` keeps no host, so the listing is read off what it logged.
+    cmd.env(
+        "SKEIN_WARDEN_LS_CMD",
+        format!(
+            "if grep -q '^argv create' '{log}' 2>/dev/null; then \
+             printf '[{{\"name\":\"skein-fleet\"}}]'; else printf '[]'; fi",
+            log = log.display()
+        ),
+    );
     cmd.env(
         "PATH",
         format!(
@@ -335,7 +346,8 @@ fn skein_asks_the_warden_a_person_approves_and_sbx_runs_once() {
     );
 
     // ---- and the retry, which is the whole of §8.2 ----
-    // Same call, same derived id, no second prompt and no second `sbx`.
+    // Same call, same derived id, no second prompt and no second `sbx` — the sandbox is on the
+    // host, so the record of making it is still the answer.
     let again = warden
         .create("skein-fleet", &argv, &env)
         .expect("the warden answered the retry");
