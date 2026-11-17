@@ -93,6 +93,9 @@ pub(super) struct PrNode {
     pub(super) head_ref_oid: String,
     #[serde(deserialize_with = "lenient")]
     pub(super) base_ref_name: String,
+    /// Does the head branch live in another repository — a fork? `None` where GitHub did not say,
+    /// which is not "no": see [`Pr::cross_repository`] for what reads it and why unknown holds.
+    pub(super) is_cross_repository: Option<bool>,
     #[serde(deserialize_with = "lenient")]
     pub(super) review_decision: String,
     #[serde(deserialize_with = "lenient")]
@@ -476,6 +479,7 @@ pub(super) fn build_pr(
         head_ref,
         head_sha,
         base_ref: item.base_ref_name.clone(),
+        cross_repository: item.is_cross_repository,
         draft,
         updated_at: item.updated_at.clone(),
         committed_at: head_commit(item)
@@ -2190,5 +2194,79 @@ mod tests {
 
         forget_host_token();
         forget_renames();
+    }
+
+    /// **Whether a pull request comes from a fork is asked for, parsed, and carried — and an
+    /// answer that does not say stays "nobody said"** (SKEIN-1494).
+    ///
+    /// The merge train's branch delete is by name in the base repository, so this field is the
+    /// only thing standing between a fork's `develop` and the base repository's own.
+    ///
+    /// **What would make it fail:** dropping `isCrossRepository` from [`PR_FRAGMENT`] (the first
+    /// assertion); `build_pr` not copying the field across (the fork assertion), or copying it as
+    /// `unwrap_or(false)` — which would make every answer that did not carry it read as
+    /// same-repository, the direction that deletes (the `None` assertion).
+    #[test]
+    fn whether_a_pull_request_comes_from_a_fork_rides_the_row() {
+        assert!(
+            PR_FRAGMENT.contains(" isCrossRepository "),
+            "the query does not ask whether the head branch is a fork's: {}",
+            *PR_FRAGMENT
+        );
+        let row = |extra: serde_json::Value| {
+            let mut node = serde_json::json!({
+                "number": 9, "title": "t", "url": "u", "isDraft": false,
+                "headRefName": "develop", "headRefOid": "abc", "baseRefName": "main",
+                "author": { "login": "someone" },
+            });
+            node.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            build_pr(
+                &node_of(&node),
+                9,
+                "me",
+                &Reason::Reviewer,
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let fork = row(serde_json::json!({ "isCrossRepository": true }));
+        assert_eq!(fork.cross_repository, Some(true));
+        let own = row(serde_json::json!({ "isCrossRepository": false }));
+        assert_eq!(own.cross_repository, Some(false));
+        for unsaid in [
+            serde_json::json!({}),
+            serde_json::json!({ "isCrossRepository": null }),
+        ] {
+            assert_eq!(
+                row(unsaid.clone()).cross_repository,
+                None,
+                "an answer that did not say whether this is a fork's pull request read as if it \
+                 had: {unsaid}"
+            );
+        }
+    }
+
+    /// **A queue remembered before the fork field existed still loads, and loads it as
+    /// unknown** (SKEIN-1494).
+    ///
+    /// **What would make it fail:** the field becoming required — a `deserialize_with` with no
+    /// `default` beside it, the way `PrNode`'s lenient fields are spelled — so the whole remembered
+    /// queue fails to parse, which is an empty pane (proved by sabotage with
+    /// `deserialize_with = "Option::deserialize"`). Deleting `#[serde(default)]` alone does NOT
+    /// fail it: serde reads a missing `Option` as `None` either way, and the attribute is there so
+    /// the next reader does not have to know that.
+    #[test]
+    fn a_queue_row_remembered_before_the_fork_field_still_loads() {
+        let old: Pr = serde_json::from_value(serde_json::json!({
+            "number": 7, "title": "t", "author": "a", "url": "u",
+            "head_ref": "develop", "head_sha": "s", "base_ref": "main",
+            "draft": false, "updated_at": "", "committed_at": "",
+            "checks": "passing", "my_review": "none", "review_is_current": false,
+            "reasons": [], "lane": "needs-you",
+        }))
+        .expect("a queue row remembered by an older skein must stay readable");
+        assert_eq!(old.cross_repository, None);
     }
 }

@@ -31,6 +31,20 @@ pub(super) fn fixture_token() -> crate::secret::Secret {
 /// return value would pass while merging with the wrong method, or without the head it decided
 /// on — which is the failure that matters, because that one merges a commit nobody looked at.
 pub(super) fn github(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+    github_with_branch_at(status, BRANCH_AT)
+}
+
+/// Where [`github`]'s branches point when skein reads one back before deleting it — the head the
+/// delete tests merge at, so the ordinary merge-and-delete finds its branch where it left it.
+pub(super) const BRANCH_AT: &str = "abc123";
+
+/// [`github`], with every branch read back at `branch_at` — the commit a test says the branch is
+/// on NOW, which is what `delete_merged_branch` compares with the head that was merged.
+pub(super) fn github_with_branch_at(
+    status: u16,
+    branch_at: &str,
+) -> (String, Arc<Mutex<Vec<String>>>) {
+    let branch_at = branch_at.to_string();
     let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -51,7 +65,9 @@ pub(super) fn github(status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
             // The node id lookup always works: it is not what any of these tests are about.
             // GraphQL answers in GraphQL's shape, because `github::graphql` reads `data` and
             // would report a perfectly good mutation as a failure otherwise.
-            let (status, answer) = if head.starts_with("GET") && head.contains("/pulls/") {
+            let (status, answer) = if head.starts_with("GET") && head.contains("/git/ref/heads/") {
+                (200, format!(r#"{{"object":{{"sha":"{branch_at}"}}}}"#))
+            } else if head.starts_with("GET") && head.contains("/pulls/") {
                 (200, r#"{"node_id":"PR_node"}"#.to_string())
             } else if head.contains("/graphql") {
                 (
@@ -89,6 +105,9 @@ pub(super) fn subject(head_sha: &str) -> Subject<'_> {
         number: 41,
         head_sha,
         head_ref: "feat",
+        // The ordinary case: a branch of the repository itself, which is the one a delete may take.
+        same_repo: Some(true),
+        trunk: "main",
         // No reading: this helper stands in for every act but `read`, and a `read` step taken
         // from here must refuse rather than quietly invent a repo (see `Reading`).
         reading: None,

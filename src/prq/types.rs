@@ -166,6 +166,21 @@ pub struct Pr {
     pub head_ref: String,
     pub head_sha: String,
     pub base_ref: String,
+    /// **Is the head branch in another repository — is this a fork's pull request?** GitHub's
+    /// `isCrossRepository`. (SKEIN-1494)
+    ///
+    /// Carried because `head_ref` is only a NAME, and a name means nothing without the repository
+    /// it is in. A fork's `develop` and the base repository's own `develop` are two branches that
+    /// share a string, and `prwork::acts::delete_merged_branch` deletes by name in the base
+    /// repository — so a merge train that deleted "the head branch" of a fork's pull request
+    /// deleted the base repository's branch of that name instead.
+    ///
+    /// `None` is "nobody said": a queue remembered by an older skein, or an answer that did not
+    /// carry the field. **It is not `Some(false)`**, and the delete reads it as the reason to leave
+    /// the branch: a branch kept that could have gone costs a click, and a branch deleted that was
+    /// somebody else's costs their work.
+    #[serde(default)]
+    pub cross_repository: Option<bool>,
     pub draft: bool,
     pub updated_at: String,
     /// Empty when GitHub did not say. "Do not know" is not "long ago" and must never be REPORTED as
@@ -530,6 +545,7 @@ pub(crate) fn blank_pr(number: u64, head_sha: &str) -> Pr {
         head_ref: "feat".into(),
         head_sha: head_sha.into(),
         base_ref: "main".into(),
+        cross_repository: None,
         draft: false,
         updated_at: String::new(),
         committed_at: String::new(),

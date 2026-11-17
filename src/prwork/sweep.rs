@@ -404,6 +404,8 @@ pub fn sweep() -> Vec<String> {
                 number: pr.number,
                 head_sha: &pr.head_sha,
                 head_ref: &pr.head_ref,
+                same_repo: pr.cross_repository.map(|cross| !cross),
+                trunk: &queue.trunk,
                 // The reviewer's half. Everything it carries is already in hand here, which is
                 // why `Act::Read` is takeable from this caller and from no other.
                 reading: Some(Reading {
@@ -543,11 +545,17 @@ mod tests {
                 } else if head.starts_with("DELETE") {
                     seen.lock().unwrap().push(head.clone());
                     "{}".to_string()
+                } else if head.starts_with("GET") && head.contains("/git/ref/heads/feat") {
+                    // The branch, read back before it is deleted: still where it was merged from.
+                    r#"{"ref":"refs/heads/feat","object":{"sha":"abc"}}"#.to_string()
                 } else if head.contains("/graphql") {
+                    // `isCrossRepository: false` — the branch is this repository's own, which is
+                    // the only case a delete may take it, and it reaches the delete only by
+                    // riding the queue's parse and the remembered row (SKEIN-1494).
                     format!(
                         r#"{{"data":{{"q0":{{"nodes":[{{"number":7,"title":"t","url":"u",
                           "isDraft":false,"author":{{"login":"me"}},"headRefName":"feat",
-                          "headRefOid":"abc","baseRefName":"main",
+                          "headRefOid":"abc","baseRefName":"main","isCrossRepository":false,
                           "updatedAt":"2026-08-23T00:00:00Z","reviewDecision":"APPROVED",
                           "mergeable":"MERGEABLE",
                           "labels":{{"nodes":[{}]}},

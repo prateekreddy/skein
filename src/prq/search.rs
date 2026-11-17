@@ -136,12 +136,20 @@ pub(super) const REVIEWS_FETCHED: usize = 30;
 /// thing to know and the opinionated connection deliberately cannot say. Nothing else in skein
 /// reads either, so this is thirty extra nodes on a fragment that already carries a hundred check
 /// contexts, and it buys the difference between "you decided" and "you said something".
+///
+/// **`isCrossRepository`, and not `headRepository { nameWithOwner }` beside it** (SKEIN-1494). The
+/// merge train's branch delete needs to know a fork's pull request when it sees one, and the
+/// boolean is all it needs. The fork's name would only have made a sentence better, and it does not
+/// fit: measured 2026-11-17 by `the_conversation_is_measured_against_the_answer_it_grew_from`, the
+/// worst case was 496,727 bytes before this field, 499,327 with it (`false` is the longer answer,
+/// so that is what the fixture carries), and about 504,700 with the name as well — past the 500,000-byte
+/// ceiling. That leaves well under a kilobyte of headroom for the next field anybody adds.
 pub(super) static PR_FRAGMENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         r#"
 fragment PrFields on PullRequest {{
   number title url isDraft updatedAt
-  headRefName headRefOid baseRefName reviewDecision mergeable mergeStateStatus
+  headRefName headRefOid baseRefName isCrossRepository reviewDecision mergeable mergeStateStatus
   additions deletions changedFiles
   labels(first: {labels}) {{ totalCount nodes {{ name }} }}
   author {{ login }}
@@ -773,7 +781,7 @@ mod tests {
         };
         let base = |n: usize, labels: &str| {
             format!(
-                r#""number":{n},"title":"a change to something","url":"https://github.com/acme/thing/pull/{n}","isDraft":false,"updatedAt":"2026-08-18T10:00:00Z","headRefName":"feat-{n}","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":120,"deletions":30,"changedFiles":4,"labels":{{{labels}}},"author":{{"login":"someone"}},"latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-18T09:00:00Z","statusCheckRollup":{{"state":"SUCCESS","contexts":{{"totalCount":3,"nodes":[{{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}"#
+                r#""number":{n},"title":"a change to something","url":"https://github.com/acme/thing/pull/{n}","isDraft":false,"updatedAt":"2026-08-18T10:00:00Z","headRefName":"feat-{n}","headRefOid":"0123456789abcdef0123456789abcdef01234567","baseRefName":"main","isCrossRepository":false,"reviewDecision":"REVIEW_REQUIRED","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","additions":120,"deletions":30,"changedFiles":4,"labels":{{{labels}}},"author":{{"login":"someone"}},"latestReviews":{{"nodes":[]}},"commits":{{"nodes":[{{"commit":{{"committedDate":"2026-08-18T09:00:00Z","statusCheckRollup":{{"state":"SUCCESS","contexts":{{"totalCount":3,"nodes":[{{"name":"build","detailsUrl":"https://ci/1","status":"COMPLETED","conclusion":"SUCCESS"}}]}}}}}}}}]}}"#
             )
         };
         let before: String = (1..=54)
