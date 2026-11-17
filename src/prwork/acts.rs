@@ -258,32 +258,104 @@ pub(super) fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-/// Delete the head branch of a pull request that has just been merged.
+/// **After a merge: delete the head branch if, and only if, it is provably the pull request's own
+/// branch in this repository** — and say in a sentence what happened to it. (SKEIN-1494)
 ///
-/// `head_ref` is `headRefName` as GitHub reported it — the *author's* string, not skein's — so it
-/// is encoded a segment at a time rather than interpolated. A branch called `release#2` used to
-/// issue `DELETE /repos/o/r/git/refs/heads/release`, because curl never puts a fragment on the
-/// wire: the wrong branch deleted, and the train then reporting that it had deleted `release#2`.
+/// Called once the merge has landed, so it answers a sentence and never an `Err`: the merge DID
+/// happen, reporting the step as failed would be a lie, and a retry would try to merge an
+/// already-merged pull request.
 ///
+/// The delete is by NAME in the base repository (`DELETE /repos/<slug>/git/refs/heads/<name>`), and
+/// a name is only the pull request's branch when the branch is in the base repository. So the
+/// guards, in order, and each one leaves the branch:
+///
+/// 1. **A fork's branch is not this repository's.** A fork's pull request from its `develop`, merged
+///    with `+delete`, used to delete the BASE repository's own `develop`. `same_repo` is
+///    `isCrossRepository` inverted, and only `Some(true)` deletes — unknown is a queue remembered
+///    by an older skein, and it leaves the branch, because a branch kept costs a click and a branch
+///    deleted that was somebody else's costs their work.
+/// 2. **Never the trunk**, where skein knows it. The train only merges into the trunk
+///    (`workflow::instead_of_merging_off_the_trunk`) and GitHub will not open a pull request whose
+///    head is its own base, so a same-repo head that is the trunk should not be reachable; this is
+///    the statement of the rule where the act is, not a second derivation of it.
+/// 3. **The branch must still be where the pull request was merged from.** The ref is read back and
+///    deleted only when it points at `head_sha` — a push to the branch after the merge (or a branch
+///    of that name recreated since) is somebody's work that the pull request never carried. GitHub's
+///    ref delete takes no expected sha, so a push landing between this read and the delete is a
+///    window no check up here can close; the read narrows it from "ever" to milliseconds.
+///
+/// `name` is `headRefName` as GitHub reported it — the *author's* string, not skein's — so it is
+/// encoded a segment at a time rather than interpolated. A branch called `release#2` used to issue
+/// `DELETE /repos/o/r/git/refs/heads/release`, because curl never puts a fragment on the wire.
 /// [`crate::github::path_segments`] and not [`crate::github::path_segment`], because a ref
-/// legitimately contains slashes (`feat/x`) and GitHub's refs endpoint takes them as path
-/// separators — so `%2F` there would 404 every branch anybody has ever named after a topic.
-pub(super) fn delete_branch(
-    slug: &str,
-    head_ref: &str,
+/// legitimately contains slashes (`feat/x`) and GitHub's refs endpoint takes them as separators.
+pub(super) fn delete_merged_branch(
+    subject: &super::Subject,
     token: &crate::secret::Secret,
-) -> Result<(), String> {
-    let head_ref = crate::github::path_segments(head_ref);
-    crate::github::send_json(
+) -> String {
+    let (slug, number, name) = (subject.slug, subject.number, subject.head_ref);
+    match subject.same_repo {
+        Some(true) => {}
+        Some(false) => {
+            return format!(
+                "merged #{number}; its branch {name} is in a fork, not in {slug}, so it was left \
+                 — a delete here would take {slug}'s own {name}, if it has one"
+            );
+        }
+        None => {
+            return format!(
+                "merged #{number}; skein could not confirm that {name} is {slug}'s own branch \
+                 rather than a fork's, so it was left"
+            )
+        }
+    }
+    if !subject.trunk.is_empty() && subject.trunk == name {
+        return format!("merged #{number}; {name} is {slug}'s default branch, so it was left");
+    }
+    let path = format!(
+        "{}/git/ref/heads/{}",
+        crate::github::repo_path(slug),
+        crate::github::path_segments(name)
+    );
+    let at = match crate::github::get_json(&path, token) {
+        Ok(found) => found
+            .pointer("/object/sha")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        Err(e) => {
+            return format!(
+                "merged #{number}; skein could not read where {name} points ({e}), and does not \
+                 delete a branch it has not checked, so it was left — if this repository deletes \
+                 head branches on merge, it is already gone"
+            )
+        }
+    };
+    if subject.head_sha.is_empty() || at != subject.head_sha {
+        let at = match at.as_str() {
+            "" => "somewhere GitHub did not say".to_string(),
+            sha => short(sha).to_string(),
+        };
+        return format!(
+            "merged #{number}; {name} is now at {at}, not at {}, the commit that was merged — \
+             somebody has pushed to it since, so it was left",
+            short(subject.head_sha)
+        );
+    }
+    let deleted = crate::github::send_json(
         "DELETE",
         &format!(
-            "{}/git/refs/heads/{head_ref}",
-            crate::github::repo_path(slug)
+            "{}/git/refs/heads/{}",
+            crate::github::repo_path(slug),
+            crate::github::path_segments(name)
         ),
         token,
         &serde_json::json!({}),
-    )
-    .map(|_| ())
+    );
+    match deleted {
+        Ok(_) => format!("merged #{number} and deleted {name}"),
+        Err(e) => format!("merged #{number}, but {name} is still there: {e}"),
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -335,6 +407,8 @@ mod tests {
                 number: 41,
                 head_sha: "abc123",
                 head_ref,
+                same_repo: Some(true),
+                trunk: "main",
                 reading: None,
             };
             let out = perform(
@@ -415,6 +489,185 @@ mod tests {
         assert!(
             deleted > merged,
             "the branch was deleted before the merge landed: {said:?}"
+        );
+    }
+
+    /// Merge `subject` with `+delete` against a GitHub whose branches read back at `branch_at`, and
+    /// hand back what was reported and everything that went on the wire. The journal line is
+    /// returned too, because that is where a person reads what happened to the branch.
+    fn merged_and_deleted(subject: &Subject, branch_at: &str) -> (Outcome, String, Vec<String>) {
+        let _g = crate::testutil::env_lock();
+        let _warden = crate::testutil::no_warden();
+        let home = crate::testutil::tempdir();
+        let mut env = crate::testutil::env_pins();
+        env.set("SKEIN_HOME", home.as_ref() as &std::path::Path);
+        crate::testutil::switch_on(|c| c.pr_workflows = true);
+        let (base, heard) = github_with_branch_at(200, branch_at);
+        env.set("SKEIN_GITHUB_API", &base);
+        let out = perform(
+            subject,
+            &flow(),
+            &chosen(Act::Merge(Merge {
+                how: MergeAs::Squash,
+                delete_branch: true,
+            })),
+            &fixture_token(),
+        );
+        let journal = crate::prwork::journal(subject.repo_id, subject.number)
+            .last()
+            .map(|e| format!("{} {}", e.kind, e.what))
+            .unwrap_or_default();
+        let said = heard.lock().unwrap().clone();
+        (out, journal, said)
+    }
+
+    fn merged(said: &[String]) -> bool {
+        said.iter()
+            .any(|s| s.starts_with("PUT /repos/acme/thing/pulls/41/merge "))
+    }
+
+    fn deleted(said: &[String]) -> bool {
+        said.iter().any(|s| s.starts_with("DELETE"))
+    }
+
+    /// **A fork's pull request merges, and its branch name is never deleted in the base
+    /// repository** (SKEIN-1494).
+    ///
+    /// The fork's branch is `develop`; so, in this world, is one of `acme/thing`'s own. The delete
+    /// is by name in `acme/thing`, so before this the train merged the fork's change and then
+    /// deleted `acme/thing`'s `develop`.
+    ///
+    /// **What would make it fail:** `delete_merged_branch` treating `same_repo: Some(false)` as a
+    /// go-ahead (the `DELETE` assertion — proved by sabotage: the fork arm returning to the delete
+    /// path sends `DELETE /repos/acme/thing/git/refs/heads/develop`); or the merge being reported
+    /// as a failure because the branch was left (the `Did` assertion).
+    #[test]
+    fn a_forks_pull_request_merges_and_its_branch_name_is_not_deleted_here() {
+        let subject = Subject {
+            head_ref: "develop",
+            same_repo: Some(false),
+            ..subject(BRANCH_AT)
+        };
+        let (out, journal, said) = merged_and_deleted(&subject, BRANCH_AT);
+        assert!(
+            merged(&said),
+            "the fork's pull request was not merged: {said:?}"
+        );
+        assert!(
+            !deleted(&said),
+            "a fork's branch name was deleted in the base repository: {said:?}"
+        );
+        let Outcome::Did(what) = out else {
+            panic!("the merge happened, and was not reported as done: {out:?}")
+        };
+        assert!(
+            what.contains("merged #41") && what.contains("in a fork") && what.contains("left"),
+            "{what}"
+        );
+        assert_eq!(
+            journal,
+            format!("did {what}"),
+            "the journal does not say it"
+        );
+    }
+
+    /// **Not knowing whether it is a fork's is not permission** — a row from a queue remembered
+    /// before the field existed has `same_repo: None`, and the branch is left.
+    ///
+    /// **What would make it fail:** reading `None` as same-repository — `same_repo.unwrap_or(true)`,
+    /// or `!= Some(false)` — sends the `DELETE` (proved by sabotage).
+    #[test]
+    fn a_pull_request_not_known_to_be_this_repositorys_own_keeps_its_branch() {
+        let subject = Subject {
+            same_repo: None,
+            ..subject(BRANCH_AT)
+        };
+        let (out, journal, said) = merged_and_deleted(&subject, BRANCH_AT);
+        assert!(merged(&said), "{said:?}");
+        assert!(
+            !deleted(&said),
+            "a branch of unknown ownership was deleted: {said:?}"
+        );
+        let Outcome::Did(what) = out else {
+            panic!("{out:?}")
+        };
+        assert!(
+            what.contains("could not confirm") && what.contains("left"),
+            "{what}"
+        );
+        assert!(journal.contains("could not confirm"), "{journal}");
+    }
+
+    /// **A same-repository branch that has moved since the merge is somebody's new work, and is
+    /// left.** The ref is read back first and deleted only where it still points at the head that
+    /// was merged.
+    ///
+    /// **What would make it fail:** dropping the read-back, or deleting without comparing what it
+    /// said with `head_sha` — the `DELETE` goes out (proved by sabotage). The `GET` assertion is
+    /// what keeps the `DELETE` one honest: a test where nothing was read would pass by not getting
+    /// that far.
+    #[test]
+    fn a_branch_that_moved_after_the_merge_is_left() {
+        let (out, _, said) = merged_and_deleted(&subject(BRANCH_AT), "fff9999eee");
+        assert!(merged(&said), "{said:?}");
+        assert!(
+            said.iter()
+                .any(|s| s.starts_with("GET /repos/acme/thing/git/ref/heads/feat ")),
+            "the branch was never read back: {said:?}"
+        );
+        assert!(
+            !deleted(&said),
+            "a branch with new commits on it was deleted: {said:?}"
+        );
+        let Outcome::Did(what) = out else {
+            panic!("{out:?}")
+        };
+        assert!(what.contains("fff9999") && what.contains("left"), "{what}");
+    }
+
+    /// **The ordinary case still deletes**: this repository's own branch, still where it was merged
+    /// from — read back, then deleted, in that order.
+    ///
+    /// **What would make it fail:** any guard above firing on the case it must not — the
+    /// `same_repo` match inverted, the comparison failing on a match (proved by sabotage: comparing
+    /// against `short(head_sha)` leaves the branch), or the read going to the plural refs endpoint
+    /// whose prefix match would answer for a different branch (the path assertion).
+    #[test]
+    fn this_repositorys_own_branch_still_goes_when_it_is_where_it_was_merged_from() {
+        // A whole sha, as GitHub reports one. `BRANCH_AT` is shorter than `short` cuts to, and a
+        // comparison against a shortened sha would pass on it while failing on every real one.
+        let at = "0123456789abcdef0123456789abcdef01234567";
+        let (out, _, said) = merged_and_deleted(&subject(at), at);
+        let read = said
+            .iter()
+            .position(|s| s.starts_with("GET /repos/acme/thing/git/ref/heads/feat "));
+        let gone = said
+            .iter()
+            .position(|s| s.starts_with("DELETE /repos/acme/thing/git/refs/heads/feat "));
+        assert!(
+            read.is_some() && gone.is_some() && read < gone,
+            "the branch was not read back and then deleted: {said:?}"
+        );
+        assert_eq!(out, Outcome::Did("merged #41 and deleted feat".into()));
+    }
+
+    /// **The repository's default branch is never deleted**, whatever else says yes.
+    ///
+    /// **What would make it fail:** removing the trunk check — every other guard passes here, so
+    /// the `DELETE` goes out (proved by sabotage).
+    #[test]
+    fn the_trunk_is_never_deleted() {
+        let subject = Subject {
+            head_ref: "main",
+            trunk: "main",
+            ..subject(BRANCH_AT)
+        };
+        let (out, _, said) = merged_and_deleted(&subject, BRANCH_AT);
+        assert!(merged(&said), "{said:?}");
+        assert!(!deleted(&said), "the trunk was deleted: {said:?}");
+        assert!(
+            matches!(out, Outcome::Did(ref w) if w.contains("default branch")),
+            "{out:?}"
         );
     }
 

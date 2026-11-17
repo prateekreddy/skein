@@ -36,6 +36,14 @@ That request is five steps and no new concepts:
 | behind the base, and approved | update the branch (rebase) |
 | mergeable, and checks passed | merge, then delete the branch |
 
+**"Delete the branch" deletes only a branch that is provably the pull request's own** (SKEIN-1494).
+The delete is by name in the base repository, so a fork's pull request from its `develop` used to
+take the base repository's own `develop` with it. `delete_merged_branch` in `src/prwork/acts.rs` now
+leaves the branch, and says so in the journal, unless GitHub said the pull request is not
+cross-repository (`isCrossRepository`, carried as `Pr.cross_repository`; a queue remembered from
+before the field counts as not knowing), the branch is not the trunk, and the ref still points at
+the head that was merged. The merge itself is reported as done either way.
+
 **One step per evaluation, never a cascade.** After an action, what skein believes about the PR is
 one action out of date — the label is added but no check has been queued yet, so "checks passing" is
 still true from the *previous* run, and a cascade would merge on it. The next poll re-reads real

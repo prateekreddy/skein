@@ -15,7 +15,7 @@
 //! self-approving loop must never be reachable *silently*.
 
 use super::{
-    add_label, chosen_by_hand, delete_branch, enabled, merge_pr, record, remove_label, stop,
+    add_label, chosen_by_hand, delete_merged_branch, enabled, merge_pr, record, remove_label, stop,
     stopped, update_branch, Outcome,
 };
 use crate::workflow::{Act, Chosen, Update, Workflow};
@@ -43,6 +43,13 @@ pub struct Subject<'a> {
     /// this struct for the two that cannot, and why it is the labels API rather than an oversight.
     pub head_sha: &'a str,
     pub head_ref: &'a str,
+    /// Is `head_ref` a branch of `slug` itself, rather than of a fork? `isCrossRepository`
+    /// inverted, from [`crate::prq::Pr::cross_repository`]; `None` where GitHub did not say. Only
+    /// `Some(true)` lets [`delete_merged_branch`] touch the branch (SKEIN-1494).
+    pub same_repo: Option<bool>,
+    /// The repository's default branch, as the queue knew it — empty where not known. A branch
+    /// delete never takes it.
+    pub trunk: &'a str,
     /// What [`Act::Read`] needs, and what no other act does — see [`Reading`].
     pub reading: Option<Reading<'a>>,
 }
@@ -229,8 +236,7 @@ pub fn perform(
     chosen: &Chosen,
     token: &crate::secret::Secret,
 ) -> Outcome {
-    let (repo_id, slug, number, head_sha, head_ref) =
-        (pr.repo_id, pr.slug, pr.number, pr.head_sha, pr.head_ref);
+    let (repo_id, slug, number, head_sha) = (pr.repo_id, pr.slug, pr.number, pr.head_sha);
     // The switch is read here rather than only by the caller, because this is the function with the
     // consequences. A caller that forgot to check would be a bug that merges pull requests.
     if !enabled() {
@@ -324,20 +330,13 @@ pub fn perform(
             ReadStep::Failed(why) => Err(why),
             ReadStep::Waited(why) => return Outcome::Waited(why),
         },
-        Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).and_then(|_| {
+        Act::Merge(merge) => merge_pr(slug, number, head_sha, merge.how, token).map(|_| {
             match merge.delete_branch {
-                false => Ok(format!("merged #{number}")),
+                false => format!("merged #{number}"),
                 // Only after the merge landed. A branch deleted before it is merged closes the pull
-                // request instead of shipping it.
-                true => delete_branch(slug, head_ref, token)
-                    .map(|_| format!("merged #{number} and deleted {head_ref}"))
-                    // The merge DID happen. Reporting the whole step as failed would be a lie, and
-                    // a retry would try to merge an already-merged pull request.
-                    .or_else(|e| {
-                        Ok(format!(
-                            "merged #{number}, but {head_ref} is still there: {e}"
-                        ))
-                    }),
+                // request instead of shipping it. Every other guard is inside, and the answer is a
+                // sentence rather than an `Err`, because the merge has happened whatever it says.
+                true => delete_merged_branch(pr, token),
             }
         }),
     };
@@ -1073,6 +1072,8 @@ mod tests {
             number: 7,
             head_sha: "abc",
             head_ref: "feat",
+            same_repo: Some(true),
+            trunk: "main",
             reading: None,
         };
         let outcome = perform(&seven, &flows[0], &chosen, &fixture_token());
@@ -1135,6 +1136,8 @@ mod tests {
             number: 41,
             head_sha,
             head_ref: "feat",
+            same_repo: Some(true),
+            trunk: "main",
             reading: Some(Reading {
                 repo,
                 pr,
