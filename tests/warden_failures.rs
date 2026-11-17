@@ -45,6 +45,45 @@ fn fake_sbx(dir: &Path, log: &Path, gate: &Path) {
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// An `sbx` with a host behind it: `create` makes a sandbox, `rm -f` removes it, and `ls --json`
+/// lists what is there (SKEIN-1493).
+///
+/// [`fake_sbx`] succeeds at everything and changes nothing, which is enough for a test about one
+/// operation. A test about the SECOND destroy of a fleet needs the first one to have removed
+/// something. The host is the directory `host`, one empty file per sandbox; `create` and `rm` are
+/// logged as `argv …` lines the way [`fake_sbx`] logs them, and a listing is not logged, because
+/// what a test counts is executions.
+///
+/// Every path is this test's own scratch spelled out, and the name is `${3:?}`: a script that
+/// removes a file must not be able to name anything else when an argument is missing.
+fn sbx_with_a_host(dir: &Path, log: &Path, host: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::create_dir_all(host).unwrap();
+    let script = r#"#!/bin/sh
+case "$1" in
+  ls)
+    sep=''
+    printf '['
+    for f in '@HOST@'/*; do
+      [ -e "$f" ] || continue
+      printf '%s{"name":"%s"}' "$sep" "${f##*/}"
+      sep=','
+    done
+    printf ']\n'
+    ;;
+  create) printf 'argv %s\n' "$*" >> '@LOG@'; : > '@HOST@/'"${3:?}"; echo made ;;
+  rm) printf 'argv %s\n' "$*" >> '@LOG@'; rm -f '@HOST@/'"${3:?}"; echo removed ;;
+  *) echo "this sbx does not know $1" >&2; exit 2 ;;
+esac
+"#
+    .replace("@HOST@", &host.display().to_string())
+    .replace("@LOG@", &log.display().to_string());
+    let p = dir.join("sbx");
+    std::fs::write(&p, script).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// The warden, built into cargo's own scratch beside this checkout's build output.
 ///
 /// `CARGO_TARGET_TMPDIR` rather than a fresh directory per test, so the second test here and the
@@ -201,6 +240,23 @@ impl Running {
         wait_for(&mut self.screen, &mut self.seen, want)
     }
 
+    /// Wait until `want` has appeared `times` times, or give up.
+    ///
+    /// [`Running::wait_for`] is true from the first appearance onwards, so it cannot tell a second
+    /// approval from the first one still on the screen. Only for after [`Running::start`], which
+    /// leaves `screen` a [`Draining`] — whose read gives up after thirty seconds instead of blocking
+    /// on a warden that is alive and quiet.
+    fn wait_for_the_nth(&mut self, want: &str, times: usize) -> bool {
+        let mut buf = [0u8; 1024];
+        while self.seen.matches(want).count() < times {
+            match self.screen.read(&mut buf) {
+                Ok(n) if n > 0 => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => return false,
+            }
+        }
+        true
+    }
+
     fn type_line(&mut self, line: &str) {
         writeln!(self.keyboard, "{line}").unwrap();
         self.keyboard.flush().unwrap();
@@ -293,6 +349,159 @@ fn an_approved_create_whose_log_cannot_be_written_runs_and_skein_is_told_it_went
          log that exists because skein cannot audit itself (§5) went missing without a word: \
          {performed:?}",
         wall.display()
+    );
+}
+
+/// **A fleet destroyed, recreated with the same arguments and destroyed again: both destroys and
+/// both creates are put to a person and run** (SKEIN-1493).
+///
+/// This is a second resize. `warden_client` derives the operation id from the work, and a destroy
+/// carries no arguments, so `destroy skein-fleet` is one id for ever — and the warden answered the
+/// second one from the record of the first: `replayed`, `ok: true`, nobody asked, `sbx` never run.
+/// `resize_fleet` read that as destroyed, with every box already archived and the sandbox standing.
+/// A recreate with the same arguments had the same answer waiting for it.
+///
+/// Through the real binary and a real terminal, because the two things asserted are the two a unit
+/// test of the store can only stand in for: that a person was **asked** — a prompt on the pty,
+/// answered by typing the id — and that `sbx` **ran**, read off the host it changed. skein's side
+/// is `perform_through`, the call `resize_fleet` and `ensure_fleet` make.
+///
+/// The retry is here too, and it is the other half rather than an extra: one destroy asked twice,
+/// with the sandbox gone, is answered from the record with no prompt and no `sbx`.
+///
+/// What makes it fail: `holds` in `warden/src/serve.rs` answering `Ok(true)` whatever
+/// `doer::undone` found, which is the warden as it was. The second destroy is then `Replayed`, no
+/// third prompt is printed, and the `wait_for_the_nth(.., 3)` below gives up. Answering
+/// `Ok(false)` for a host that is as the record says fails the retry instead: it is put to a
+/// person, and `answered_within` gives up waiting for somebody to type.
+#[test]
+fn a_fleet_destroyed_recreated_and_destroyed_again_is_asked_for_and_run_every_time() {
+    if !have("cargo") {
+        return skip("no cargo on PATH, so the warden cannot be built");
+    }
+    let _env = env_lock();
+    let root = Scratch::boxes("skein-warden-twice");
+    let log = root.join("sbx.log");
+    let host = root.join("host");
+    sbx_with_a_host(&root.join("bin"), &log, &host);
+    let fleet = host.join("skein-fleet");
+    // There is a fleet to begin with: the first destroy is asked of something.
+    std::fs::write(&fleet, b"").unwrap();
+    let bin = built_warden();
+
+    let mut pins = env_pins();
+    pins.set("SKEIN_WARDEN_HOME", root.join("state"))
+        .set("SKEIN_HOME", root.join("skein-home"))
+        .set("SKEIN_FLEET_ROOT", root.join("boxes"));
+
+    let argv = skein::fleet::create_argv("skein-fleet", &["/h/.skein".to_string()]);
+    let env = vec![("DOCKER_SANDBOXES_ROOT_SIZE".to_string(), "200g".to_string())];
+    let destroy = || Act::Destroy {
+        sandbox: "skein-fleet".into(),
+    };
+    let create = || Act::Create {
+        sandbox: "skein-fleet".into(),
+        argv: argv.clone(),
+        env: env.clone(),
+    };
+    // The ids skein asks under — the same for the first destroy and the second, which is the whole
+    // difficulty, and the same string the person types both times.
+    let destroying = operation_id_with_env("destroy", "skein-fleet", &[], &[]);
+    let creating = operation_id_with_env("create", "skein-fleet", &argv, &env);
+
+    // The listing is this test's `sbx`, not the harness's fixed empty one: what the warden sees on
+    // the host is the thing under test.
+    let mut warden = Running::start(
+        &bin,
+        &root,
+        &[("SKEIN_WARDEN_LS_CMD", PathBuf::from("sbx ls --json"))],
+    );
+    let port = warden.port;
+    let ran = |verb: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with(&format!("argv {verb} ")))
+            .count()
+    };
+    const PROMPT: &str = "Type the operation id";
+
+    // Ask for `act`, wait for the `nth` approval this warden has ever printed, type `id`.
+    let mut approved = |act: Act, nth: usize, id: &str, what: &str| -> Performed {
+        let asking =
+            std::thread::spawn(move || perform_through(&Warden::at("127.0.0.1", port), &act));
+        assert!(
+            warden.wait_for_the_nth(PROMPT, nth),
+            "{what} was never put to a person — approval number {nth} did not appear. It was \
+             answered from the record of an earlier one, or not at all (SKEIN-1493):\n{}",
+            warden.seen
+        );
+        warden.type_line(id);
+        asking.join().unwrap()
+    };
+    let it_ran = |performed: &Performed, what: &str| match performed {
+        Performed::Warden(Answered::Ran(_)) => {}
+        other => panic!("{what} was approved and did not come back as run: {other:?}"),
+    };
+
+    // ---- the first destroy ----
+    let first = approved(destroy(), 1, &destroying, "the first destroy");
+    it_ran(&first, "the first destroy");
+    assert_eq!(ran("rm"), 1);
+    assert!(!fleet.exists(), "the fake sbx did not remove the sandbox");
+
+    // ---- its retry: the reply was lost, the sandbox is gone, and nobody is asked again ----
+    let retried = answered_within(30, move || {
+        perform_through(&Warden::at("127.0.0.1", port), &destroy())
+    });
+    match &retried {
+        Some(Performed::Warden(Answered::Replayed(_))) => {}
+        None => panic!(
+            "the retry of a destroy that ran was put to a person again — its sandbox is gone, so \
+             the record of it is the answer"
+        ),
+        other => panic!("the retry of a destroy that ran was not answered as done: {other:?}"),
+    }
+    assert_eq!(ran("rm"), 1, "a retry reached `sbx` a second time");
+
+    // ---- the fleet is made again ----
+    let made = approved(create(), 2, &creating, "the create");
+    it_ran(&made, "the create");
+    assert_eq!(ran("create"), 1);
+    assert!(fleet.exists(), "the fake sbx did not make the sandbox");
+
+    // ---- the second destroy: the same id, and the first one's record still on disk ----
+    let second = approved(destroy(), 3, &destroying, "the second destroy");
+    it_ran(&second, "the second destroy");
+    assert_eq!(
+        ran("rm"),
+        2,
+        "the second destroy was approved and `sbx rm` did not run a second time"
+    );
+    assert!(
+        !fleet.exists(),
+        "skein was told the fleet is destroyed and it is standing"
+    );
+
+    // ---- and the second create, with the arguments and the environment of the first ----
+    let remade = approved(create(), 4, &creating, "the second create");
+    it_ran(&remade, "the second create");
+    assert_eq!(
+        ran("create"),
+        2,
+        "the second create was approved and `sbx create` did not run a second time"
+    );
+    assert!(
+        fleet.exists(),
+        "skein was told the fleet exists and there is none"
+    );
+
+    warden.stop();
+    assert_eq!(
+        warden.seen.matches(PROMPT).count(),
+        4,
+        "four acts were asked for and each is one approval — the retry is not one:\n{}",
+        warden.seen
     );
 }
 

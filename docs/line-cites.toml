@@ -48,11 +48,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "## 8. The host warden"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:676"]
+["docs/architecture.md:695"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1793"]
+["docs/architecture.md:1812"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -2015,27 +2015,27 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1051"]
+["src/warden_client.rs:1063"]
 line = "pub struct Prompt {"
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md", "docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1097"]
+["src/warden_client.rs:1109"]
 line = "/// **The rule**: for each privileged act, a warden that has that capability performs it; otherwise"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1106"]
+["src/warden_client.rs:1118"]
 line = "/// **Selection is detection, not configuration.** There is no setting and no first-run question: a"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1128"]
+["src/warden_client.rs:1140"]
 line = "pub fn perform(act: &Act) -> Performed {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1205"]
+["src/warden_client.rs:1222"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/warden_client.rs:1739"]
+["src/warden_client.rs:1756"]
 line = "fn every_prompt_says_the_command_why_it_is_wanted_and_what_declining_costs() {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
@@ -2399,40 +2399,41 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Err(e) => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:75"]
+["warden/src/doer.rs:76"]
 line = "Err(format!("
 window = "fn approve(&self, request: &Request, what: &str) -> Result<(), String> {\u000bErr(format!(\u000b\"{what} for {} was not run: this warden has no approval surface, and a privileged host \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:202"]
+["warden/src/doer.rs:288"]
 line = "return Err(format!("
+window = "if argv.first().map(String::as_str) != Some(\"create\") {\u000breturn Err(format!(\u000b\"the create for {} does not begin with the `create` verb, so it is not a create: `sbx \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:204"]
+["warden/src/doer.rs:290"]
 line = "{}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:216"]
+["warden/src/doer.rs:302"]
 line = "[] => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:221"]
+["warden/src/doer.rs:307"]
 line = "_ => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:418"]
+["warden/src/doer.rs:504"]
 line = "\"the unpublish for {} {why}, so it is not a withdrawal: `sbx {}`\","
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:434"]
+["warden/src/doer.rs:520"]
 line = "return refuse(\"is not exactly `ports <sandbox> --unpublish <mapping>`\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:457"]
+["warden/src/doer.rs:543"]
 line = ".map_err(|e| format!(\"could not run `sbx`: {e}\"))?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/doer.rs:460"]
+["warden/src/doer.rs:546"]
 line = "false => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2448,37 +2449,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Refused::TooMany { per_minute } => format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/main.rs:59"]
+["warden/src/main.rs:60"]
 line = "eprintln!(\"skein-warden: could not listen on port {port} at {wanted}: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/main.rs:112"]
+["warden/src/main.rs:113"]
 line = "eprintln!("
 window = "if let Some(volume) = std::env::var_os(\"SKEIN_HOME\").filter(|s| !s.is_empty()) {\u000beprintln!(\u000b\"skein-warden: volume {} (from $SKEIN_HOME) — skein must be pointed at the same one, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/main.rs:128"]
+["warden/src/main.rs:129"]
 line = "eprintln!("
 window = "if port != WHERE_SKEIN_LOOKS {\u000beprintln!(\u000b\"skein-warden: this is not where skein looks by default — export \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/main.rs:140"]
+["warden/src/main.rs:141"]
 line = "true => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/main.rs:152"]
+["warden/src/main.rs:153"]
 line = "\"none\" => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:307"]
+["warden/src/outcome.rs:352"]
 line = "Err(e) => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:324"]
+["warden/src/outcome.rs:369"]
 line = "self.put(&path, &finished).map_err(|e| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:416"]
+["warden/src/outcome.rs:477"]
 line = "format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2513,37 +2514,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"this warden has no `approved` field, and adding one to the request would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:603"]
+["warden/src/serve.rs:643"]
 line = "return Err(format!("
 window = "if !named {\u000breturn Err(format!(\u000b\"{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:610"]
+["warden/src/serve.rs:650"]
 line = "return Err(format!("
 window = "if asked.args.len() > MOST_ARGS {\u000breturn Err(format!(\u000b\"the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:619"]
+["warden/src/serve.rs:659"]
 line = "return Err(format!("
 window = "if arg.len() > LONGEST_VALUE || !readable(arg) {\u000breturn Err(format!(\u000b\"an argument of the {} for {name} cannot be shown as what it is, so it cannot be \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:634"]
+["warden/src/serve.rs:674"]
 line = "return Err(format!("
 window = "if asked.env[..at].iter().any(|(seen, _)| seen == key) {\u000breturn Err(format!(\u000b\"`{key}` is given twice, and `sbx` would take the last one — so what ran would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:640"]
+["warden/src/serve.rs:680"]
 line = "return Err(format!("
 window = "if !allowed.contains(&key.as_str()) {\u000breturn Err(format!(\u000b\"this warden does not pass `{key}` to a {}. The environment decides what a relative \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:651"]
+["warden/src/serve.rs:691"]
 line = "return Err(format!("
 window = "if value.len() > LONGEST_VALUE || !readable(value) {\u000breturn Err(format!(\u000b\"the value of `{key}` cannot be shown as what it is, so it cannot be approved: \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:676"]
+["warden/src/serve.rs:716"]
 line = "return Err(format!("
 window = "if shown.len() > LONGEST_APPROVAL {\u000breturn Err(format!(\u000b\"the approval for this {} would be {} bytes of text, and more than \\"
 cited_by = ["docs/recovery-survey.md"]

@@ -354,13 +354,47 @@ impl Warden {
             }
         }
 
-        // At-most-once, around the whole of it. The approval is inside, so a retry of an operation a
-        // person already refused is answered with the refusal rather than asking them again — which
-        // is how approval fatigue is manufactured (§8.5).
+        // **A finished record answers only while the host is as that run left it** (SKEIN-1493).
+        // The id is derived from the work, so the second destroy of a fleet — a resize, a month or
+        // a minute after the first — arrives under the id the first one finished under, and used to
+        // be told "destroyed" with nobody asked and `sbx` never run. `doer::undone` looks: a
+        // destroy on record with the sandbox gone is a retry and is answered; with the sandbox
+        // standing the record is about a fleet that no longer exists, so it is retired and this is
+        // put to a person as new. The line saying so is written here, at the moment it is decided,
+        // because the record it explains is about to stop existing.
+        let superseding = std::cell::RefCell::new(Vec::new());
+        let holds = |finished_at: &str| -> Result<bool, String> {
+            match doer::undone(&op, which) {
+                Ok(None) => Ok(true),
+                Ok(Some(found)) => {
+                    superseding.borrow_mut().push(self.log.record(
+                        &op.operation,
+                        "superseded",
+                        &format!(
+                            "the record of this id finished at {finished_at}, and {found} — so it \
+                             does not answer this request, which is asked as new"
+                        ),
+                    ));
+                    Ok(false)
+                }
+                // Neither answer is taken on a guess. Nothing ran on this request and nothing is
+                // replayed; it leaves as site 5 below, with the reason.
+                Err(why) => Err(format!(
+                    "{} has a record that finished at {finished_at}, and it was neither answered \
+                     from that record nor run again, because whether the record still describes \
+                     this host could not be checked: {why}",
+                    op.operation
+                )),
+            }
+        };
+
+        // At-most-once, around the whole of it — one approval, one execution. A refusal is not
+        // inside that: nothing ran, so the id is released and asking again asks a person again
+        // (`outcome::Did::Never`).
         // `reach` is the marker a doer crosses on its way from the approval to the command
         // (SKEIN-533). It belongs to the store, not to the doer: what it writes is the store's own
         // record, and a doer cannot report having run without it.
-        let ran = self.store.once(&op.operation, |reach| match which {
+        let ran = self.store.once(&op.operation, &holds, |reach| match which {
             #[cfg(feature = "create")]
             capability::Capability::Create => doer::create(self.approver.as_ref(), &op, reach),
             #[cfg(feature = "destroy")]
@@ -379,6 +413,12 @@ impl Warden {
                 crate::outcome::Did::Never("this warden was built without that doer".into())
             }
         });
+
+        // The `superseded` lines, if a record was retired on the way in: kept or reported like
+        // every other line this operation writes.
+        for written in superseding.into_inner() {
+            unrecorded.note(written);
+        }
 
         match ran {
             // `settled` is for an operation that reached `sbx`; `refused` for one that did not.
@@ -693,7 +733,9 @@ fn describe(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Ran(Ok(said)) => format!("ran: {said}"),
         Outcome::Ran(Err(why)) => format!("ran and failed: {why}"),
-        Outcome::Replayed(_) => "replayed a previous outcome".into(),
+        Outcome::Replayed(_) => {
+            "replayed a previous outcome: the host is still as it left it".into()
+        }
         Outcome::Undecided { started_at } => format!("undecided since {started_at}"),
         Outcome::Unknown => "past the retention window".into(),
         // Never reached: `doer` records a refusal as `refused` before this is consulted. Here so
@@ -918,6 +960,47 @@ mod tests {
             body: body.as_bytes().to_vec(),
             secret: secret.into(),
         })
+    }
+
+    /// An `sbx` with a host behind it: `create` makes a sandbox, `rm` removes one, and `ls` lists
+    /// what is there — so a test can destroy a fleet and find it gone, which a script that only
+    /// prints `made` cannot show (SKEIN-1493).
+    ///
+    /// The host is the directory `dir/host`, one empty file per sandbox, so a test arranges the
+    /// world by touching a file and reads it by looking. Only `create` and `rm` are written to
+    /// `dir/sbx-ran`: those are the executions a test counts, and a listing is not one. A file
+    /// named `dir/unreadable` makes `ls` fail the way a daemon that is not answering does.
+    ///
+    /// Written with `replace` rather than `format!`, because the script is mostly braces. Every
+    /// path is this test's own directory spelled out, and the name is `${3:?}` — a script that
+    /// removes a file must not be able to name anything else when an argument is missing. The
+    /// paths are quoted for the `ThreadId(n)` `scratch` once put in them — see the replay test.
+    #[cfg(feature = "create")]
+    fn sbx_with_a_host(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir.join("host")).unwrap();
+        let script = r#"#!/bin/sh
+case "$1" in
+  ls)
+    [ -e '@DIR@/unreadable' ] && { echo 'the daemon is not answering' >&2; exit 1; }
+    sep=''
+    printf '['
+    for f in '@DIR@/host'/*; do
+      [ -e "$f" ] || continue
+      printf '%s{"name":"%s"}' "$sep" "${f##*/}"
+      sep=','
+    done
+    printf ']\n'
+    ;;
+  create) echo "$@" >> '@DIR@/sbx-ran'; : > '@DIR@/host/'"${3:?}"; echo made ;;
+  rm) echo "$@" >> '@DIR@/sbx-ran'; rm -f '@DIR@/host/'"${3:?}"; echo removed ;;
+  *) echo "this sbx does not know $1" >&2; exit 2 ;;
+esac
+"#
+        .replace("@DIR@", &dir.display().to_string());
+        let fake = dir.join("sbx");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// Every endpoint, including the two that only report, refuses a caller it cannot recognise.
@@ -1203,10 +1286,13 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     /// against a warden that ran the command twice and recorded it once, which is the failure that
     /// matters: a fleet created twice, or destroyed twice. So `sbx` is a script on `PATH` that
     /// appends a line, and the assertion is the number of lines.
+    ///
+    /// **And the `sbx` has a host behind it** ([`sbx_with_a_host`]), because the replay is no
+    /// longer unconditional (SKEIN-1493): the retry is answered from the record *because the
+    /// sandbox the create made is still there*. What happens when it is not is the next test.
     #[test]
     #[cfg(feature = "create")]
     fn a_retry_is_replayed_when_it_ran_and_re_asked_when_nobody_approved_it() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // $PATH decides what every spawn in this process resolves to, and sibling tests hold this
@@ -1215,16 +1301,10 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         let dir = scratch("replay");
         std::fs::create_dir_all(&dir).unwrap();
         let ran = dir.join("sbx-ran");
-        let fake = dir.join("sbx");
-        std::fs::write(
-            &fake,
-            // The path is quoted: `scratch` puts a `ThreadId(n)` in it, and an unquoted `(` is a
-            // syntax error the shell reports as exit 2 — which arrives here as a doer that ran and
-            // failed, and would have been read as one that was refused.
-            format!("#!/bin/sh\necho \"$@\" >> '{}'\necho made\n", ran.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Its paths are quoted: `scratch` once put a `ThreadId(n)` in them, and an unquoted `(` is
+        // a syntax error the shell reports as exit 2 — which arrives here as a doer that ran and
+        // failed, and would have been read as one that was refused.
+        sbx_with_a_host(&dir);
         let real = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{real}", dir.display()));
 
@@ -1322,6 +1402,183 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
                 .count(),
             1,
             "a refused create reached `sbx`"
+        );
+    }
+
+    /// **A fleet destroyed, recreated with the same arguments and destroyed again is asked for and
+    /// run every time** (SKEIN-1493).
+    ///
+    /// The id is derived from the work, so both destroys carry one id and both creates another.
+    /// The record of the first used to answer the second: a resize was told "destroyed" with nobody
+    /// asked and `sbx` never run, and skein went on believing a standing fleet was gone. Now a
+    /// finished record answers only while the host is as it left it (`doer::undone`).
+    ///
+    /// **Three things are counted at every step, and each catches a different wrong warden**: the
+    /// approvals asked for (a warden that ran without asking), the lines `sbx` wrote (a warden that
+    /// said `ran` and ran nothing), and the reply's `state`. And the retries are in the same test
+    /// as the repeats on purpose — the fix that makes every repeat run is also the one that makes
+    /// every retry run, and only the two together say the host is what decides.
+    ///
+    /// What makes each part fail, named:
+    /// * `holds` in `Warden::doer` answering `Ok(true)` whatever `undone` found — the second
+    ///   destroy is `replayed`, and the count of approvals stays at 2;
+    /// * the same closure answering `Ok(false)` for `Ok(None)` — the first retry is asked again;
+    /// * its `Err` arm answering `Ok(true)` — the request on an unreadable host is `replayed`;
+    /// * the `superseded` line not being written — the count of them is 0.
+    #[test]
+    #[cfg(all(feature = "create", feature = "destroy"))]
+    fn a_fleet_destroyed_recreated_and_destroyed_again_is_asked_and_run_every_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // $PATH decides what every spawn in this process resolves to, and `$SKEIN_WARDEN_LS_CMD`
+        // — which would answer the listing instead of this test's `sbx` — is set and removed by
+        // siblings under the same lock (SKEIN-307).
+        let _env = crate::env_lock();
+        let dir = scratch("twice");
+        std::fs::create_dir_all(&dir).unwrap();
+        sbx_with_a_host(&dir);
+        let fleet = dir.join("host").join("skein-fleet");
+        // The fleet exists to begin with: a destroy is being asked of something.
+        std::fs::write(&fleet, b"").unwrap();
+        let real = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{real}", dir.display()));
+
+        struct Counting(AtomicUsize);
+        impl Approver for Counting {
+            fn approve(&self, _: &doer::Request, _: &str) -> Result<(), String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        struct Shared(Arc<Counting>);
+        impl Approver for Shared {
+            fn approve(&self, r: &doer::Request, what: &str) -> Result<(), String> {
+                self.0.approve(r, what)
+            }
+        }
+        let approvals = Arc::new(Counting(AtomicUsize::new(0)));
+        let w = Warden {
+            store: Store::new(dir.join("outcomes"), Duration::from_secs(3600)),
+            log: Log::new(dir.join("warden.jsonl")),
+            approver: Box::new(Shared(Arc::clone(&approvals))),
+            doorway: Doorway::new(),
+            secret: crate::secret::Secret::kept_in(&dir),
+        };
+        // One body per verb, used every time: the same arguments, so the same id, which is what
+        // `skein::warden_client` sends for the same work.
+        let destroy = r#"{"operation":"destroy-skein-fleet-1","sandbox":"skein-fleet"}"#;
+        let create = r#"{"operation":"create-skein-fleet-1","sandbox":"skein-fleet",
+            "args":["create","--name","skein-fleet","-m","26g","--cpus","7","shell","/h/.skein"]}"#;
+        let ran = |verb: &str| {
+            std::fs::read_to_string(dir.join("sbx-ran"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.split(' ').next() == Some(verb))
+                .count()
+        };
+        // (approvals so far, `sbx rm` so far, `sbx create` so far)
+        let counts = || (approvals.0.load(Ordering::SeqCst), ran("rm"), ran("create"));
+        let state = |said: &Response| {
+            serde_json::from_str::<serde_json::Value>(&said.body)
+                .ok()
+                .and_then(|v| v["state"].as_str().map(str::to_string))
+                .unwrap_or_default()
+        };
+
+        // The first destroy, and its retry — the caller whose reply was lost.
+        let said = ask(&w, "POST", "/v1/destroy", destroy);
+        assert_eq!(
+            (said.code, state(&said).as_str()),
+            (200, "ran"),
+            "{}",
+            said.body
+        );
+        assert_eq!(counts(), (1, 1, 0));
+        assert!(!fleet.exists(), "the fake sbx did not remove the sandbox");
+        let said = ask(&w, "POST", "/v1/destroy", destroy);
+        assert_eq!(
+            state(&said),
+            "replayed",
+            "a retry of a destroy whose sandbox is gone must be answered from the record: {}",
+            said.body
+        );
+        assert_eq!(
+            counts(),
+            (1, 1, 0),
+            "a retry was asked for, or run, a second time"
+        );
+
+        // The fleet is made again, and that has a retry too.
+        let said = ask(&w, "POST", "/v1/create", create);
+        assert_eq!(
+            (said.code, state(&said).as_str()),
+            (200, "ran"),
+            "{}",
+            said.body
+        );
+        assert_eq!(counts(), (2, 1, 1));
+        assert!(fleet.exists(), "the fake sbx did not make the sandbox");
+        let said = ask(&w, "POST", "/v1/create", create);
+        assert_eq!(state(&said), "replayed", "{}", said.body);
+        assert_eq!(
+            counts(),
+            (2, 1, 1),
+            "a retry was asked for, or run, a second time"
+        );
+
+        // **The second destroy**: the same id as the first, whose record is still there and says
+        // it succeeded. The sandbox is standing, so that record is not about this fleet.
+        let said = ask(&w, "POST", "/v1/destroy", destroy);
+        assert_eq!(
+            (said.code, state(&said).as_str()),
+            (200, "ran"),
+            "the second destroy of a fleet was answered from the record of the first — skein is \
+             told it is gone and it is standing: {}",
+            said.body
+        );
+        assert_eq!(
+            counts(),
+            (3, 2, 1),
+            "the second destroy must be put to a person and must reach `sbx`"
+        );
+        assert!(!fleet.exists());
+
+        // **And the second create**, with the arguments of the first.
+        let said = ask(&w, "POST", "/v1/create", create);
+        assert_eq!(
+            (said.code, state(&said).as_str()),
+            (200, "ran"),
+            "a fleet recreated with the same arguments was answered from the record of the last \
+             create — skein is told it exists and there is none: {}",
+            said.body
+        );
+        assert_eq!(counts(), (4, 2, 2));
+        assert!(fleet.exists());
+
+        // Each record that stopped being the answer says so in the log, because the record itself
+        // is gone and this line is what is left to explain two `settled` lines under one id.
+        let log = std::fs::read_to_string(dir.join("warden.jsonl")).unwrap_or_default();
+        assert_eq!(
+            log.matches(r#""what":"superseded""#).count(),
+            2,
+            "a retired record left no line saying why:\n{log}"
+        );
+
+        // **A host that cannot be read.** The fleet is standing and the destroy on record
+        // succeeded, so a warden that could look would ask. One that cannot does neither thing.
+        std::fs::write(dir.join("unreadable"), b"").unwrap();
+        let said = ask(&w, "POST", "/v1/destroy", destroy);
+        std::env::set_var("PATH", real);
+        assert_eq!(said.code, 409, "{}", said.body);
+        assert!(
+            said.body.contains("could not be checked") && !said.body.contains("replayed"),
+            "a destroy was answered from a record nobody could check against the host: {}",
+            said.body
+        );
+        assert_eq!(
+            counts(),
+            (4, 2, 2),
+            "a request on a host nobody could read was asked for, or run"
         );
     }
 
@@ -2034,13 +2291,17 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
     /// Console attached that would approve, so asking anyway would show up as a run.
     ///
     /// Then, with the mapping missing, the id is typed and it runs once: the approved `will run`
-    /// line on the screen, the argv whole in the transcript. A retry is replayed without asking or
-    /// running again.
+    /// line on the screen, the argv whole in the transcript. A retry finds the mapping the publish
+    /// made and is answered `already`, without asking or running again. And when that mapping is
+    /// lost — the sandbox was recreated, say — the same request, under the same id, is put to the
+    /// person again rather than answered from the record of the publish that is no longer there
+    /// (SKEIN-1493).
     ///
     /// **What makes this fail**: `doer::publish` calling [`doer::run`] without asking its approver
     /// (the first count goes to 1); a `serve::Asked` that accepted an `approved` field; skipping
-    /// the look (the `already` case prompts and runs); or reading an unreadable listing as
-    /// "missing" (the blind cases prompt and run).
+    /// the look (the `already` case prompts and runs); reading an unreadable listing as
+    /// "missing" (the blind cases prompt and run); or a finished record answering whatever the
+    /// host shows (the last request is `replayed` and no second prompt is printed).
     #[test]
     #[cfg(feature = "publish")]
     fn a_publish_reaches_sbx_only_after_its_operation_id_is_typed_at_the_terminal() {
@@ -2232,14 +2493,33 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
             ),
             "the person was not shown the line that ran:\n{shown}"
         );
-        // The retry is answered from the record: the Console has nothing left to read, so asking
-        // again would refuse — and a replay is what says it was not asked.
+        // The retry. A real `sbx` would now list the mapping it just made, so the test's does —
+        // and the warden finds it there: nobody asked, nothing run.
+        std::fs::write(&listing, format!("{HEADER}127.0.0.1\t7878\t7878\ttcp\n")).unwrap();
         let again = ask(&w, "POST", "/v1/publish", &body("op-p5"));
-        std::env::set_var("PATH", real);
         assert!(
-            again.body.contains(r#""state":"replayed""#),
+            again.body.contains(r#""state":"already""#),
             "{}",
             again.body
+        );
+        // **And the mapping lost again**, with the record of the publish still there and still
+        // saying it succeeded. That record is about a mapping that no longer exists, so the repair
+        // is put to the person — whose Console has nothing left to read, so it refuses, and the
+        // second prompt on the screen is what says they were asked.
+        std::fs::write(&listing, HEADER).unwrap();
+        let lost = ask(&w, "POST", "/v1/publish", &body("op-p5"));
+        std::env::set_var("PATH", real);
+        assert!(
+            lost.body.contains(r#""state":"refused""#) && !lost.body.contains("replayed"),
+            "a publish whose mapping is gone was answered from the record of the one that made \
+             it: {}",
+            lost.body
+        );
+        let shown = String::from_utf8_lossy(&screen.0.lock().unwrap()).to_string();
+        assert_eq!(
+            shown.matches("Type the operation id").count(),
+            2,
+            "the repair of a lost mapping was not put to the person:\n{shown}"
         );
         assert_eq!(
             std::fs::read_to_string(&ran).unwrap_or_default(),

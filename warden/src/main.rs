@@ -17,8 +17,9 @@ use skein_warden::serve::{bind, Warden};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How long an outcome is kept. Past it an operation id is answered `unknown` — never re-run; see
-/// the note in `outcome.rs` on why the id itself is kept for ever.
+/// How long an outcome is kept. Past it an operation id is answered `unknown` rather than re-run,
+/// for as long as the host is as that operation would have left it; see the note in `outcome.rs`
+/// on why age drops the answer and keeps the id.
 const RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 fn main() {

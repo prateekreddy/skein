@@ -38,8 +38,9 @@ use crate::outcome::{cross_then, Did, Reach};
 /// from display text the requester supplied. An operation id is correlation, not content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
-    /// The operation id. Correlation only — it is what makes a retry safe, and it is echoed into
-    /// the approval so that what a person sees is what will run.
+    /// The operation id. Correlation only — it is what lets a retry be answered from the record
+    /// ([`undone`] is what says the record is still the answer), and it is echoed into the approval
+    /// so that what a person sees is what will run.
     pub operation: String,
     /// The fleet sandbox this concerns.
     pub sandbox: String,
@@ -122,6 +123,91 @@ pub fn described(
             argv_unpublish(request)?.join(" ")
         ),
     })
+}
+
+/// How the host differs from what this act leaves behind, or `None` when it does not.
+///
+/// **The look a finished record is checked against before it answers anything** (SKEIN-1493, and
+/// [`crate::outcome::Holds`] for where it is asked). The operation id is derived from the work, so
+/// the destroy of a fleet and the destroy of the fleet that replaced it are one id; what tells a
+/// retry from a second request is whether the first one's result is still standing:
+///
+/// * a **create** leaves the sandbox on the host, and a **destroy** leaves it gone — read from
+///   [`crate::sightings::look`], the same `sbx ls` the observation endpoint reports;
+/// * a **publish** leaves its mapping in `sbx ports`, and an **unpublish** leaves it out — the read
+///   [`already_published`] makes, and no more privileged than it.
+///
+/// `Some` carries the difference in words, for the audit line that says why a record was retired.
+///
+/// `Err` is a listing that could not be read, and **it is never read as either answer**: taken as
+/// "still so" it replays a destroy over a fleet that is standing, and taken as "no longer so" it
+/// puts a second create in front of a person for a sandbox that may be there.
+///
+/// Ungated, because its caller is: `serve` asks for every verb and answers 404 for a doer this
+/// build lacks before it gets here, so the arm for an absent pair of port doers is never reached.
+pub fn undone(
+    request: &Request,
+    which: crate::capability::Capability,
+) -> Result<Option<String>, String> {
+    use crate::capability::Capability;
+    match which {
+        Capability::Create | Capability::Destroy => {
+            let there = crate::sightings::look()
+                .map_err(|why| {
+                    format!(
+                        "the sandboxes on this host could not be listed, so whether {} is there \
+                         is not known: {why}",
+                        request.sandbox
+                    )
+                })?
+                .sandboxes
+                .iter()
+                .any(|name| name == &request.sandbox);
+            Ok(match (which, there) {
+                (Capability::Create, false) => {
+                    Some(format!("{} is not on this host any more", request.sandbox))
+                }
+                (Capability::Destroy, true) => {
+                    Some(format!("{} is on this host again", request.sandbox))
+                }
+                _ => None,
+            })
+        }
+        #[cfg(any(feature = "publish", feature = "unpublish"))]
+        Capability::Publish | Capability::Unpublish => {
+            let mapping = match which {
+                Capability::Publish => argv_publish(request)?,
+                _ => argv_unpublish(request)?,
+            }
+            .swap_remove(3);
+            let unread = |why: String| {
+                format!(
+                    "the ports {} publishes could not be read, so whether {mapping} is among them \
+                     is not known: {why}",
+                    request.sandbox
+                )
+            };
+            let listing = run(
+                &["ports".to_string(), request.sandbox.clone()],
+                &request.env,
+            )
+            .map_err(unread)?;
+            let there = mapped_in(&listing, &mapping).map_err(unread)?;
+            Ok(match (which, there) {
+                (Capability::Publish, false) => Some(format!(
+                    "{mapping} is not published for {} any more",
+                    request.sandbox
+                )),
+                (Capability::Unpublish, true) => Some(format!(
+                    "{mapping} is published for {} again",
+                    request.sandbox
+                )),
+                _ => None,
+            })
+        }
+        #[allow(unreachable_patterns)]
+        _ => Ok(None),
+    }
 }
 
 /// Make the fleet sandbox.
@@ -965,6 +1051,87 @@ mod tests {
             assert!(
                 text.contains("SOMETHING=chosen-by-the-caller sbx "),
                 "the environment is part of what will run, so it is part of what is shown: {text}"
+            );
+        }
+    }
+    /// **What the host shows of an act already on record, for the two port doers** (SKEIN-1493).
+    ///
+    /// [`undone`] is what decides whether a finished record answers a repeat, and its four arms are
+    /// two mirrored pairs — which is exactly the shape where one arm inverted goes unnoticed. The
+    /// create and destroy pair is driven end to end in `serve`'s tests; this is the port pair, read
+    /// off the same table for both: a publish is borne out by its mapping being listed and an
+    /// unpublish by its being absent, so on any one host the two must disagree.
+    ///
+    /// And a listing nobody can read is an `Err` for both — never "still so", which would replay a
+    /// publish over a mapping that is gone, and never "no longer so", which would ask for one that
+    /// may be there.
+    ///
+    /// Counterfactual: either tuple in the port arm of [`undone`] with its `bool` flipped. The pair
+    /// then agrees where it must differ, and the first or the second block below fails.
+    #[test]
+    #[cfg(all(feature = "publish", feature = "unpublish"))]
+    fn a_port_act_on_record_is_borne_out_by_the_listing_or_it_is_not() {
+        use crate::capability::Capability;
+        use std::os::unix::fs::PermissionsExt;
+        // $PATH is process-wide and this test puts a fake `sbx` on it — the lock SKEIN-307 added.
+        let _env = crate::env_lock();
+        let dir = crate::Scratch::new("skein-warden-undone");
+        let listing = dir.join("listing");
+        let sbx = dir.join("sbx");
+        // `sbx ports <sandbox>` prints the listing file, and fails as an unreachable daemon does
+        // when there is none. Nothing else is asked of it here, and anything else is an error.
+        std::fs::write(
+            &sbx,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = ports ] && [ $# -eq 2 ] || exit 2\n\
+                 [ -f '{listing}' ] || {{ echo 'the daemon is not answering' >&2; exit 1; }}\n\
+                 cat '{listing}'\n",
+                listing = listing.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&sbx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let real = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{real}", dir.display()));
+
+        let asked = |flag: &str| Request {
+            operation: "op-port".into(),
+            sandbox: "skein-fleet".into(),
+            args: ["ports", "skein-fleet", flag, "7878:7878/tcp"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            env: Vec::new(),
+        };
+        let published = || undone(&asked("--publish"), Capability::Publish);
+        let withdrawn = || undone(&asked("--unpublish"), Capability::Unpublish);
+        const HEADER: &str = "HOST IP\tHOST PORT\tSANDBOX PORT\tPROTOCOL\n";
+
+        // The mapping is listed: the publish stands, and the unpublish has been undone.
+        std::fs::write(&listing, format!("{HEADER}127.0.0.1\t7878\t7878\ttcp\n")).unwrap();
+        let (there_p, there_u) = (published(), withdrawn());
+        // Another port is listed and this one is not: the other way round.
+        std::fs::write(&listing, format!("{HEADER}127.0.0.1\t9999\t22\ttcp\n")).unwrap();
+        let (gone_p, gone_u) = (published(), withdrawn());
+        // And no listing at all.
+        std::fs::remove_file(&listing).unwrap();
+        let (unread_p, unread_u) = (published(), withdrawn());
+        std::env::set_var("PATH", real);
+
+        assert_eq!(there_p, Ok(None), "a publish whose mapping is listed");
+        assert!(
+            matches!(&there_u, Ok(Some(found)) if found.contains("published for skein-fleet again")),
+            "an unpublish whose mapping is listed again was read as still withdrawn: {there_u:?}"
+        );
+        assert!(
+            matches!(&gone_p, Ok(Some(found)) if found.contains("not published for skein-fleet any more")),
+            "a publish whose mapping is gone was read as still standing: {gone_p:?}"
+        );
+        assert_eq!(gone_u, Ok(None), "an unpublish whose mapping is absent");
+        for (what, got) in [("publish", &unread_p), ("unpublish", &unread_u)] {
+            assert!(
+                matches!(got, Err(why) if why.contains("could not be read")),
+                "a listing nobody could read was taken as an answer about a {what}: {got:?}"
             );
         }
     }

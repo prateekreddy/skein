@@ -251,7 +251,8 @@ fn refusal(code: u16, said: &str) -> String {
 pub enum Answered {
     /// It happened, and this is what the warden's command said.
     Ran(Reply),
-    /// It happened before, under this same operation id.
+    /// It happened before, under this same operation id, and the host is still as it left it —
+    /// which is what the warden checks before answering from its record (SKEIN-1493).
     Replayed(Reply),
     /// What was asked for already held, so the warden asked nobody and ran nothing: a publish that
     /// found its mapping in `sbx ports` (SKEIN-1130).
@@ -263,7 +264,8 @@ pub enum Answered {
     /// **Not a failure.** For a destroy, "we do not know" and "it did not happen" license opposite
     /// actions, and a caller that collapses them destroys a fleet twice.
     Undecided(Reply),
-    /// Older than the warden's retention window. Never re-run, and not recoverable.
+    /// Older than the warden's retention window, and not recoverable. Not re-run, because the
+    /// host is as the act would have left it; were it not, the warden would have asked afresh.
     Unknown(Reply),
 }
 
@@ -782,6 +784,16 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
 /// prevent. Deriving it from the verb, the sandbox and the arguments means a retry after a skein
 /// restart still names the same operation — and a create with *different* arguments is correctly a
 /// different one.
+///
+/// **So the id says what is asked, and not which time it is being asked** (SKEIN-1493). A destroy
+/// carries no arguments, so `destroy skein-fleet` is this one string for ever: the second resize
+/// of a fleet asks under the id of the first, and so does a recreate with the same arguments. The
+/// id cannot tell that from a retry and is not what does. The warden answers a finished id from
+/// its record only while the host is still as that run left it (`warden/src/doer.rs`, `undone`) —
+/// the sandbox a destroy removed still gone, the one a create made still there — and otherwise
+/// puts the request to a person as new. A retry after a restart is therefore still answered, and
+/// a later request for the same work is still asked for; neither depends on skein remembering
+/// which of the two it is making, which it could not do across the destroy that ends it.
 pub fn operation_id(verb: &str, sandbox: &str, argv: &[String]) -> String {
     operation_id_with_env(verb, sandbox, argv, &[])
 }
@@ -1177,6 +1189,11 @@ mod tests {
     ///
     /// This is what makes a retry safe: the warden's store keys on the id, so an id that changed per
     /// attempt would make every retry a new operation and every operation a second execution.
+    ///
+    /// It is not what makes a *second request* for the same work run — the id of a destroy is the
+    /// same for ever, as the first assertion says of a create. That is the warden's look at the
+    /// host (SKEIN-1493), and it is tested where it lives: `tests/warden_failures.rs`,
+    /// `a_fleet_destroyed_recreated_and_destroyed_again_is_asked_for_and_run_every_time`.
     #[test]
     fn the_same_work_keeps_the_same_operation_id_across_attempts() {
         let argv = vec!["create".to_string(), "--name".into(), "skein-fleet".into()];

@@ -13,13 +13,30 @@
 //! finishes. This is keyed by operation *id* and its whole job is to **remember** — for a retention
 //! window, and then to remember that it has forgotten.
 //!
-//! **The id is never pruned; only the answer is.** That is the difference between "unknown" and
+//! **Age never prunes an id; only the answer.** That is the difference between "unknown" and
 //! "never seen", and getting it wrong re-runs a destroy. A store that deleted expired records could
 //! not tell a returning caller apart from a new one, so an id past the window would execute a second
 //! time — the exact outcome the window exists inside. So an expired record keeps its id and drops
 //! its payload, and the answer becomes [`Outcome::Unknown`], which is a real answer a caller can act
 //! on. The cost is one small file per lifecycle operation ever performed, which for the operations
 //! this warden owns is a handful a day.
+//!
+//! **A record answers a repeat only while the host is still as the act left it** (SKEIN-1493). The
+//! id is derived from the work, so it names *what is asked* and not *which time*: `destroy
+//! skein-fleet` is one id for ever, and so is a create with the same arguments. Answering every
+//! repeat from the record therefore told the second resize of a fleet "destroyed" with nobody
+//! asked and nothing run, for the whole window — and "unknown" for ever after it. A retry and a
+//! new request cannot be told apart by the id, and they do not need to be: what separates them is
+//! whether the thing the record says was done is still done. A destroy is on record and the
+//! sandbox is gone — that is a retry, and it is answered. A destroy is on record and the sandbox is
+//! standing — whatever the caller meant, the record is not about *this* sandbox, so it is retired
+//! and the request is a first execution again, with a person asked like any other. [`Holds`] is the
+//! question, and whoever calls [`Store::once`] is the one who can look.
+//!
+//! That is at-most-once still, said precisely: **one approval buys one execution.** A caller that
+//! crashed after sending a destroy and retries after the fleet was recreated does not get the old
+//! answer, and does not get a second destroy either — it gets the approval prompt, and the person
+//! at the host decides whether the fleet standing there now is one they meant to lose.
 //!
 //! **The outcome is recorded before the caller is answered.** An outcome that exists only in a reply
 //! that was never delivered is precisely the failure being prevented, so [`Store::once`] does not
@@ -138,12 +155,30 @@ pub(crate) fn crossed_for_a_test() -> Result<Crossed, String> {
     Ok(Crossed(()))
 }
 
+/// Is the host still as this act leaves it? Asked by [`Store::once`] of its caller, and only when
+/// it is holding a finished record for the id (SKEIN-1493).
+///
+/// The store keeps records and cannot see the host; its caller can, so the question travels as a
+/// function. It is handed when the record finished, for the caller's own account of what it found.
+///
+/// * `Ok(true)` — the record still describes the host, so it is the answer.
+/// * `Ok(false)` — it does not: the sandbox a destroy removed is standing, or the one a create made
+///   is gone. The record is retired and the work is put to a person as a first execution.
+/// * `Err` — nobody could look. Nothing runs and nothing is replayed, because both would be a
+///   guess: the error goes to the caller.
+///
+/// **Never asked about an unfinished record.** One still in flight may have a command running under
+/// it — a warden killed mid-`sbx` leaves the child behind — and the host half way through a destroy
+/// reads exactly like a host nobody has touched. That stays [`Outcome::Undecided`].
+pub type Holds<'a> = &'a dyn Fn(&str) -> Result<bool, String>;
+
 /// What [`Store::once`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// This id had not been seen. The work ran, and this is what it returned.
     Ran(Done),
-    /// This id was answered before. This is what it said then, and the work did not run again.
+    /// This id was answered before, and the host is still as that left it ([`Holds`]). This is
+    /// what it said then, and the work did not run again.
     Replayed(Done),
     /// The id was accepted and no outcome was ever recorded — something died between the two.
     ///
@@ -155,8 +190,10 @@ pub enum Outcome {
     },
     /// The id is older than the retention window. Remembered as having existed; its answer is gone.
     ///
-    /// Never re-executed. A caller that gets this has to decide with a human, which is the honest
-    /// end of a request nobody kept the answer to.
+    /// Not re-executed while the host is still as the act would have left it ([`Holds`]): a caller
+    /// that gets this has to decide with a human, which is the honest end of a request nobody kept
+    /// the answer to. Once the host says otherwise the record is retired like any other, which is
+    /// what stops `destroy skein-fleet` being unknown for ever after its first thirty days.
     Unknown,
     /// Nothing ran, so there is nothing to be at-most-once about — see [`Did::Never`]. The id was
     /// released and the same request may be put to a person again.
@@ -238,7 +275,7 @@ impl Store {
         self.dir.join(format!("{id}.json"))
     }
 
-    /// Run `f` for `id`, at most once, ever.
+    /// Run `f` for `id`, at most once for as long as the host is as that run left it.
     ///
     /// The ordering is the contract, and every step of it is a failure somebody has had:
     ///
@@ -257,7 +294,15 @@ impl Store {
     /// subject of [`Stage`]: the record says which side of the command a death happened on, so a
     /// claim abandoned with the approval still on the screen can be taken back, and one abandoned
     /// with `sbx` already running never is.
-    pub fn once(&self, id: &str, f: impl FnOnce(Reach<'_>) -> Did) -> Result<Outcome, String> {
+    ///
+    /// `holds` is consulted when step 1 finds a **finished** record in the way, and decides whether
+    /// that record is the answer or is retired — see [`Holds`] and the module note.
+    pub fn once(
+        &self,
+        id: &str,
+        holds: Holds<'_>,
+        f: impl FnOnce(Reach<'_>) -> Did,
+    ) -> Result<Outcome, String> {
         let id = checked_id(id)?;
         fs::create_dir_all(&self.dir).map_err(|e| format!("mkdir {}: {e}", self.dir.display()))?;
         // Ageing runs here rather than on a timer: these operations are rare and minutes long, so a
@@ -276,7 +321,7 @@ impl Store {
         // Held open — and flocked — for as long as this operation is in front of a person. The
         // kernel drops it however this process dies, which is what lets the next warden tell an
         // abandoned claim from a live one without trusting a pid.
-        let _held = match self.take(&path, &mine)? {
+        let _held = match self.take(&path, &mine, holds)? {
             Taken::Ours(held) => held,
             Taken::Answered(outcome) => return Ok(outcome),
         };
@@ -328,12 +373,13 @@ impl Store {
     }
 
     /// Claim the id, or say what it is already answered with — releasing a claim whose warden is
-    /// gone, and looping because releasing one frees it for anybody, not for us.
+    /// gone, retiring a finished record the host no longer bears out, and looping because either
+    /// one frees the id for anybody, not for us.
     ///
     /// Eight laps rather than forever: each lap needs another process to have claimed the id in the
     /// window between our release and our claim, and a caller that loses eight of those in a row is
     /// better told to ask again than spun on.
-    fn take(&self, path: &Path, mine: &Record) -> Result<Taken, String> {
+    fn take(&self, path: &Path, mine: &Record, holds: Holds<'_>) -> Result<Taken, String> {
         for _ in 0..8 {
             match self.claim(path, mine) {
                 Claim::Ours(held) => return Ok(Taken::Ours(held)),
@@ -341,9 +387,24 @@ impl Store {
                 Claim::Taken => {}
             }
             let record = self.read(path)?;
-            if !abandoned(path, &record) {
+            if abandoned(path, &record) {
+                continue;
+            }
+            // In flight, and not abandoned: somebody is at the approval, or a command may be
+            // running. The host is not asked — see `Holds` for why its answer would mean nothing.
+            if record.finished_at.is_empty() {
                 return Ok(Taken::Answered(answer_from(record)));
             }
+            // Finished — with an answer, or with one the window has dropped. It answers this
+            // request only if the host is still as that run left it. An `Err` leaves by `?`:
+            // nobody could look, so nothing is replayed and nothing is run.
+            if holds(&record.finished_at)? {
+                return Ok(Taken::Answered(answer_from(record)));
+            }
+            // Not `return` on a refusal to retire: it means the record moved under us — another
+            // request retired it first and may hold the id now — so the next lap reads what is
+            // there and answers from that.
+            let _ = retired(path, &record);
         }
         Err(format!(
             "{} was claimed and released repeatedly while this request waited — ask again",
@@ -535,6 +596,48 @@ fn abandoned(path: &Path, record: &Record) -> bool {
     fs::remove_file(path).is_ok()
 }
 
+/// Remove the finished record at `path` — the exact one `judged` — so its id can be claimed again.
+///
+/// Called once [`Holds`] has said the host no longer bears the record out. **Every "no" here leaves
+/// the record where it is**, as in [`abandoned`], and for the same reason: two requests can reach
+/// this point together, and the second must not remove the claim the first has just made in the
+/// old record's place — that would be one approval's worth of work handed out twice.
+///
+/// So the same three checks, about a different record: the lock is free (two retirers contend, and
+/// a claim in front of a person is held by its warden); the inode under the lock is still the one
+/// at `path`; and the bytes under the lock are still the record that was judged, whole — not merely
+/// "finished", because a later run that finished in between is a different answer about a different
+/// host, and it has not been judged at all.
+///
+/// Removal is not the pruning the module note forbids. That rule keeps an *unanswered* id from
+/// reading as never seen; this record was answered, and the host itself now says its answer is
+/// about something that is no longer there. What survives it is the audit log, which has the
+/// `asked` and `settled` lines of the run this record was for.
+fn retired(path: &Path, judged: &Record) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    if !lock(&file) {
+        return false;
+    }
+    let (Ok(locked), Ok(named)) = (file.metadata(), fs::metadata(path)) else {
+        return false;
+    };
+    if (locked.dev(), locked.ino()) != (named.dev(), named.ino()) {
+        return false;
+    }
+    let mut raw = Vec::new();
+    if file.read_to_end(&mut raw).is_err() {
+        return false;
+    }
+    if serde_json::from_slice::<Record>(&raw).ok().as_ref() != Some(judged) {
+        return false;
+    }
+    let gone = fs::remove_file(path).is_ok();
+    let _ = sync_dir(path);
+    gone
+}
+
 /// `flock(LOCK_EX|LOCK_NB)`: true if we now hold it, false if somebody else does.
 ///
 /// Per open file description, so two threads of one process contend exactly as two processes do —
@@ -633,6 +736,12 @@ mod tests {
         Duration::from_secs(3600)
     }
 
+    /// The host is as every record says, for a test whose subject is the record. What happens when
+    /// it is not is `a_record_the_host_no_longer_bears_out_…`, below.
+    fn believed(_: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
     /// The whole point: a retry is answered, not obeyed.
     ///
     /// Counted rather than inspected. Asserting the store *contains* one record would pass against
@@ -650,12 +759,12 @@ mod tests {
             })
         };
 
-        let first = store.once("op-1", work).unwrap();
+        let first = store.once("op-1", &believed, work).unwrap();
         assert_eq!(first, Outcome::Ran(Ok("fleet destroyed".into())));
 
         // The reply was lost and the caller asks again with the SAME id, which is the contract the
         // client is required to keep (§8.2).
-        let again = store.once("op-1", work).unwrap();
+        let again = store.once("op-1", &believed, work).unwrap();
         assert_eq!(
             again,
             Outcome::Replayed(Ok("fleet destroyed".into())),
@@ -691,11 +800,11 @@ mod tests {
         };
 
         assert_eq!(
-            store.once("op-fail", work).unwrap(),
+            store.once("op-fail", &believed, work).unwrap(),
             Outcome::Ran(Err("sbx said no".into()))
         );
         assert_eq!(
-            store.once("op-fail", work).unwrap(),
+            store.once("op-fail", &believed, work).unwrap(),
             Outcome::Replayed(Err("sbx said no".into()))
         );
         assert_eq!(ran.load(Ordering::SeqCst), 1);
@@ -715,14 +824,16 @@ mod tests {
             })
         };
 
-        Store::new(&dir, forever()).once("op-old", work).unwrap();
+        Store::new(&dir, forever())
+            .once("op-old", &believed, work)
+            .unwrap();
         assert_eq!(ran.load(Ordering::SeqCst), 1);
 
         // The same store directory, read by a warden that keeps nothing. Ageing runs on the way in,
         // so this call both forgets the answer and then has to decide what to do without it.
         let forgetful = Store::new(&dir, Duration::ZERO);
         assert_eq!(
-            forgetful.once("op-old", work).unwrap(),
+            forgetful.once("op-old", &believed, work).unwrap(),
             Outcome::Unknown,
             "an expired id must be answered, not executed"
         );
@@ -732,7 +843,10 @@ mod tests {
             "an id whose answer aged out was executed a second time"
         );
         // And it stays unknown: forgetting is not a step towards being runnable again.
-        assert_eq!(forgetful.once("op-old", work).unwrap(), Outcome::Unknown);
+        assert_eq!(
+            forgetful.once("op-old", &believed, work).unwrap(),
+            Outcome::Unknown
+        );
         assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
 
@@ -747,7 +861,7 @@ mod tests {
         // A panic inside the work unwinds past the record step, which is what a crash between
         // running and recording looks like from the store's side.
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.once("op-crash", |reach| {
+            store.once("op-crash", &believed, |reach| {
                 // Crossed first, so this is a death with `sbx` already running — the case that has
                 // to stay undecided. The assertion below is that it does.
                 let _crossed = reach().expect("the marker must be writable");
@@ -758,7 +872,7 @@ mod tests {
         assert!(crashed.is_err());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
 
-        match store.once("op-crash", |reach| {
+        match store.once("op-crash", &believed, |reach| {
             cross_then(reach, || Ok("second run".to_string()))
         }) {
             Ok(Outcome::Undecided { started_at }) => assert!(
@@ -790,10 +904,10 @@ mod tests {
             })
         };
 
-        store.once("op-torn", work).unwrap();
+        store.once("op-torn", &believed, work).unwrap();
         // Truncated, which is what a write interrupted by power loss leaves behind.
         fs::write(dir.join("op-torn.json"), b"").unwrap();
-        let why = store.once("op-torn", work).unwrap_err();
+        let why = store.once("op-torn", &believed, work).unwrap_err();
         assert!(
             why.contains("unreadable") && why.contains("may already have happened"),
             "the refusal must say why it is refusing: {why}"
@@ -802,7 +916,7 @@ mod tests {
 
         // Garbage, rather than merely truncated. Same answer.
         fs::write(dir.join("op-torn.json"), b"{\"started_at\": ").unwrap();
-        assert!(store.once("op-torn", work).is_err());
+        assert!(store.once("op-torn", &believed, work).is_err());
         assert!(store.asked("op-torn").is_err());
         assert_eq!(ran.load(Ordering::SeqCst), 1);
     }
@@ -819,7 +933,7 @@ mod tests {
             let hands: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(move || {
-                        Store::new(dir, forever()).once("op-race", |reach| {
+                        Store::new(dir, forever()).once("op-race", &believed, |reach| {
                             cross_then(reach, || {
                                 ran.fetch_add(1, Ordering::SeqCst);
                                 // Long enough that the others are inside `once` while this one
@@ -869,7 +983,7 @@ mod tests {
             "op\nApproved: yes",
             "op\u{0}",
         ] {
-            let why = store.once(bad, work).unwrap_err();
+            let why = store.once(bad, &believed, work).unwrap_err();
             assert!(
                 why.contains("is not an operation id"),
                 "{bad:?} was accepted or refused for the wrong reason: {why}"
@@ -878,7 +992,7 @@ mod tests {
         }
         assert_eq!(ran.load(Ordering::SeqCst), 0);
         for good in ["op-1", "create_fleet_2026", "A1"] {
-            store.once(good, work).unwrap();
+            store.once(good, &believed, work).unwrap();
         }
         assert_eq!(ran.load(Ordering::SeqCst), 3);
     }
@@ -909,7 +1023,7 @@ mod tests {
         .unwrap();
 
         let got = store
-            .once("op-gone", |reach| {
+            .once("op-gone", &believed, |reach| {
                 cross_then(reach, || {
                     ran.fetch_add(1, Ordering::SeqCst);
                     Ok("made".to_string())
@@ -944,7 +1058,7 @@ mod tests {
             let ran = &ran;
             let dir = &dir;
             let holder = scope.spawn(move || {
-                Store::new(dir, forever()).once("op-slow", |reach| {
+                Store::new(dir, forever()).once("op-slow", &believed, |reach| {
                     // Claimed, and now sitting at the approval. The marker is deliberately not
                     // crossed yet, so the record on disk says `Asking` — the releasable stage.
                     claimed.send(()).unwrap();
@@ -963,7 +1077,7 @@ mod tests {
             waiting.recv().unwrap();
 
             let got = Store::new(dir, forever())
-                .once("op-slow", |reach| {
+                .once("op-slow", &believed, |reach| {
                     cross_then(reach, || {
                         ran.fetch_add(1, Ordering::SeqCst);
                         Ok("stolen".to_string())
@@ -1013,7 +1127,7 @@ mod tests {
         .unwrap();
 
         let got = store
-            .once("op-legacy", |reach| {
+            .once("op-legacy", &believed, |reach| {
                 cross_then(reach, || {
                     ran.fetch_add(1, Ordering::SeqCst);
                     Ok("destroyed a second time".to_string())
@@ -1030,5 +1144,241 @@ mod tests {
             0,
             "an operation that may already have destroyed a fleet was run again"
         );
+    }
+    /// **A record the host no longer bears out is retired, and the work is a first execution
+    /// again** (SKEIN-1493).
+    ///
+    /// The id is derived from the work, so the second destroy of a fleet carries the id of the
+    /// first. Answered from the record it was told "destroyed" with nothing run; so the store asks
+    /// its caller whether the host is still as the record says, and a "no" makes the id runnable.
+    /// All three kinds of finished record, because each one locked the id in its own way: a success
+    /// replayed as done, a failure replayed for thirty days, and an answer past the window that was
+    /// `Unknown` for ever.
+    ///
+    /// Counted, as everywhere here: the assertion is that the work RAN a second time and the reply
+    /// said `Ran`. Its counterfactual is `take` answering from a finished record without reading
+    /// what `holds` said — then every second call below is `Replayed` or `Unknown` and each count
+    /// stays at 1.
+    #[test]
+    fn a_record_the_host_no_longer_bears_out_is_retired_and_the_work_runs_again() {
+        let dir = scratch("superseded");
+        let ran = AtomicUsize::new(0);
+        let asked = AtomicUsize::new(0);
+        let moved_on = |_: &str| -> Result<bool, String> {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        };
+        let well = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok("fleet destroyed".to_string())
+            })
+        };
+        let badly = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Err("sbx said no".to_string())
+            })
+        };
+
+        // A first execution never consults the host: there is no record to doubt.
+        let store = Store::new(&dir, forever());
+        assert_eq!(
+            store.once("op-ok", &moved_on, well).unwrap(),
+            Outcome::Ran(Ok("fleet destroyed".into()))
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+
+        // The fleet is back, and it is destroyed again under the same id.
+        assert_eq!(
+            store.once("op-ok", &moved_on, well).unwrap(),
+            Outcome::Ran(Ok("fleet destroyed".into())),
+            "a destroy whose sandbox is standing again was answered from the record of the last one"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            2,
+            "the second destroy never ran"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // And the retry of THAT one — the host now as it left it — is answered, not run.
+        assert_eq!(
+            store.once("op-ok", &believed, well).unwrap(),
+            Outcome::Replayed(Ok("fleet destroyed".into()))
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 2, "a retry ran the work again");
+
+        // A failure on record, and the thing it failed to do still not done.
+        ran.store(0, Ordering::SeqCst);
+        store.once("op-failed", &believed, badly).unwrap();
+        assert_eq!(
+            store.once("op-failed", &moved_on, well).unwrap(),
+            Outcome::Ran(Ok("fleet destroyed".into())),
+            "a failed run was replayed although the host shows the work is still to do"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+
+        // An answer the window dropped. Ageing runs on the way in, so the first call here both
+        // forgets the answer and has to decide without it.
+        ran.store(0, Ordering::SeqCst);
+        store.once("op-old", &believed, well).unwrap();
+        let forgetful = Store::new(&dir, Duration::ZERO);
+        assert_eq!(
+            forgetful.once("op-old", &believed, well).unwrap(),
+            Outcome::Unknown
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            forgetful.once("op-old", &moved_on, well).unwrap(),
+            Outcome::Ran(Ok("fleet destroyed".into())),
+            "an id past the window stayed unknown although the host shows the work is to do"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+    }
+
+    /// **The host is not asked about an operation still in flight, and its answer could not free
+    /// one** (SKEIN-1493).
+    ///
+    /// A warden killed inside `sbx rm` leaves the child running. For those seconds the sandbox is
+    /// still listed, so "the host does not bear this record out" is true of a destroy that is
+    /// happening right now — and retiring the record on it would put the same destroy to a person
+    /// while the first is still under way. So `holds` is for finished records only.
+    ///
+    /// The record below is what such a death leaves: `running`, unfinished, nobody holding its
+    /// lock. The counterfactual is `take` losing its `finished_at.is_empty()` return: `holds` is
+    /// then asked (the count is 1), says no, the record is retired, and the work runs.
+    #[test]
+    fn the_host_is_not_asked_about_an_operation_still_in_flight() {
+        let dir = scratch("in-flight");
+        let store = Store::new(&dir, forever());
+        let ran = AtomicUsize::new(0);
+        let asked = AtomicUsize::new(0);
+        fs::write(
+            dir.join("op-mid.json"),
+            br#"{"started_at":"2026-11-17T00:00:00Z","finished_at":"","outcome":null,
+                 "forgotten":false,"stage":"running"}"#,
+        )
+        .unwrap();
+
+        let got = store
+            .once(
+                "op-mid",
+                &|_| {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Ok(false)
+                },
+                |reach| {
+                    cross_then(reach, || {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok("destroyed a second time".to_string())
+                    })
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(got, Outcome::Undecided { .. }),
+            "an operation that may be running was not answered undecided: {got:?}"
+        );
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            0,
+            "the host was asked about an operation that may be half way through changing it"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "an operation that may still be running was run again"
+        );
+    }
+
+    /// **A host nobody could read is neither "still so" nor "no longer so"** (SKEIN-1493).
+    ///
+    /// Taken as the first, a destroy is replayed over a fleet that may be standing — the bug this
+    /// check exists for, back whenever `sbx ls` hiccups. Taken as the second, a create is put to a
+    /// person for a sandbox that may be there. So it is an error, the work does not run, and the
+    /// record is still there to answer once somebody can look.
+    ///
+    /// Counterfactual: `holds(..)?` becoming `holds(..).unwrap_or(true)` — the middle call is then
+    /// `Ok(Replayed)` and the `expect_err` fails.
+    #[test]
+    fn a_host_nobody_could_read_neither_replays_the_record_nor_runs_the_work() {
+        let dir = scratch("unread");
+        let store = Store::new(&dir, forever());
+        let ran = AtomicUsize::new(0);
+        let work = |reach: Reach<'_>| {
+            cross_then(reach, || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok("fleet destroyed".to_string())
+            })
+        };
+
+        store.once("op-1", &believed, work).unwrap();
+        let why = store
+            .once("op-1", &|_| Err("sbx ls did not answer".to_string()), work)
+            .expect_err("a record nobody could check was answered from, or run over");
+        assert!(why.contains("sbx ls did not answer"), "{why}");
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the work ran on a guess");
+        assert_eq!(
+            store.once("op-1", &believed, work).unwrap(),
+            Outcome::Replayed(Ok("fleet destroyed".into())),
+            "the record did not survive a check that could not be made"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// **Only the record that was judged is retired — not whatever is at its name by then**
+    /// (SKEIN-1493).
+    ///
+    /// Two requests for one id can both find the stale record and both be told the host has moved
+    /// on. The first retires it and claims the id; the second, a moment behind, must not remove
+    /// that claim in the old record's place — it would then claim the id too, and one piece of work
+    /// would be in front of a person twice. So [`retired`] compares the bytes under its lock with
+    /// the record it was handed, whole.
+    ///
+    /// Counterfactual: comparing nothing, or only "is it finished" — the first call below then
+    /// removes a record nobody judged, and the `exists` assertion fails.
+    #[test]
+    fn only_the_record_that_was_judged_is_retired() {
+        let dir = scratch("retired");
+        let store = Store::new(&dir, forever());
+        let path = store.path("op-1");
+        let finished = |at: &str| Record {
+            started_at: at.to_string(),
+            finished_at: at.to_string(),
+            outcome: Some(Ok("fleet destroyed".into())),
+            forgotten: false,
+            stage: Stage::Running,
+        };
+        let judged = finished("2026-11-01T00:00:00+00:00");
+        let later = finished("2026-11-17T00:00:00+00:00");
+
+        // What is at the name is a LATER run's record: the one judged is already gone.
+        store.put(&path, &later).unwrap();
+        assert!(
+            !retired(&path, &judged),
+            "a record nobody judged was retired"
+        );
+        assert!(path.exists(), "a record nobody judged was removed");
+
+        // The permitted case, so the refusal above is not simply `retired` never saying yes.
+        assert!(retired(&path, &later));
+        assert!(!path.exists());
+
+        // And a claim in front of a person — locked by the warden holding it — is not removed even
+        // by a caller holding the very bytes it was written with.
+        let asking = Record {
+            finished_at: String::new(),
+            outcome: None,
+            stage: Stage::Asking,
+            ..later.clone()
+        };
+        let Claim::Ours(_held) = store.claim(&path, &asking) else {
+            panic!("the id was free and could not be claimed");
+        };
+        assert!(
+            !retired(&path, &asking),
+            "a claim its warden still holds was retired"
+        );
+        assert!(path.exists());
     }
 }
