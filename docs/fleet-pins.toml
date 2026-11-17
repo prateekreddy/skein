@@ -24,13 +24,13 @@
 missing = ["SKEIN_FLEET_ROOT"]
 reason = """`fleet_serve_mounts` resolves no fleet path — it reads `skein_home`, `box_state_root` and `load_repos`, and calls `fleet_root` nowhere (verified: 0 `fleet_root` calls on that path) — so this pin's absence is latent rather than live. `tests/fleet_create_mounts.rs` calls the SAME function and is pinned, so the pair is what this one should be; it is declared only because `tests/fleet_move.rs` is not in this change's file set. Retire this entry by adding `.set("SKEIN_FLEET_ROOT", root.join("boxes"))` beside this scope's existing `$SKEIN_HOME` pin — the `stage` fixture in the same file already pins both exactly that way."""
 
-[exempt."tests/git_write_request::ask_as"]
+[exempt."tests/git_write_request::ask_with"]
 missing = ["SKEIN_HOME"]
 reason = """Spawns `bash src/box-session.sh --request-write`, and **no shell script under `src/` reads `$SKEIN_HOME` at all** (`grep -rn 'SKEIN_HOME' src --include=*.sh` -> 0). The child resolves `${SKEIN_FLEET_ROOT:-/boxes}` and nothing else, so pinning the fleet root alone is the complete answer for it and a home pin would be a ritual. Permanent, and an argument rather than an apology: this is the callee-cannot-read-it category."""
 
 [exempt."tests/git_write_request::shim_push"]
 missing = ["SKEIN_HOME"]
-reason = """Same file and same reason as `ask_as` above."""
+reason = """Same file and same reason as `ask_with` above."""
 
 [exempt."tests/git_write_request::the_git_shim_is_git_for_everything_that_is_not_a_push"]
 missing = ["SKEIN_HOME"]
