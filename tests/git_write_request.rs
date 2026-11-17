@@ -121,7 +121,28 @@ impl Box_ {
     /// The same, with `SKEIN_BOX` set to a name of the caller's choosing — which is what a box can
     /// do to itself, and therefore the only interesting case.
     fn ask_as(&self, arg_box: &str, env_box: Option<&str>, argv: &[&str]) -> (i32, String) {
+        self.ask_with(arg_box, env_box, false, argv)
+    }
+
+    /// [`Box_::ask`] from a scoped box: `SKEIN_GIT_TOKENS` names this box's token directory, as the
+    /// launcher exports it for every scoped box and the git shim passes it on.
+    fn ask_scoped(&self, box_name: &str, argv: &[&str]) -> (i32, String) {
+        self.ask_with(box_name, None, true, argv)
+    }
+
+    fn ask_with(
+        &self,
+        arg_box: &str,
+        env_box: Option<&str>,
+        scoped: bool,
+        argv: &[&str],
+    ) -> (i32, String) {
         let mut cmd = Command::new("bash");
+        if scoped {
+            cmd.env("SKEIN_GIT_TOKENS", &self.tokens);
+        } else {
+            cmd.env_remove("SKEIN_GIT_TOKENS");
+        }
         cmd.arg(script("box-session.sh"))
             .arg("--request-write")
             .arg(arg_box)
@@ -381,6 +402,115 @@ fn asking_to_write_another_repo_files_one_request_however_often_it_is_asked() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("already asked"), "{out}");
     assert_eq!(b.queued().len(), 1, "a second ask filed a second request");
+}
+
+/// Write `web-main`'s request for `acme/thing` as the host's courtesy copy leaves it once granted:
+/// `state` rewritten to `granted`, and nothing ever rewriting it again (SKEIN-1495).
+fn granted_ask(b: &Box_, id: &str) {
+    let dir = b.queue().join("web-main");
+    fs::create_dir_all(&dir).unwrap();
+    let body = serde_json::json!({
+        "id": id, "box": "web-main", "repo": "acme/thing", "reason": "pushing main",
+        "asked": "2026-11-15T10:00:00Z", "state": "granted", "decided": "2026-11-15T10:05:00Z",
+    });
+    fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
+}
+
+/// **A box whose grant has ended asks again; a box whose grant is live does not** (SKEIN-1495).
+///
+/// The box's own copy of a granted request says `granted` for ever, so counting it as "already
+/// asked" left a box with an expired or revoked grant unable to file anything — and the old
+/// request cannot be answered twice. The grant is live in the box exactly when the host keeps a
+/// token file for the repository there, or the line saying why a live grant has none.
+///
+/// What would make it fail: `request_write` counting `granted` whatever the token directory holds
+/// (the first ask files nothing, "already asked"); it ignoring the token file (the second ask
+/// files again); it ignoring the reason file (the third files again); or it not saying the old
+/// grant ended (the line is missing).
+#[test]
+fn a_granted_ask_whose_grant_has_ended_is_asked_again_and_a_live_one_is_not() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let b = Box_::new("ask-again");
+    granted_ask(&b, "20261115-100000-1");
+
+    // No token and no reason here: the grant has ended, so a fresh request is filed.
+    let (code, out) = b.ask_scoped("web-main", &["acme/thing", "pushing main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains(
+            "request 20261115-100000-1 for acme/thing was granted, but that grant has ended"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("pending approval"), "{out}");
+    let filed = b.filed_under("web-main");
+    let pending: Vec<_> = filed.iter().filter(|r| r["state"] == "pending").collect();
+    assert_eq!(pending.len(), 1, "{filed:?}");
+    assert_eq!(pending[0]["repo"], "acme/thing");
+    assert_ne!(pending[0]["id"], "20261115-100000-1");
+
+    // A second box with a live token for it: the granted ask still counts, nothing is filed.
+    let live = Box_::new("ask-live");
+    granted_ask(&live, "20261115-100000-1");
+    live.place_token("acme/thing", "APP-TOKEN-FOR-THING");
+    let (code, out) = live.ask_scoped("web-main", &["acme/thing", "pushing main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("already asked to write acme/thing — request 20261115-100000-1 is granted"),
+        "{out}"
+    );
+    assert_eq!(
+        live.filed_under("web-main").len(),
+        1,
+        "a live grant filed a second request"
+    );
+
+    // A live grant the host could not mint for: the reason file is there, the token is not.
+    // Asking again is the same decision (the helper says so), so nothing is filed.
+    let why = Box_::new("ask-why");
+    granted_ask(&why, "20261115-100000-1");
+    let dir = why.tokens.join("why");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("acme%2Fthing"), "no stored token covers it\n").unwrap();
+    let (code, out) = why.ask_scoped("web-main", &["acme/thing", "pushing main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("already asked"), "{out}");
+    assert_eq!(
+        why.filed_under("web-main").len(),
+        1,
+        "a live grant with no token filed again"
+    );
+}
+
+/// **One pending ask per box and repo still holds beside an ended grant** (SKEIN-1495): the fresh
+/// request an ended grant lets through is itself the ask a retrying push collapses onto.
+///
+/// What would make it fail: the ended-grant branch filing on every call rather than only falling
+/// through to the pending check (the second ask here would file a third request).
+#[test]
+fn a_fresh_ask_after_an_ended_grant_still_dedupes_while_it_is_pending() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let b = Box_::new("ask-again-dedupe");
+    granted_ask(&b, "20261115-100000-1");
+    let (code, out) = b.ask_scoped("web-main", &["acme/thing", "pushing main"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(b.filed_under("web-main").len(), 2, "{out}");
+
+    let (code, out) = b.ask_scoped("web-main", &["acme/thing", "pushing main"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("already asked") && out.contains("is pending"),
+        "{out}"
+    );
+    assert_eq!(
+        b.filed_under("web-main").len(),
+        2,
+        "a retry after the fresh ask grew the queue"
+    );
 }
 
 #[test]

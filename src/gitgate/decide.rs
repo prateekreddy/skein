@@ -596,6 +596,95 @@ mod tests {
         out.into_iter().map(|(b, _, m)| (b, m)).collect()
     }
 
+    /// **A box whose grant ended can be granted again, through a fresh request** (SKEIN-1495).
+    ///
+    /// The old request is answered once and stays answered, so what lets a box back in is a new
+    /// request for the same box and repository — which the launcher now files once the box holds
+    /// no token and no reason for it. This is the host's half: that fresh request is listed as
+    /// waiting beside the old decided one, deciding it is not refused because an older request for
+    /// the pair was granted, and the grant it records places a token at the next refresh.
+    ///
+    /// What would make it fail: `decide`'s guard refusing on an earlier answer for the same box and
+    /// repository rather than for the same request (the fresh `decide` errs); `decided_over`
+    /// painting the old answer onto the new row (it reads `granted`); or `record` keeping the
+    /// expired grant over the new one (no token is placed).
+    #[test]
+    fn a_fresh_request_after_an_ended_grant_is_shown_waiting_and_can_be_granted() {
+        let (_lock, home, mut env) = fresh_home();
+        env.set("SKEIN_FLEET_ROOT", home.join("fleet"));
+        let _warden = crate::testutil::no_warden();
+        crate::repos::save_repos(&[crate::repos::Repo {
+            id: "worker".into(),
+            source: "https://github.com/a/one.git".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+        tokens_for(&["a/one", "b/two"]);
+        let token = || std::path::Path::new(&token_file("worker", "b/two")).exists();
+        let ask = |id: &str| Request {
+            id: id.into(),
+            box_name: "worker".into(),
+            repo: "b/two".into(),
+            reason: "pushing main".into(),
+            asked: "2026-11-15T10:00:00Z".into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        // The box's drop-box, holding what it filed.
+        let file = |r: &Request| {
+            let dir = std::path::PathBuf::from(box_requests_dir("worker"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{}.json", r.id)),
+                serde_json::to_vec(r).unwrap(),
+            )
+            .unwrap();
+        };
+
+        let old = ask("20261115-100000-1");
+        file(&old);
+        decide("no-such-sandbox", &old, true, Some(24)).expect("the first grant");
+        // The grant runs out: its expiry moved to an hour ago in the record itself, which is what
+        // 24 hours passing leaves behind, and the refresher takes the token away. Not through
+        // `record`, so that `record` replacing the ended grant is asserted below, not assumed here.
+        crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+            for g in all.iter_mut() {
+                g.expires = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            }
+            Ok(())
+        })
+        .unwrap();
+        crate::gitgate::refresh_tokens("worker");
+        assert!(!token(), "the fixture's grant did not end");
+        assert!(
+            decide("no-such-sandbox", &old, true, Some(24)).is_err(),
+            "the old request is still answered once"
+        );
+
+        let fresh = ask("20261117-090000-2");
+        file(&fresh);
+        let rows = decided_over(queued());
+        let state = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .map(|r| r.state.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(state(&old.id), "granted", "{rows:?}");
+        assert_eq!(state(&fresh.id), "pending", "{rows:?}");
+
+        decide("no-such-sandbox", &fresh, true, Some(24))
+            .expect("a fresh request after an ended grant must be grantable");
+        let pair: Vec<_> = grants()
+            .into_iter()
+            .filter(|g| g.box_name == "worker" && same_repo(&g.repo, "b/two"))
+            .collect();
+        assert_eq!(pair.len(), 1, "{pair:?}");
+        assert!(pair[0].is_live(chrono::Utc::now()), "{pair:?}");
+        crate::gitgate::refresh_tokens("worker");
+        assert!(token(), "granting the fresh request placed no token");
+    }
+
     /// The grant that gets recorded is the one that was on screen — box included.
     ///
     /// "The approving side writes the artifact" was already true here: `record` writes the grant on

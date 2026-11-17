@@ -682,18 +682,39 @@ request_write() {
   # Only this box's own directory is scanned, and only the repo is compared: the box half of "per
   # box and repo" is now the directory the scan is over, so re-reading it out of a file — which is
   # the field nobody may trust — would be asking a worse source the question the path just answered.
-  local f state existing
+  #
+  # **A `granted` ask counts only while its grant is live here** (SKEIN-1495). The box's file says
+  # `granted` for ever once the host has answered it — nothing rewrites it on expiry or revoke — so
+  # counting it unconditionally meant a box whose 24-hour grant had lapsed could never ask again,
+  # and the old request cannot be answered twice (`gitgate::decide`). What the box can check is
+  # what the host keeps true on every refresh, in the box's own read-only state: a token file for
+  # the repository (`gitgate::token_file`), or the line saying why a still-live grant has none
+  # (`gitgate::token_reason_file`), which the refresher removes once the grant ends. Either means
+  # the grant is still wanted, and asking again is the same decision. Neither means it ended, and
+  # this files a fresh request. Only presence is asked; no token is read. With no token directory
+  # at all (`SKEIN_GIT_TOKENS` unset, an unscoped box) there is nothing to check against, and a
+  # granted ask still counts, as it always did.
+  local f state existing tokens="${SKEIN_GIT_TOKENS-}" ended=''
+  local token_name="${repo%%/*}%2F${repo#*/}"
   for f in "$dir"/*.json; do
     [ -f "$f" ] || continue
     state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
     case "$state" in pending | granted) ;; *) continue ;; esac
     existing="$(jq -r '.repo // ""' "$f" 2>/dev/null)" || continue
-    if [ "$existing" = "$repo" ]; then
-      printf 'skein: already asked to write %s — request %s is %s.\n' \
-        "$repo" "$(jq -r '.id // "?"' "$f")" "$state"
-      return 0
+    [ "$existing" = "$repo" ] || continue
+    if [ "$state" = granted ] && [ -n "$tokens" ] &&
+      [ ! -e "$tokens/$token_name" ] && [ ! -e "$tokens/why/$token_name" ]; then
+      ended="$(jq -r '.id // "?"' "$f")"
+      continue
     fi
+    printf 'skein: already asked to write %s — request %s is %s.\n' \
+      "$repo" "$(jq -r '.id // "?"' "$f")" "$state"
+    return 0
   done
+  if [ -n "$ended" ]; then
+    printf 'skein: request %s for %s was granted, but that grant has ended (expired or revoked) — asking again.\n' \
+      "$ended" "$repo"
+  fi
 
   local id tmp
   id="$(date -u +%Y%m%d-%H%M%S)-$$"
