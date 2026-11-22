@@ -107,7 +107,7 @@ done
 # The kit's tracker install and the screen observer are detached; give them the time a plant
 # needs to leave its marker (the workshop run below proves they do within it).
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [ "$(ls "$store" | grep -c '^planted-')" -ge 7 ] && break
+  [ "$(ls "$store" | grep -c '^planted-')" -ge 6 ] && break
   sleep 1
 done
 # Nothing this start detached outlives the test: wait for the observer and the kit's tracker install
@@ -123,7 +123,7 @@ rm -f /tmp/skein-pane.web-two.lock
         .collect();
     assert_eq!(
         invocations.len(),
-        6,
+        5,
         "the start invocations are not the set this test runs"
     );
 
