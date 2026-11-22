@@ -378,17 +378,6 @@ pub struct Config {
     /// all they ask for. `0` ⇒ `jobs::DEFAULT_OVERSUBSCRIBE`, 1.5.
     #[serde(default)]
     pub jobs_oversubscribe: f64,
-    /// Superseded by named `SyncConnection`s, which pair a gateway with the token that mints at it.
-    /// Read once by the migration and then cleared; kept so a pre-connections `config.json` still
-    /// parses. A credential was never here and never will be — this file is written 0644 and
-    /// round-trips through the browser on every settings save.
-    ///
-    /// (This paragraph spent a while sitting above `ai_enrichment`, describing a different and dead
-    /// setting, because nothing checks that a doc comment is above the thing it is about.
-    /// `prose-check.py` verifies that named symbols exist, not that they are named in the right
-    /// place.)
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sync_gateway_url: String,
 }
 
 /// The sandbox a fleet lives in unless told otherwise. One name, because a host with two fleets has
@@ -756,7 +745,6 @@ impl Default for Config {
             jobs_repo_cap: 0,
             jobs_max_cores_per_job: 0,
             jobs_oversubscribe: 0.0,
-            sync_gateway_url: String::new(),
         }
     }
 }
@@ -1201,5 +1189,45 @@ mod tests {
             !written.contains("ssh_key"),
             "Config carries ssh_key again, and nothing in the fleet can act on it: {written}"
         );
+    }
+
+    /// **A config.json or repos.json carrying a retired key still loads, keeps its other settings,
+    /// and drops the key at the next write** (SKEIN-1513).
+    ///
+    /// What would make this fail: `deny_unknown_fields` on `Config` or `Repo`, so the file reads
+    /// as unparseable and its settings as defaults.
+    #[test]
+    fn files_that_still_name_retired_keys_load_and_keep_their_other_settings() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        fs::write(
+            config_json(),
+            r#"{"confirm_destroy": false, "sync_gateway_url": "https://old.example", "base_branch": "develop"}"#,
+        )
+        .unwrap();
+        fs::write(
+            repos_json(),
+            r#"[{"id": "old", "source": "https://example.com/o.git", "store": "/s", "sync_connection": "kept", "sync_gateway_url": "https://old.example"}]"#,
+        )
+        .unwrap();
+
+        assert!(config_error().is_none(), "{:?}", config_error());
+        assert!(!load_config().confirm_destroy, "the config's settings were lost");
+        let repos = crate::repos::load_repos();
+        assert_eq!(repos.len(), 1, "the repo list was read as empty");
+        assert_eq!(repos[0].sync_connection, "kept");
+
+        save_config(&load_config()).unwrap();
+        crate::repos::save_repos(&repos).unwrap();
+        for file in [config_json(), repos_json()] {
+            let text = fs::read_to_string(&file).unwrap();
+            assert!(
+                !text.contains("sync_gateway_url") && !text.contains("develop"),
+                "a retired key was written back to {}: {text}",
+                file.display()
+            );
+        }
     }
 }

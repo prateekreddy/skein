@@ -117,12 +117,6 @@ instance), then choose one per repo. **Not tracked** is a first-class choice, no
 fail is worse than no button. Removing a connection is refused while a repo still selects it, by
 name, because silently untracking three repos is a bigger edit than the click asked for.
 
-A host set up before connections existed is migrated on first read: the old `~/.skein/plane-token`
-and gateway setting become a connection, each repo that had its own gateway URL becomes another, and
-every repo keeps pointing at the one it was already using. That includes copying the single PAT to
-each of them — which is exactly what skein was doing before, right or wrong — so a fleet that tracked
-work yesterday still does today. If one of those is a different Plane, its token is one field away.
-
 Give a repo its Plane project on its row in Settings → Repositories (paste the project URL; skein
 reads the uuid out of it), then open a box and press **◇ Track work**. The host mints that box its
 own token, writes it into the box over stdin at `~/.config/sync/env`, and registers the `sync` MCP

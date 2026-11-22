@@ -404,7 +404,6 @@ new file mode 100644
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: false,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
 
@@ -500,7 +499,6 @@ new file mode 100644
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: false,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
 

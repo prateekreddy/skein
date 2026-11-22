@@ -10,7 +10,7 @@
 
 use crate::config::*;
 use crate::place::located;
-use crate::repos::{load_repos, repo_for_box, save_repos, Repo};
+use crate::repos::{load_repos, repo_for_box, Repo};
 use crate::sbx::{box_liveness, Liveness};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -56,11 +56,6 @@ pub(crate) fn connections_json() -> PathBuf {
 /// a token is set.
 pub(crate) fn connection_token_path(id: &str) -> PathBuf {
     skein_home().join("tokens").join(id)
-}
-
-/// Where the single host-wide PAT lived before connections existed.
-pub(crate) fn legacy_token_path() -> PathBuf {
-    skein_home().join("plane-token")
 }
 
 /// An id is a filename under `tokens/`, so it is checked like one — no separators, no dots, no
@@ -115,16 +110,12 @@ pub fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
 
 /// Every configured connection, in the order they were added.
 ///
-/// **A file that will not parse does not fall through to the migration.** It used to: any read or
-/// parse failure landed on [`migrate_legacy_sync_config`], which *writes* — `save_connections`,
-/// `save_repos` and a `config.json` edit — so one unreadable byte in `connections.json` promoted
-/// the legacy single-gateway layout over the top of every connection that was in it, and pointed
-/// every repo at the result. The migration is for a fleet that has never had this file, which is
-/// `Ok(None)` below and nothing else (SKEIN-347).
+/// A file nobody has written yet is an empty list. One that will not parse is also empty here, but
+/// it is reported, and [`save_connections`] refuses to write over it (SKEIN-347).
 pub fn load_connections() -> Vec<SyncConnection> {
     match read_connections() {
         Ok(Some(list)) => list,
-        Ok(None) => migrate_legacy_sync_config(),
+        Ok(None) => Vec::new(),
         Err(why) => {
             // Once per process — this is on the path of every board render, and a line per call
             // buries the one line that matters. Same shape as `config::load_config`'s warning.
@@ -133,7 +124,7 @@ pub fn load_connections() -> Vec<SyncConnection> {
                 eprintln!(
                     "skein: cannot read your work-tracking connections ({why}) — every repo will \
                      read as untracked until that file parses, and skein will refuse to write over \
-                     it rather than migrate on top of it. Fix or move the file."
+                     it. Fix or move the file."
                 );
             });
             Vec::new()
@@ -260,108 +251,6 @@ pub(crate) fn unique_connection_id(base: &str, taken: &[SyncConnection]) -> Stri
         .unwrap_or_else(|| base.to_string())
 }
 
-/// One-time promotion of the old single-gateway/single-PAT layout to named connections.
-///
-/// Deliberately behaviour-preserving, *including the part that was wrong*: a repo pointed at its own
-/// gateway was until now wired up with the host-wide PAT, so its migrated connection starts with a
-/// copy of that same token. Starting it empty would be the more principled thing and would break a
-/// fleet that works today; the cockpit flags every connection so a wrong one is one field away.
-///
-/// Ordering is the crash-safety story. Tokens, then `connections.json`, then `repos.json`, and only
-/// then the legacy state — so an interrupted run leaves the old layout intact and simply migrates
-/// again next time.
-pub(crate) fn migrate_legacy_sync_config() -> Vec<SyncConnection> {
-    let cfg = load_config();
-    let legacy_url = cfg
-        .sync_gateway_url
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    let legacy_token = fs::read_to_string(legacy_token_path())
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let mut repos = load_repos();
-    let repo_urls: Vec<String> = repos
-        .iter()
-        .map(|r| r.sync_gateway_url.trim().trim_end_matches('/').to_string())
-        .filter(|u| !u.is_empty())
-        .collect();
-    // A fresh install has nothing to migrate, and writing it a file it never asked for would be the
-    // migration inventing state rather than moving it.
-    if legacy_url.is_empty() && legacy_token.is_none() && repo_urls.is_empty() {
-        return Vec::new();
-    }
-
-    let mut out: Vec<SyncConnection> = Vec::new();
-    let adopt = |out: &mut Vec<SyncConnection>, url: &str| -> String {
-        if let Some(existing) = out.iter().find(|c| c.gateway_url == url) {
-            return existing.id.clone();
-        }
-        let id = unique_connection_id(&connection_slug(url), out);
-        out.push(SyncConnection {
-            id: id.clone(),
-            label: connection_slug(url),
-            gateway_url: url.to_string(),
-        });
-        id
-    };
-    let default_id = if legacy_url.is_empty() {
-        // A stored token with no URL anywhere: keep the half that exists rather than dropping it,
-        // so the screen still says "a token is stored, it has nowhere to point".
-        legacy_token.is_some().then(|| {
-            out.push(SyncConnection {
-                id: "default".into(),
-                label: "default".into(),
-                gateway_url: String::new(),
-            });
-            "default".to_string()
-        })
-    } else {
-        Some(adopt(&mut out, &legacy_url))
-    };
-    for repo in repos.iter_mut() {
-        let own = repo
-            .sync_gateway_url
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
-        repo.sync_connection = if own.is_empty() {
-            default_id.clone().unwrap_or_default()
-        } else {
-            adopt(&mut out, &own)
-        };
-        repo.sync_gateway_url.clear();
-    }
-
-    if let Some(token) = &legacy_token {
-        for c in &out {
-            if let Err(e) = set_connection_token(&c.id, token) {
-                eprintln!("skein: migrating the Plane token to {}: {e}", c.id);
-                return Vec::new(); // leave the old layout alone; try again next call
-            }
-        }
-    }
-    if let Err(e) = save_connections(&out) {
-        eprintln!("skein: writing connections.json: {e}");
-        return Vec::new();
-    }
-    if let Err(e) = save_repos(&repos) {
-        eprintln!("skein: recording which connection each repo uses: {e}");
-    }
-    // Under the lock, and re-read there: this runs on a migration path that may be racing an
-    // ordinary settings save, and clearing one field by writing back a whole snapshot is how the
-    // other save is lost.
-    if let Err(e) = crate::config::update_config(|c| {
-        c.sync_gateway_url.clear();
-        Ok(())
-    }) {
-        eprintln!("skein: clearing the superseded gateway setting: {e}");
-    }
-    let _ = fs::remove_file(legacy_token_path());
-    out
-}
-
 /// Create or update a connection. `id: None` mints one from the URL's host.
 ///
 /// `token: None` leaves whatever is stored alone — a blank field on a settings screen means "I came
@@ -461,15 +350,10 @@ pub fn remove_connection(id: &str) -> Result<Option<String>, String> {
 pub fn connection_for_repo(repo: &Repo) -> Option<SyncConnection> {
     let list = load_connections();
     let chosen = repo.sync_connection.trim();
-    if !chosen.is_empty() {
-        return list.into_iter().find(|c| c.id == chosen);
+    if chosen.is_empty() {
+        return None;
     }
-    // Belt for a migration interrupted between `connections.json` and `repos.json`: the repo still
-    // carries the URL it used to, and that URL is now a connection.
-    let legacy = repo.sync_gateway_url.trim().trim_end_matches('/');
-    (!legacy.is_empty())
-        .then(|| list.into_iter().find(|c| c.gateway_url == legacy))
-        .flatten()
+    list.into_iter().find(|c| c.id == chosen)
 }
 
 /// The connection a box claims work through.
@@ -1306,6 +1190,7 @@ pub(crate) fn revocation_outcome(body: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::kit::ensure_store;
+    use crate::repos::save_repos;
     use crate::repos::set_repo_settings;
     use crate::sandbox::destroy_box;
     use crate::testutil::*;
@@ -1347,7 +1232,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: "team".into(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -1425,7 +1309,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: "shared".into(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -1498,7 +1381,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -1509,85 +1391,8 @@ mod tests {
         );
     }
 
-    // The upgrade path off the old layout, where the gateway was per-repo and the PAT was one file
-    // for the whole host. Silently dropping either half would leave a fleet that tracked work
-    // yesterday and quietly stopped today.
     #[test]
-    fn the_old_single_token_layout_becomes_named_connections() {
-        let _g = env_lock();
-        let dir = tempdir();
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", &dir);
-        env.set("SKEIN_LS_CMD", "false");
-        fs::create_dir_all(&*dir).unwrap();
-        save_config(&Config {
-            sync_gateway_url: "https://mcp.shared.example".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        fs::write(dir.join("plane-token"), "skein-test-plane-secret\n").unwrap();
-        let repo = |id: &str, gw: &str| Repo {
-            read_prs: false,
-            id: id.into(),
-            source: format!("/src/{id}"),
-            store: dir.join("store").to_string_lossy().into_owned(),
-            plane_project: String::new(),
-            sync_connection: String::new(),
-            review_queue: true,
-            sync_gateway_url: gw.into(),
-            ..Default::default()
-        };
-        save_repos(&[
-            repo("web", ""),
-            repo("bridge", "https://mcp.other.example/"),
-            repo("also", "https://mcp.other.example"),
-        ])
-        .unwrap();
-
-        let conns = load_connections();
-        assert_eq!(
-            conns.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            ["shared-example", "other-example"],
-            "one connection per distinct gateway, named after its host"
-        );
-        let by_repo = |id: &str| {
-            load_repos()
-                .into_iter()
-                .find(|r| r.id == id)
-                .unwrap()
-                .sync_connection
-        };
-        assert_eq!(by_repo("web"), "shared-example", "inherited the default");
-        assert_eq!(by_repo("bridge"), "other-example");
-        assert_eq!(
-            by_repo("also"),
-            "other-example",
-            "the same URL twice is one connection, not two"
-        );
-        // Behaviour-preserving, including the part that was wrong: a repo on its own gateway was
-        // being wired up with the host-wide PAT, so its connection starts with that same token.
-        for c in &conns {
-            assert_eq!(
-                connection_token(&c.id)
-                    .map(|t| t.expose().to_string())
-                    .as_deref(),
-                Some("skein-test-plane-secret")
-            );
-        }
-        // The legacy state is gone, so this runs exactly once.
-        assert!(!dir.join("plane-token").exists());
-        assert_eq!(load_config().sync_gateway_url, "");
-        assert_eq!(load_repos()[0].sync_gateway_url, "");
-        let again = load_connections();
-        assert_eq!(
-            again.len(),
-            2,
-            "second call reads the file, migrates nothing"
-        );
-    }
-
-    #[test]
-    fn a_fresh_host_is_left_alone_by_the_migration() {
+    fn a_fresh_host_gets_no_connections_file() {
         let _g = env_lock();
         let dir = tempdir();
         let mut env = crate::testutil::env_pins();
@@ -1595,7 +1400,7 @@ mod tests {
         assert!(load_connections().is_empty());
         assert!(
             !dir.join("connections.json").exists(),
-            "nothing to migrate ⇒ no file invented"
+            "reading no connections invents no file"
         );
     }
 
@@ -1623,7 +1428,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: "shared".into(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -2309,7 +2113,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: "c1".into(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
@@ -3138,37 +2941,24 @@ mod tests {
         assert!(revocation_outcome("").is_err());
     }
 
-    /// **A connections file skein cannot read is never written over, and never migrated on top of.**
+    /// **A connections file skein cannot read is never written over.**
     ///
-    /// Two failures in one file, both from the same conflation (SKEIN-347).
+    /// (SKEIN-347.)
     ///
     /// `upsert_connection` pushes one connection onto whatever the read handed it and writes the
     /// whole list back. Read through `update_json`, an unparseable `connections.json` answered
     /// `Vec::default()`, so adding one gateway deleted every other — and each deleted connection
     /// leaves its 0600 token behind on disk, pointing at a gateway nothing can name any more.
     ///
-    /// Worse, `load_connections` fell through to `migrate_legacy_sync_config` on *any* read
-    /// failure, and that function writes three files. So one unreadable byte here promoted the old
-    /// single-gateway layout over the top of the connections that were in it, and pointed every
-    /// repo at the result — without anybody asking for a migration.
-    ///
     /// The corruption is the crash artifact, not an invention: zero bytes is what a crash between
     /// `write_atomic`'s write and its rename leaves, and zero bytes are unparseable JSON.
     #[test]
-    fn connections_skein_cannot_read_are_neither_overwritten_nor_migrated_over() {
+    fn connections_skein_cannot_read_are_not_overwritten() {
         let _g = env_lock();
         let home = tempdir();
         let mut env = crate::testutil::env_pins();
         env.set("SKEIN_HOME", &home);
         std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
-
-        // A legacy layout sitting there ready to migrate, so the fall-through has something to do.
-        crate::config::update_config(|c| {
-            c.sync_gateway_url = "https://mcp.legacy.example".into();
-            Ok(())
-        })
-        .unwrap();
-        std::fs::write(legacy_token_path(), b"skein-test-plane-secret").unwrap();
 
         let path = connections_json();
         std::fs::write(&path, b"").unwrap();
@@ -3180,21 +2970,7 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"",
-            "reading an unreadable connections file ran the legacy migration over the top of it"
-        );
-        // The migration mints a per-connection token BEFORE it writes anything else — deliberately,
-        // so an interrupted run leaves the old layout intact — which makes a minted token the
-        // earliest evidence that it ran at all. Asserted on that rather than on the file, because
-        // `save_connections` refuses too and would otherwise cover for this.
-        assert_eq!(
-            connection_token("legacy-example").map(|t| t.expose().to_string()),
-            None,
-            "an unreadable connections file sent skein into the legacy migration"
-        );
-        assert_eq!(
-            load_config().sync_gateway_url,
-            "https://mcp.legacy.example",
-            "the migration ran and cleared the legacy setting, on a file it could not read"
+            "reading an unreadable connections file changed it"
         );
 
         let added = upsert_connection(None, "new", "https://mcp.new.example", None);
@@ -3217,33 +2993,6 @@ mod tests {
             "a whole-list save went over an unreadable connections file"
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"");
-    }
-
-    /// The other half: **a connections file nobody has written yet is still the migration's cue.**
-    ///
-    /// Beside the refusal because the refusal is one line away from disabling the migration
-    /// entirely — an absent file is exactly the state every fleet upgrading from the
-    /// single-gateway layout is in, and reading that as unreadable would strand all of them.
-    #[test]
-    fn a_connections_file_nobody_has_written_yet_still_migrates() {
-        let _g = env_lock();
-        let home = tempdir();
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", &home);
-        std::fs::create_dir_all(home.as_ref() as &std::path::Path).unwrap();
-        crate::config::update_config(|c| {
-            c.sync_gateway_url = "https://mcp.legacy.example".into();
-            Ok(())
-        })
-        .unwrap();
-        assert!(!connections_json().exists());
-
-        let migrated = load_connections();
-        assert_eq!(
-            migrated.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            ["legacy-example"],
-            "an absent connections file did not migrate the legacy gateway"
-        );
     }
 
     /// **A box name that is a path is refused where the path is built, not only where the request

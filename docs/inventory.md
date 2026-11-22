@@ -394,7 +394,7 @@ ignore alarms.
 
 ```
 api-token  boxes  fleet-home  gh-secret-seeded  github-pats  github-read-token
-kit  places  plane-token  repos  review  starts  tokens
+kit  places  repos  review  starts  tokens
 ```
 
 plus `config.json`, `repos.json`, `connections.json`, `git-grants.json`, `substrate.json`,

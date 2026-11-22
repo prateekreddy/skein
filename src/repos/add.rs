@@ -186,7 +186,6 @@ pub fn add_repo_with_token(
         // **Off**, as its serde default is: a new repo's boxes run without Claude Code's built-in
         // telemetry plugin until somebody turns it on for that repo (SKEIN-1225).
         anthropic_telemetry: false,
-        sync_gateway_url: String::new(),
     };
     // Before registering it: a repo whose boxes cannot clone is a repo that looks added and does
     // not work, and the failure would surface later as a box that never starts. This is the one

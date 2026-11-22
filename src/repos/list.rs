@@ -185,9 +185,7 @@ pub fn set_read_prs(id: &str, on: bool) -> Result<(), String> {
 /// The refusal is not the same guarantee as [`update_repos`]'s, and the difference is the reason
 /// nothing new should call this: the caller's *read* happened outside the lock, so a whole-list
 /// save still overwrites whatever another writer put down in between. `set_read_prs` was that
-/// shape and is not any more; the one production caller left is
-/// `tracking::migrate_legacy_sync_config`, which snapshots the list before it writes tokens and
-/// `connections.json` and saves it back after.
+/// shape and is not any more, and no production caller is left: this is for test fixtures.
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     crate::util::with_lock(&repos_lock(), || {
         read_repos_or_why().map_err(unreadable_refusal)?;
@@ -383,7 +381,6 @@ pub fn set_repo_settings(
         }
         if let Some(v) = sync_connection {
             repo.sync_connection = v.trim().to_string();
-            repo.sync_gateway_url.clear(); // the selection is now the whole answer
         }
         if let Some(v) = review_queue {
             repo.review_queue = v;
@@ -637,7 +634,6 @@ mod tests {
                                 plane_project: String::new(),
                                 sync_connection: String::new(),
                                 review_queue: true,
-                                sync_gateway_url: String::new(),
                                 ..Default::default()
                             });
                             Ok(())
@@ -798,7 +794,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -934,9 +929,8 @@ mod tests {
     ///
     /// `update_repos` is the locked path and the one `add_repo` takes; this is the unlocked shape
     /// beside it — read the list somewhere, change a field, `save_repos(&repos)`. `set_read_prs`
-    /// was written that way and has moved onto `update_repos`;
-    /// `tracking::migrate_legacy_sync_config` still has it. Fixing only the first would leave the
-    /// second able to write a default over a file it could not read, which is the whole class.
+    /// was written that way and has moved onto `update_repos`. A whole-list save must still not
+    /// write a default over a file it could not read.
     #[test]
     fn saving_a_whole_repo_list_refuses_over_one_skein_cannot_read() {
         let _g = env_lock();

@@ -1462,7 +1462,7 @@ other way and a still earlier one claimed the rest waited on the split; neither 
    already does for the fleet root (`grep -n 'tmpfs "\$fleet_root_dir"' src/box-session.sh`). Enumerating what to *hide* is the wrong direction and an earlier revision froze that
    list at three names while the root holds fifteen things that matter, among them `substrate.json`
    (replayed onto a **root** `apt-get`), `api-token`, `config.json`, `repos.json`, `github-pats`,
-   `tokens`, `plane-token`.
+   `tokens`.
 
    **A mount cover, not a file mode**: `0700` means nothing under one fleet-wide uid.
 

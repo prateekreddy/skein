@@ -167,8 +167,6 @@ HOME_DEBT = (
 PLACEMENT = {
     ("src/apiauth.rs", "api-token"): HOME_DEBT + " — the fleet's API token",
     ("src/tracking.rs", "tokens"): HOME_DEBT + " — sync connection tokens, `tokens/<id>`",
-    ("src/tracking.rs", "plane-token"): "the legacy single Plane token: read once to carry it into "
-    "`tokens/`, then removed — named in order to delete it",
     ("src/repos/fleetgit.rs", "github-read-token"): HOME_DEBT + " — the owner's read PAT",
     ("src/gitgate/credentials.rs", "github-read-token"): HOME_DEBT + " — the owner's read PAT",
     ("src/gitgate/credentials.rs", "github-pats"): HOME_DEBT + " — the owner's per-repo PATs",

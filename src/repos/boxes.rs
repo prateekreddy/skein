@@ -204,7 +204,6 @@ mod tests {
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 review_queue: true,
-                sync_gateway_url: String::new(),
                 ..Default::default()
             },
             Repo {
@@ -215,7 +214,6 @@ mod tests {
                 plane_project: String::new(),
                 sync_connection: String::new(),
                 review_queue: true,
-                sync_gateway_url: String::new(),
                 ..Default::default()
             },
         ];
@@ -342,7 +340,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }];
         save_repos(&repos).unwrap();

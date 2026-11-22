@@ -1219,7 +1219,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
         // box name is the slug `thing-feat-auth`; the REAL branch (with the slash) is feat/auth.
@@ -1267,7 +1266,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
         // The launcher carries the runtime choice; what that runtime then *does* on attach — the
@@ -1360,7 +1358,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -1416,7 +1413,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         };
         save_repos(std::slice::from_ref(&repo)).unwrap();
@@ -1676,7 +1672,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
