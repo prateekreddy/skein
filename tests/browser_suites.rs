@@ -76,11 +76,10 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 28] = [
+const NODE_SUITES: [&str; 25] = [
     "attach",
     // The away digest's wiring: it reads the server's journal and moves the server's mark.
     "away",
-    "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
     // because the condition — a frame landing after the pump stopped reading, at a client that has
     // not drained its own receive queue — is not something a page can be asked to do (SKEIN-746).
@@ -106,7 +105,6 @@ const NODE_SUITES: [&str; 28] = [
     "leakcheck",
     "loginban",
     "overlays",
-    "provenance",
     // The same hand-driven terminal socket as `closecode`, for the opposite half of the same loop:
     // a client that reads everything and writes more input than the child is consuming, proving the
     // pane keeps saying what its command says (SKEIN-750).
@@ -116,7 +114,6 @@ const NODE_SUITES: [&str; 28] = [
     "revbadge",
     "review_return",
     "screenhalf",
-    "stackread",
     "stacksteps",
     // `serverBinary()` refusing a `$SKEIN_SERVER_BIN` older than a page it embeds — a hole only the
     // by-hand loop had, since this suite's own `env!("CARGO_BIN_EXE_skein-server")` is always fresh

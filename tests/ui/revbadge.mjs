@@ -66,8 +66,6 @@ function board() {
     let revFlowsOn = null;
     ${pure("move")}
     ${grab("esc")}
-    ${grab("revTrainPaused")}
-    ${grab("renderTrainBanner")}
     ${grab("renderRevBadge")}
     ${grab("pollReviewCounts")}
     ${dismissing()}

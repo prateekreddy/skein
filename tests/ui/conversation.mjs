@@ -170,14 +170,12 @@ const PR = {
     w.keyOf(PR, { author: "a" }, 3), "acme#625:3");
 }
 
-// ── 3. one read control, and no second door to the draft (SKEIN-335) ───────────────────────────
+// ── 3. no second door to the draft (SKEIN-335) ───────────────────────────
 //
 // Read from the page's source rather than rendered, because what is being asserted is an ABSENCE
 // in one strip, and a render would prove only that this fixture did not happen to draw it.
 {
   const row = grab("revBody");
-  t.check("the row's own control strip offers one read",
-    (row.match(/revReadAgainPress/g) || []).length, 1);
   // The strip carries the verdicts a reader gives — those are the row's reason to exist — and a
   // way to the change itself. It does NOT carry a second door to a drafted review skein holds,
   // because skein no longer holds one: the review goes to GitHub, and GitHub is where it is read.
