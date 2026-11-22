@@ -1159,7 +1159,10 @@ fn cross_into_a_box_of_a_managed_store(tag: &str, linked: bool) -> CacheCrossing
         .set("SKEIN_FLEET_ROOT", root.join("boxes"))
         .set("CARGO_HOME", root.join("skein-test-server-cargo"))
         .set("npm_config_cache", root.join("skein-test-server-npm"))
-        .set("PIP_CACHE_DIR", root.join("skein-test-server-pip"));
+        .set("PIP_CACHE_DIR", root.join("skein-test-server-pip"))
+        // The sandbox's own prefix, which the launcher keeps. Inherited, a suite run inside a box
+        // hands this fixture that box's prefix, which is in that box's repo area (SKEIN-1533).
+        .set("NPM_CONFIG_PREFIX", root.join("sandbox-npm-prefix"));
     save_config(&Config {
         fleet_sandbox: FLEET.into(),
         ..Config::default()

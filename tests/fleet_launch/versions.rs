@@ -172,6 +172,45 @@ fn publish_toolchain(root: &Path, name: &str) {
     depot::publish(&out, &depot::kind_dir(&RUST_TOOLCHAIN), &staged).expect("published");
 }
 
+/// The rustup program on this machine's `PATH`, as a file that can be copied into a fixture.
+///
+/// Inside a box, `rustup` on `PATH` is the launcher's shim: a script that execs the fleet's rustup
+/// by absolute path. A copy of it behind a `rustc` link loses the name a proxy dispatches on, since
+/// a script's `$0` is its own path, so every proxy answered as `rustup` (SKEIN-1533). The program
+/// is the one the shim names in `skein_rustup=`, and a script that names none is refused rather
+/// than copied.
+fn rustup_program() -> Option<String> {
+    let found = Command::new("sh")
+        .args(["-c", "command -v rustup"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| p.starts_with('/'))?;
+    let is_program = |p: &str| {
+        fs::read(p)
+            .map(|b| b.starts_with(b"\x7fELF") || b.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]))
+            .unwrap_or(false)
+    };
+    if is_program(&found) {
+        return Some(found);
+    }
+    let named = Command::new("bash")
+        .args([
+            "-c",
+            "eval \"$(grep -m1 '^skein_rustup=' \"$1\")\"; printf %s \"${skein_rustup-}\"",
+            "bash",
+            &found,
+        ])
+        .output()
+        .expect("run bash to read the rustup shim");
+    let named = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(
+        is_program(&named),
+        "{found} is a script that names no rustup program ({named:?}), so a fixture cannot use it"
+    );
+    Some(named)
+}
+
 /// Start box `name` with `agent` as its agent, the npm prefix pointed at the fixture, and wait for
 /// the agent's `/tmp/<report>.report`. Returns what the launcher said, the anchor, and the report.
 fn start(
@@ -755,12 +794,7 @@ fn a_repos_rust_toolchain_file_selects_its_toolchain() {
              were NOT exercised",
         );
     }
-    let rustup = Command::new("sh")
-        .args(["-c", "command -v rustup"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| p.starts_with('/'));
+    let rustup = rustup_program();
     let Some(rustup) = rustup else {
         return skip("no rustup on this machine's PATH, so per-repo toolchains were NOT exercised");
     };
@@ -848,12 +882,7 @@ fn a_repos_pinned_toolchain_is_bound_without_a_fleet_default_and_a_missing_one_i
              toolchain without a default was NOT exercised",
         );
     }
-    let rustup = Command::new("sh")
-        .args(["-c", "command -v rustup"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| p.starts_with('/'));
+    let rustup = rustup_program();
     let Some(rustup) = rustup else {
         return skip(
             "no rustup on this machine's PATH, so a repo's pinned toolchain without a default \
@@ -1110,12 +1139,7 @@ fn a_repo_with_no_toolchain_file_builds_with_the_linked_fleet_toolchain() {
              default toolchain was NOT exercised",
         );
     }
-    let rustup = Command::new("sh")
-        .args(["-c", "command -v rustup"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| p.starts_with('/'));
+    let rustup = rustup_program();
     let Some(rustup) = rustup else {
         return skip(
             "no rustup on this machine's PATH, so the repo tools area's default toolchain was \
