@@ -494,7 +494,7 @@ depends_on = ["secret", "util"]
 # report's "shared-home directory missing" line has to ask the same rule the store is built by, or
 # it reports every managed store as broken the day the files move. Nothing in `kit` depends on
 # `health`.
-depends_on = ["ai", "board", "config", "fleet", "gitgate", "github", "kit", "place", "prq", "registry", "repos", "runtime", "sbx", "util", "warden_client"]
+depends_on = ["ai", "board", "config", "fleet", "gitgate", "github", "kit", "place", "prq", "registry", "repos", "resource_signal", "runtime", "sbx", "util", "warden_client"]
 
 [current.kit]
 # `repos` and `util` went with local-path repos. `kit` reached for `Repo` to read a checkout
