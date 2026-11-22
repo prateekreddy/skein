@@ -1,12 +1,12 @@
 // One input, one answer, at both doors of skein's clean (docs/decisions/skein-is-a-mod.md, "The
-// shape a feature takes"): the `skein_clean` MCP tool and the hooks module's `clean` tool.
+// shape a feature takes"): the `skein_clean` MCP tool and `skein-mcp clean` on the command line,
+// which `/skein clean PATH` runs.
 //
 // Each case is a list of paths and the answer skein gives for it: the result, and the sentence for
 // the agent after it. `tests/plugin_tools.rs` (`both_doors_of_clean_give_the_contracts_answer`)
 // plants the fixture its other clean tests plant, under a directory written here as `/fixture`,
-// and holds the MCP tool and `skein-mcp clean` on the command line to these answers. Then
-// `band.test.tsx` hands the command line's answer to the hooks module's tool and holds it to the
-// same. So a change at either door that the other does not share fails one of the two.
+// and holds the MCP tool and the command line to these answers. Then `band.test.tsx` hands the
+// command line's answer to `/skein clean PATH` and holds it to the same sentence.
 //
 // Read by the Rust test as JSON: everything after `CLEAN_CONTRACT = ` must stay JSON.
 

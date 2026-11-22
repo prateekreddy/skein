@@ -1,5 +1,5 @@
 // The skeleton's one feature: `/skein` says which box this session is in and which version of the
-// plugin it runs. Harmless, and observable from a test, from a box's pane and from `claude -p`, so
+// plugin it runs. Harmless, and observable from a test, from a box's terminal and from `claude -p`, so
 // the foundation has something to prove (SKEIN-1359).
 //
 // The shape every feature file follows: one exported `register(on)` that `register.tsx` calls, an
@@ -12,7 +12,7 @@ import type { EngineInterface, On, SessionStartInput } from 'claude-code'
 
 import type { SkeinIdentity } from '../types'
 
-import { openSkein, subcommand as bandSubcommand } from './band'
+import { subcommand as bandSubcommand } from './band'
 
 const identity = atom({ plugin: 'skein', key: 'identity' } as const, null, {
   shape: 'identity-1',
@@ -24,7 +24,7 @@ export async function onStart($: EngineInterface, _e: SessionStartInput): Promis
     name: 'skein',
     description: "Show this box's name and the skein plugin's version",
     // The subcommands are `band.tsx`'s: the hook below hands it anything after the name.
-    argumentHint: '[status | clean | requests]',
+    argumentHint: '[clean [path]]',
   })
   const box = (await $.env.get('SKEIN_BOX')) || null
   const version = await pluginVersion(() =>
@@ -39,8 +39,6 @@ export function register(on: On): void {
   on('command.run', { command: 'skein' }, async ($, e) => {
     if (e.args.trim() !== '') return bandSubcommand($, e.args)
     const found = await read($, identity)
-    // In a skein box `/skein` also opens the skein pane (SKEIN-1440); the answer stays the same.
-    if (await $.env.get('SKEIN_STATE')) await openSkein($, 'board')
 
     return { text: describe(found) }
   })
