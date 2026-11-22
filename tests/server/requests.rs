@@ -143,6 +143,14 @@ fn a_request_string_that_becomes_a_path_cannot_climb_out_of_skein_home() {
         home.to_path_buf().join("boxes/probe-a/inbox").exists(),
         "the ordinary send left no inbox"
     );
+    // SKEIN-1502: the route serves who skein can say a message is from, not only the `from` in it.
+    // Fails if `api_mailbox` goes back to `load_mailbox`.
+    let (st, listed) = http_get(&addr, "/api/mailbox");
+    assert_eq!(st, 200);
+    assert!(
+        listed.contains(r#""sender":"you""#),
+        "the mailbox route did not say who the message is from: {listed}"
+    );
     let (st, why) = http_post(
         &addr,
         "/api/mailbox",

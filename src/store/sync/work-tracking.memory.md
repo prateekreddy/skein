@@ -16,8 +16,10 @@ both believing you own it. Only `claim` is atomic.
 - `capture` **before** deciding whether to act. It deduplicates and is safe to call freely, so there
   is no threshold to clear — no description means no one can pick it up later, so write the body.
   Read the result: `deduped: true` means your text was dropped for an existing item, not added to it.
-- `claim` before non-trivial work; `heartbeat` at about a third of the lease TTL; end with
-  `complete` (evidence: PR link, commit, what you verified) or `release`. Silence is not an ending.
+- `claim` before non-trivial work; the sync plugin's monitor keeps the lease alive while your session
+  runs, so there is nothing to call for it (without the plugin nothing renews it: finish within the
+  lease); end with `complete` (evidence: PR link, commit, what you verified) or `release`. Silence is
+  not an ending.
 - After **any restart or compaction, call `held` first** — resuming what you hold beats claiming new
   work, and it is the one call whose absence you cannot notice.
 - On `STALE_EPOCH`, discard the work rather than submitting it: another agent has owned the item

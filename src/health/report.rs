@@ -452,6 +452,31 @@ pub struct HealthReport {
 
 /// Read-only environment diagnosis for detached server deployments. Unlike startup `eprintln!`,
 /// this remains inspectable from the cockpit and makes a missing box-side jq dependency explicit.
+/// The memory check when something was killed for it: the fleet's count since skein last looked,
+/// and which boxes it happened in (SKEIN-1504). Either can be there without the other, because
+/// the two are read on different ticks.
+fn memory_fault(divided: &str, killed: u64, restarts: u64, boxes: &str) -> HealthCheck {
+    let count = match killed {
+        0 => String::new(),
+        n => format!(
+            " The kernel has killed {n} process(es) for memory since skein last looked{}.",
+            match restarts {
+                0 => String::new(),
+                n => format!(", and the Docker daemon has been restarted {n} time(s)"),
+            }
+        ),
+    };
+    let named = match boxes.is_empty() {
+        true => String::new(),
+        false => format!(" {boxes}."),
+    };
+    HealthCheck::unsatisfied(
+        format!("{divided}.{count}{named}"),
+        "give the fleet more memory (Settings → Fleet), or stop a box you are not using — \
+         `skein ls` shows what is holding it",
+    )
+}
+
 pub fn health_report() -> HealthReport {
     report_with(crate::fleet::runtime_updates)
 }
@@ -492,6 +517,11 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
     // what did. The fleet had been throttling ninety thousand times an hour and the only place that
     // showed was a file nobody read.
     let squeeze = crate::fleet::pressure();
+    let lost_to_oom =
+        crate::resource_signal::oom_sentence(&crate::resource_signal::boxes_lost_to_oom(
+            Path::new(&crate::fleet::box_state_root()),
+            chrono::Utc::now(),
+        ));
     let mut memory = match crate::fleet::memory_plan() {
         Some(plan) => {
             let divided = format!(
@@ -504,19 +534,9 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
             match squeeze {
                 // Something was killed for memory. **A fault, not a note**: whatever it was did not
                 // finish, and the fix is a real one rather than advice to watch it.
-                p if p.killed > 0 => HealthCheck::unsatisfied(
-                    format!(
-                        "{divided}. The kernel has killed {} process(es) for memory since skein \
-                         last looked{}",
-                        p.killed,
-                        match p.docker_restarts {
-                            0 => String::new(),
-                            n => format!(", and the Docker daemon has been restarted {n} time(s)"),
-                        }
-                    ),
-                    "give the fleet more memory (Settings → Fleet), or stop a box you are not \
-                     using — `skein ls` shows what is holding it",
-                ),
+                p if p.killed > 0 || !lost_to_oom.is_empty() => {
+                    memory_fault(&divided, p.killed, p.docker_restarts, &lost_to_oom)
+                }
                 // Sustained throttling is not a kill and is not nothing: it is every box getting
                 // slower together, which is exactly what gets remembered as "skein felt slow" and
                 // never reported. Said, and not raised to a fault, because the fleet is working.
@@ -921,6 +941,20 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The memory fault names the box** (SKEIN-1504), with or without the fleet's count, since
+    /// the two are read on different ticks. What makes it fail: `memory_fault` dropping `boxes`.
+    #[test]
+    fn the_memory_fault_names_the_box_that_lost_a_process() {
+        let named =
+            "web-main lost 2 processes to the kernel's out-of-memory killer in the last hour";
+        for killed in [0, 2] {
+            let check = memory_fault("divided", killed, 0, named);
+            assert_eq!(check.level, Level::Unsatisfied);
+            assert!(check.detail.contains(named), "{}", check.detail);
+            assert_eq!(check.detail.contains("has killed 2"), killed == 2);
+        }
+    }
 
     /// One cause, one line — measured, because the alternative is nine.
     ///

@@ -117,6 +117,11 @@ pub fn add_repo_with_token(
             ))
         }
     };
+    // Before anything is written: the store and the mirror are both named by the id, so going on
+    // would fetch this repository into the other one's mirror (SKEIN-1505).
+    if let Some(why) = id_collision(&load_repos(), &id, source) {
+        return Err(why);
+    }
     // **A store the fleet would refuse to mount is refused here, before anything is written** —
     // the kit, the store, the mirror, `repos.json`. The mounter's rule is the one asked
     // (`fleet::volume_exposure`), not a copy of it: `add` used to check only that the path was
@@ -212,11 +217,57 @@ pub fn add_repo_with_token(
         ));
     }
     update_repos(|repos| {
-        repos.retain(|r| r.id != id); // replace any existing entry with the same id
+        // Again under the lock: another add may have taken the id during the clone.
+        if let Some(why) = id_collision(repos, &id, source) {
+            return Err(why);
+        }
+        repos.retain(|r| r.id != id); // replace the same repo's entry, re-added
         repos.push(repo.clone());
         repos.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(repo.clone())
     })
+}
+
+/// Why `add` must refuse this id, if it already names a **different** repository (SKEIN-1505).
+///
+/// The id defaults to the last path segment, so `owner-b/tools` after `owner-a/tools` asked for the
+/// same id, and the second replaced the first while its store, memory and boxes stayed.
+///
+/// Re-adding the same repository stays allowed, however its URL is spelled. So does replacing an
+/// entry registered from a path whose remote cannot be read: adding it again by URL is the way
+/// forward the repo card gives it (SKEIN-812).
+fn id_collision(repos: &[Repo], id: &str, source: &str) -> Option<String> {
+    let held = repos.iter().find(|r| r.id == id)?;
+    let theirs = repo_origin_url(held).filter(|url| registrable_source(url))?;
+    if same_remote(&theirs, source) {
+        return None;
+    }
+    let suggested = crate::gitgate::slug_from_url(source)
+        .map(|slug| slug.replace('/', "-"))
+        .filter(|name| valid_name(name) && !repos.iter().any(|r| r.id == *name))
+        .unwrap_or_else(|| "<id>".to_string());
+    Some(format!(
+        "the repo id {id:?} is already {theirs}, so adding {source} under it would replace that \
+         repo and leave its store, memory and boxes pointing at the wrong one. Nothing was \
+         changed.\n  Choose another id for this one: `skein add {source} --id {suggested}`"
+    ))
+}
+
+/// Do these two URLs reach the same repository? By `owner/name` on GitHub, which ignores case, and
+/// by host and path elsewhere, where a path's case is the host's to interpret.
+fn same_remote(a: &str, b: &str) -> bool {
+    use crate::gitgate::{same_repo, slug_from_url};
+    if let (Some(a), Some(b)) = (slug_from_url(a), slug_from_url(b)) {
+        return same_repo(&a, &b);
+    }
+    let place = |url: &str| {
+        let url = url.trim().trim_end_matches('/');
+        let url = url.strip_suffix(".git").unwrap_or(url);
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+        rest.replacen(':', "/", 1)
+    };
+    place(a) == place(b)
 }
 
 /// Why `add` must refuse this store, if the fleet would decline to mount it — worded for the person
@@ -302,6 +353,120 @@ mod tests {
     use crate::repos::testkit::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
     use crate::util::expand_tilde;
+
+    /// **A second repo with the same last segment is refused, and the first is untouched**
+    /// (SKEIN-1505).
+    ///
+    /// What makes it fail: removing the `id_collision` call before the store is made. The add then
+    /// goes on to scaffold `repos/tools` and fails at the clone instead. Planted and watched.
+    #[test]
+    fn a_second_repo_with_the_same_last_segment_is_refused_and_the_first_kept() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let first = Repo {
+            id: "tools".into(),
+            source: "https://127.0.0.1:1/owner-a/tools.git".into(),
+            store: home.join("kept-store").to_string_lossy().into_owned(),
+            ..Repo::default()
+        };
+        save_repos(std::slice::from_ref(&first)).unwrap();
+        let before = std::fs::read(home.join("repos.json")).unwrap();
+
+        let second = "https://127.0.0.1:1/owner-b/tools.git";
+        let why = add_repo(second, None, None).expect_err("the id belongs to another repo");
+        assert!(
+            why.contains(&first.source) && why.contains(second) && why.contains("--id <id>"),
+            "the refusal does not name both repos and a way to choose an id: {why}"
+        );
+        assert_eq!(
+            std::fs::read(home.join("repos.json")).unwrap(),
+            before,
+            "the registry changed"
+        );
+        assert!(
+            !home.join("repos/tools").exists(),
+            "the refused add wrote a store or a mirror under the first repo's id"
+        );
+    }
+
+    /// **Only a different repository collides.** Fails if `same_remote` compares the strings as
+    /// typed (the respelled rows), or if `id_collision` refuses an entry with no readable remote,
+    /// which would close the re-add a path-registered repo is told to do.
+    #[test]
+    fn the_same_repo_respelled_and_a_path_entry_can_be_added_again() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let held = |source: &str| {
+            vec![Repo {
+                id: "tools".into(),
+                source: source.into(),
+                ..Repo::default()
+            }]
+        };
+        for (was, now) in [
+            (
+                "https://github.com/acme/tools.git",
+                "https://github.com/acme/tools",
+            ),
+            (
+                "https://github.com/acme/tools.git",
+                "git@github.com:Acme/Tools.git",
+            ),
+            (
+                "git@gitlab.example:acme/tools.git",
+                "ssh://git@gitlab.example/acme/tools",
+            ),
+        ] {
+            assert_eq!(
+                id_collision(&held(was), "tools", now),
+                None,
+                "{was} / {now}"
+            );
+        }
+        assert_eq!(
+            id_collision(
+                &held("/Users/me/code/tools"),
+                "tools",
+                "https://github.com/acme/tools"
+            ),
+            None,
+            "a path entry could not be replaced by its URL"
+        );
+        for (was, now) in [
+            (
+                "https://github.com/a/tools.git",
+                "https://github.com/b/tools.git",
+            ),
+            (
+                "https://gitlab.example/a/tools",
+                "https://gitlab.example/A/tools",
+            ),
+        ] {
+            assert!(
+                id_collision(&held(was), "tools", now).is_some(),
+                "{was} / {now}"
+            );
+        }
+        let why = id_collision(
+            &held("https://github.com/a/tools.git"),
+            "tools",
+            "https://github.com/b/tools.git",
+        )
+        .unwrap();
+        assert!(why.contains("--id b-tools"), "no id to copy: {why}");
+        assert_eq!(
+            id_collision(
+                &held("https://github.com/a/x"),
+                "other",
+                "https://github.com/b/x"
+            ),
+            None
+        );
+    }
 
     /// **A repo is a remote, and a path is refused rather than resolved.**
     ///

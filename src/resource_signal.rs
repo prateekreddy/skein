@@ -46,6 +46,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// How long an `oom-kill` note stands after the last kill: long enough for the agent's next turn
+/// and for a person to open the cockpit, and short enough that the fault clears by itself.
+pub const OOM_NOTE_FOR: Duration = Duration::from_secs(60 * 60);
+
 /// How often skein looks. The design's 60 s: fast enough that a hold arrives within a minute or
 /// two of the crossing, and slow enough that the throttle rate is a rate rather than noise.
 pub const LOOK_EVERY: Duration = Duration::from_secs(60);
@@ -144,6 +148,10 @@ pub struct Cgroup {
     /// counting its children. The hierarchical `memory.events` would charge a box for a container's
     /// throttling (FLEET-9). `None` on a kernel without the file.
     pub throttled: Option<u64>,
+    /// `memory.events` `oom_kill`: processes the kernel killed for memory in this box. The
+    /// hierarchical file, because a job runs in a child of the box's cgroup and its kill is the
+    /// box's. A box's containers are under a separate parent and do not count here.
+    pub oom_kills: Option<u64>,
 }
 
 /// Read one box's cgroup directory. `None` when the box has no cgroup, which is a stopped box or
@@ -170,6 +178,7 @@ pub fn read_cgroup(dir: &Path) -> Option<Cgroup> {
         pids: number("pids.current").unwrap_or(0),
         pids_max: limit("pids.max"),
         throttled: field("memory.events.local", "high"),
+        oom_kills: field("memory.events", "oom_kill"),
     })
 }
 
@@ -307,6 +316,9 @@ pub struct Note {
     /// told of once however often a build starts and ends in it. Empty for every other kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// For an `oom-kill` note, the processes killed while it has stood. Zero for every other kind.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub count: u64,
 }
 
 /// A box's disk ask as its signal file says it. A contract like [`CleanList`]: fields are only
@@ -578,6 +590,9 @@ pub struct MemoryLevel {
     /// were actually read.
     #[serde(default)]
     pub read_at: Option<String>,
+    /// `memory.events` `oom_kill`, the counter an `oom-kill` note is worked out from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oom_kills: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -856,6 +871,85 @@ fn tidy_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note>
     }
 }
 
+/// Is this `oom-kill` note still inside [`OOM_NOTE_FOR`] at `at`?
+fn oom_note_stands(note: &Note, at: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(&note.since).is_ok_and(|since| {
+        (at - since.with_timezone(&Utc)).num_seconds() < OOM_NOTE_FOR.as_secs() as i64
+    })
+}
+
+/// The note that the kernel killed something in this box for memory (SKEIN-1504). A rise in
+/// `oom_kill` is a new crossing, so the agent is told each time; with no earlier figure there is
+/// no rise, so kills from before skein first read the counter are not reported as new.
+///
+/// `memory.events` counts kills and does not name the process, so neither does this.
+fn oom_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note> {
+    let standing = prev
+        .and_then(|p| p.notes.iter().find(|n| n.kind == "oom-kill"))
+        .filter(|n| oom_note_stands(n, r.at));
+    let then = prev.and_then(|p| p.memory.oom_kills);
+    let now = r.cgroup.as_ref().and_then(|c| c.oom_kills);
+    let grew = then.zip(now).map_or(0, |(then, now)| grew_by(then, now));
+    if grew == 0 {
+        return standing.cloned();
+    }
+    Some(Note {
+        kind: "oom-kill".into(),
+        since: out.at.clone(),
+        crossing_id: format!("oom-kill-{}", r.at.timestamp_millis()),
+        text: format!(
+            "skein: the kernel's out-of-memory killer ended {} in this box. Whatever it was did \
+             not finish: check your last build or test, and run less at once.",
+            processes(grew)
+        ),
+        count: grew + standing.map_or(0, |n| n.count),
+        ..Default::default()
+    })
+}
+
+fn processes(n: u64) -> String {
+    match n {
+        1 => "1 process".to_string(),
+        n => format!("{n} processes"),
+    }
+}
+
+/// Which boxes lost a process to the kernel's out-of-memory killer within [`OOM_NOTE_FOR`] of
+/// `at`, and how many, read from each box's signal file under the state root `root`.
+pub fn boxes_lost_to_oom(root: &Path, at: DateTime<Utc>) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut lost: Vec<(String, u64)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let signals = read(&entry.path())?;
+            let note = signals
+                .notes
+                .iter()
+                .find(|n| n.kind == "oom-kill" && oom_note_stands(n, at))?;
+            Some((name, note.count))
+        })
+        .collect();
+    lost.sort();
+    lost
+}
+
+/// [`boxes_lost_to_oom`] as the cockpit's memory check says it. Empty when no box lost anything.
+pub fn oom_sentence(lost: &[(String, u64)]) -> String {
+    match lost.is_empty() {
+        true => String::new(),
+        false => format!(
+            "{} to the kernel's out-of-memory killer in the last hour",
+            lost.iter()
+                .map(|(name, n)| format!("{name} lost {}", processes(*n)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// The note for what has come free (2026-11-13): while a disk ask stands, items that were in use
 /// on the last tick and can be removed now, coming to at least [`FREED_MIN_BYTES`], are told at
 /// the box's next turn. A new fact, so a new crossing, outside the ask's hourly cadence; the ask
@@ -896,6 +990,7 @@ fn freed_note(prev: Option<&Signals>, r: &Reading, out: &Signals) -> Option<Note
             crossing_id: format!("disk-freed-{}", r.at.timestamp_millis()),
             text,
             paths: told,
+            count: 0,
         });
     }
     before.map(|n| Note {
@@ -1055,6 +1150,7 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
                 throttled: c.throttled,
                 throttled_per_min,
                 read_at: Some(stamp(r.at)),
+                oom_kills: c.oom_kills,
             },
             // Carried rather than blanked: the next reading's rate is worked out from this one.
             None => prev.map(|p| p.memory.clone()).unwrap_or_default(),
@@ -1146,6 +1242,9 @@ pub fn next(prev: Option<&Signals>, r: &Reading) -> Signals {
         out.notes.push(note);
     }
     if let Some(note) = freed_note(prev, r, &out) {
+        out.notes.push(note);
+    }
+    if let Some(note) = oom_note(prev, r, &out) {
         out.notes.push(note);
     }
     match memory_band(cg, throttled_per_min, prev_rate) {
@@ -2189,6 +2288,7 @@ mod tests {
             pids: 300,
             pids_max: Some(8192),
             throttled: Some(0),
+            oom_kills: Some(0),
         }
     }
 
@@ -2807,6 +2907,62 @@ mod tests {
         assert_eq!(cg.high, Some(12 * GIB));
         assert_eq!((cg.anon, cg.pids, cg.pids_max), (2 * GIB, 300, Some(8192)));
         assert_eq!(read_cgroup(&d.join("absent")), None);
+    }
+
+    /// **A kill is reported against the box it happened in** (SKEIN-1504), read from a fixture
+    /// cgroup tree: the kill is in the box's hierarchical `memory.events`, as a job's would be.
+    ///
+    /// What makes it fail: reading `oom_kill` from `memory.events.local` (the kill is not there),
+    /// or `oom_note` treating a first reading as a rise (`api`'s old kills would be reported).
+    #[test]
+    fn a_kill_is_reported_against_its_own_box_and_old_kills_are_not() {
+        let root = crate::testutil::tempdir();
+        let cgroups = crate::testutil::tempdir();
+        let cgroup = |name: &str, kills: u64| {
+            let d = cgroups.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            for (file, body) in [
+                ("memory.current", "3221225472\n".to_string()),
+                (
+                    "memory.events",
+                    format!("high 0\noom 0\noom_kill {kills}\n"),
+                ),
+                (
+                    "memory.events.local",
+                    "high 0\noom 0\noom_kill 0\n".to_string(),
+                ),
+            ] {
+                std::fs::write(d.join(file), body).unwrap();
+            }
+            read_cgroup(&d)
+        };
+        let tick = |minute: i64, name: &str, kills: u64| {
+            let state = root.join(name);
+            std::fs::create_dir_all(&state).unwrap();
+            write_box(&state, &reading(minute, cgroup(name, kills))).unwrap();
+        };
+
+        tick(0, "web-main", 0);
+        tick(0, "api", 5);
+        assert_eq!(boxes_lost_to_oom(&root, at(0)), vec![]);
+
+        tick(1, "web-main", 2);
+        tick(1, "api", 5);
+        let lost = boxes_lost_to_oom(&root, at(1));
+        assert_eq!(lost, vec![("web-main".to_string(), 2)]);
+        assert!(oom_sentence(&lost).starts_with("web-main lost 2 processes"));
+        let told = read(&root.join("web-main")).unwrap();
+        assert!(told
+            .notes
+            .iter()
+            .any(|n| n.kind == "oom-kill" && n.text.contains("2 processes in this box")));
+
+        tick(62, "web-main", 2);
+        assert_eq!(
+            boxes_lost_to_oom(&root, at(62)),
+            vec![],
+            "the note never cleared"
+        );
     }
 
     /// This box's share is the one `announce::cover` computes for the fleet-disk note.
