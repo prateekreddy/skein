@@ -1037,7 +1037,7 @@ Not being on `PATH` is not the same as not being executed. Nothing of the sandbo
 read-write into a box now. Download caches belong to a repo instead: one tools area per repo on the
 fleet's disk, at `<fleet root>/.repo-tools/<repo id>` (SKEIN-1431; `store/cache` beside the store
 before it), bound into that repo's boxes only at `~/.repo-tools`, which is the
-owner's decision of 2026-10-29 that a repo is one trust domain and repos are walled from each other
+owner's decision of 2026-10-29 that a repo is one trust domain and repos are kept apart from each other
 (`docs/decisions/repos-are-the-trust-boundary.md`). Within a repo this path is still one a box can
 put code in for its siblings, by that decision. A crossing into a box takes the session's cache
 variables from the session itself, so it uses the same cache, or none when the box has none
