@@ -420,7 +420,7 @@ function loadMailbox() {
     if (!msgs.length) { list.innerHTML = `<div class="note">no messages yet — send a hand-off or broadcast below</div>`; return; }
     list.innerHTML = msgs.map(m => `
       <div class="msg">
-        <div class="mh"><span class="who">${esc(m.from||"?")}</span><span class="arrow">→</span>
+        <div class="mh"><span class="who">${esc(m.sender||"?")}</span><span class="arrow">→</span>
           <span class="to">${m.to==="broadcast"?"📢 all":esc(m.to)}</span>
           <span class="kind">${esc(m.kind||"note")}</span>
           <span class="mt">${esc(localStamp(m.ts))}</span></div>

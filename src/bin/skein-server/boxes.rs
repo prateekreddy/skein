@@ -475,8 +475,8 @@ pub(super) async fn api_session(Path(name): Path<String>) -> Response {
 }
 
 /// All cross-box messages, newest first.
-pub(super) async fn api_mailbox() -> Json<Vec<skein::mailbox::Message>> {
-    Json(skein::mailbox::load_mailbox())
+pub(super) async fn api_mailbox() -> Json<Vec<skein::mailbox::ShownMessage>> {
+    Json(skein::mailbox::load_shown_mailbox())
 }
 
 #[derive(Deserialize)]

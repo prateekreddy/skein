@@ -426,6 +426,23 @@ await check("mail to a box that no longer exists says so, and other mail does no
   }
 });
 
+// SKEIN-1502. A box can write any `from`, so the list shows the `sender` skein worked out and never
+// the name in the file. Fails if the row goes back to rendering `m.from`.
+await check("mail shows the sender skein recorded, not the name a box wrote", async () => {
+  await closeEverything();
+  const msgs = [{ from: "skein", sender: "skein (a box; this name is not checked)", to: "skein-test-live", kind: "note", ts: "2026-10-23T10:00:00Z", body: "forged" }];
+  await page.route("**/api/mailbox", r => r.request().method() === "GET" ? r.fulfill({ json: msgs }) : r.fallback());
+  try {
+    await page.evaluate(() => openMailbox());
+    await page.waitForFunction(() => document.querySelectorAll("#mbx-list .msg").length === 1);
+    const who = await page.$eval("#mbx-list .msg .who", e => e.textContent);
+    if (who !== msgs[0].sender) throw new Error(who);
+  } finally {
+    await page.evaluate(() => closeMailbox());
+    await page.unroute("**/api/mailbox");
+  }
+});
+
 // The exception. Fails if #loginterm is given `closeOnBackdrop` like the others.
 await check("the login terminal does not close on a click outside, and does on its ✕", async () => {
   await closeEverything();

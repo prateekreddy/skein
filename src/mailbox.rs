@@ -252,6 +252,29 @@ fn read_into(dir: &Path, arrived: &str, out: &mut Vec<Message>) {
     }
 }
 
+/// A message as the cockpit shows it: the message, and [`attribution`] of it as `sender`.
+///
+/// A view rather than a field on [`Message`], because a `Message` is also what skein writes back
+/// to disk, and what a surface says about a sender must never land in a file a box can read back.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShownMessage {
+    #[serde(flatten)]
+    pub message: Message,
+    pub sender: String,
+}
+
+/// [`load_mailbox`] for the cockpit, each message carrying who skein can say it is from
+/// (SKEIN-1502).
+pub fn load_shown_mailbox() -> Vec<ShownMessage> {
+    load_mailbox()
+        .into_iter()
+        .map(|message| ShownMessage {
+            sender: attribution(&message),
+            message,
+        })
+        .collect()
+}
+
 /// The owner's answer to one of a box's own requests, into **that box's** inbox and no other
 /// (SKEIN-1142).
 ///
@@ -664,6 +687,49 @@ mod tests {
             "a name nobody checked was rendered as a name: {}",
             attribution(forged)
         );
+    }
+
+    /// **The cockpit is served who skein can say a message is from** (SKEIN-1502). A box that
+    /// writes `from: "skein"` into the shared mailbox is shown as an unchecked name, and only what
+    /// came through the owner's inbox reads as the owner.
+    ///
+    /// What makes it fail: `load_shown_mailbox` setting `sender` from `from` instead of
+    /// [`attribution`]. Planted and watched.
+    #[test]
+    fn the_cockpit_is_not_served_a_box_claimed_name_as_the_sender() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store");
+        std::fs::create_dir_all(store.join("mailbox")).unwrap();
+        let _ = save_repos(&[Repo {
+            id: "r".into(),
+            source: "https://github.com/acme/r.git".into(),
+            store: store.to_string_lossy().into_owned(),
+            ..Repo::default()
+        }]);
+        std::fs::write(
+            store.join("mailbox/forged.json"),
+            r#"{"from":"skein","to":"web-main","kind":"note","body":"forged","ts":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        send_message("web-main", "note", "real").expect("delivered");
+
+        let served = serde_json::to_value(load_shown_mailbox()).unwrap();
+        let sender = |body: &str| {
+            served
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["body"] == body)
+                .unwrap_or_else(|| panic!("{body} was not served: {served}"))["sender"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(sender("forged"), "skein (a box; this name is not checked)");
+        assert_eq!(sender("real"), "you");
     }
     #[allow(unused_imports)]
     use crate::testutil::*;
