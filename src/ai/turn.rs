@@ -1,84 +1,24 @@
-//! Which machine a turn runs on and which conversation it belongs to, derived — never stored —
-//! with the hash that conversation's id is made from.
+//! Which session a model call is filed under, and the hash a test's session id is made from.
 
-use super::*;
 
-/// **Which machine a turn runs on**, and therefore where its conversation is filed.
+/// Which session a model call is filed under.
 ///
-/// A third fact beside [`Turn`]'s id and directory, and it travels for the same reason those two
-/// do: a conversation opened in one place can only be resumed in that place. Claude Code keys
-/// sessions on the working directory, and a box has its own — its own `$HOME`, its own
-/// `~/.claude/projects`, its own filesystem. So a round that opened in a review box and a round
-/// that resumes in the sandbox are not two rounds of one conversation; they are two cold reads,
-/// and the feature looks like it works while doing nothing at all. That failure has happened once
-/// already (SKEIN-376) with only the directory unpinned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Machine<'a> {
-    /// Wherever skein's model calls already go, which is **this process**: skein runs inside the
-    /// fleet sandbox, and that is where `skein login` put the credential (SKEIN-576). It used to be
-    /// a choice — a host shipped the call in through `sbx exec` — and the shipping went with the
-    /// host, so this is now the name for "no box was opened for this reading".
-    Wherever,
-    /// **This pull request's own review box** — `docs/pr-review.md` §11. Reached through its
-    /// placement record, standing in a checkout of the commit under review.
-    ///
-    /// A failure here is not a reason to give up on the reading: the caller falls back to
-    /// [`Machine::Wherever`], which is what every reading did before review boxes existed.
-    Box(&'a str),
-}
-
-/// Which conversation a model call belongs to.
-///
-/// **Every call skein made before this was [`Turn::Alone`]** — a fresh context, thrown away, paying
-/// to be told the diff again on every question about it. That is the right shape for a one-shot
-/// classification and the wrong one for a review, which is a conversation: the reader asks a second
-/// thing about the change the model just read, and there is no reason to buy the reading twice.
-///
-/// The CLI supplies both halves and skein CHOOSES the id, which is the part that matters — there is
-/// no id to discover, store or keep in sync, so a caller that can name its conversation can resume
-/// it. Verified against the real CLI (2026-08-26): `--session-id` on an id that already exists
-/// fails with an empty stdout and exit 1, so a collision arrives through [`Unread::Refused`] rather
-/// than as an error message parsed as an answer.
-///
-/// **A conversation carries the directory it is filed under, because it is not findable without
-/// it** (SKEIN-376). Claude Code stores sessions under `~/.claude/projects/<slugified-cwd>/`, so
-/// `--resume` only finds what a call in the SAME working directory created. Measured against the
-/// installed CLI (2026-08-26): a session opened in one directory and resumed from another answers
-/// `No conversation found with session ID: <id>` and exits 1, and the same resume from the
-/// directory that opened it answers from memory. The id and the directory are therefore one fact,
-/// and they travel together so that no caller can pin one and forget the other — unpinned, every
-/// resume misses, every round is a cold read, and the feature looks like it works while doing
-/// nothing at all.
+/// [`Turn::Alone`] is a fresh context, thrown away. [`Turn::Labelled`] is the same call with a
+/// session id skein chose, so the usage reader can say which of skein's questions it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Turn<'a> {
-    /// No conversation. The context dies with the call, and the directory does not matter.
+    /// No session of its own.
     Alone,
-    /// The first turn of one, under an id skein picked, in the directory it will be found in.
-    Opening { id: &'a str, at: &'a Path },
-    /// A later turn of one. The model still has what it was shown; do not send it again.
-    Resuming { id: &'a str, at: &'a Path },
-    /// No conversation, like [`Turn::Alone`], but under an id skein chose so the transcript it
-    /// leaves says which call site it was ([`labelled_session`], SKEIN-1074). The id is fresh for
-    /// every call, so there is nothing to find and the directory does not matter.
+    /// A fresh session under this id ([`labelled_session`]).
     Labelled { id: &'a str },
 }
 
 impl<'a> Turn<'a> {
-    /// The flags this turn adds to the command line, in order.
+    /// The CLI flags that put this call in its session.
     pub(crate) fn args(&self) -> Vec<&'a str> {
         match self {
             Turn::Alone => Vec::new(),
-            Turn::Opening { id, .. } | Turn::Labelled { id } => vec!["--session-id", id],
-            Turn::Resuming { id, .. } => vec!["--resume", id],
-        }
-    }
-
-    /// Where the call must run for this conversation to be found. `None` only for [`Turn::Alone`]
-    /// and [`Turn::Labelled`], which have nothing to find.
-    pub(crate) fn at(&self) -> Option<&'a Path> {
-        match self {
-            Turn::Alone | Turn::Labelled { .. } => None,
-            Turn::Opening { at, .. } | Turn::Resuming { at, .. } => Some(at),
+            Turn::Labelled { id } => vec!["--session-id", id],
         }
     }
 }
@@ -97,6 +37,7 @@ impl<'a> Turn<'a> {
 ///
 /// Version nibble 8 — RFC 9562's "custom" — because that is what this is: an id whose bits come
 /// from the name rather than from a random source, and saying so costs nothing.
+#[cfg(test)]
 pub(crate) fn conversation_for(repo_id: &str, number: u64) -> String {
     let d = sha256(format!("{repo_id}#{number}").as_bytes());
     let mut b = [0u8; 16];

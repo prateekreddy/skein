@@ -259,7 +259,7 @@ impl CallNoted {
     pub(crate) fn begin(turn: Turn<'_>) -> CallNoted {
         let session = match turn {
             Turn::Alone => None,
-            Turn::Labelled { id } | Turn::Opening { id, .. } | Turn::Resuming { id, .. } => {
+            Turn::Labelled { id } => {
                 Some(id)
             }
         };

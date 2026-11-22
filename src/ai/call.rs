@@ -158,14 +158,6 @@ pub(crate) fn tried(
     // what it was being sent before. `fleet::model_call_script` had already reached this shape from
     // the other side — it heredocs the prompt into `claude -p` with no positional argument — so
     // the two paths now agree about where a prompt goes.
-    // **Where the call runs, because that is where its conversation is filed** (SKEIN-376). Without
-    // this the spawn inherits the SERVER's directory, which is wherever somebody started it — so a
-    // second round asking to resume looks in a different `~/.claude/projects/<cwd>` than the first
-    // round wrote to, finds nothing, and reads the whole diff again. Nothing fails, which is the
-    // problem: the resume falls back to a cold read and the saving quietly never happens.
-    if let Some(at) = turn.at() {
-        command.current_dir(at);
-    }
     // **Which HOME the credential is read from**, because that is where this failed.
     //
     // `claude` finds its login at `$HOME/.claude/.credentials.json` and nowhere else — verified by
@@ -275,7 +267,7 @@ pub(crate) fn tried(
     let out = match out {
         Ok(out) => out,
         Err(why) => {
-            remember_refusal(&why, bin, turn);
+            remember_refusal(&why, bin);
             return Err(why);
         }
     };
@@ -304,7 +296,7 @@ pub(crate) fn tried(
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why, bin, turn);
+        remember_refusal(&why, bin);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -318,157 +310,14 @@ pub(crate) fn tried(
     }
 }
 
-/// Read a sandbox run the same way a local one is read, so a call means the same thing wherever it
-/// ran. The classification is the point of [`Unread`]; running somewhere else must not blur it.
-///
-/// **A `Ran`, and not a `Result<Ran, String>`** (SKEIN-619). This used to open by classifying a
-/// call that never reached the far side at all: `Unread::Slow` where it had spent its whole
-/// budget, `Unread::Unreachable` where it had failed fast. That arm had two producers and now has
-/// none. One was the call `fleet` shipped into the fleet sandbox, deleted with the host-driven
-/// deployment it belonged to (SKEIN-618 names it): skein runs inside that sandbox now, so there is
-/// no far side left to cross to. The other is [`crate::fleet::model_call_in_box`], whose `Err` the
-/// sole caller
-/// below handles itself — it says so on stderr and lets the reading run where readings ran before
-/// it — and that fall-through is deliberate rather than incidental: a review box that was never
-/// started, or was destroyed when its pull request closed, is ordinary rather than an error, so
-/// reporting the failure INSTEAD of falling through would turn an ordinary absence into a refusal.
-///
-/// Neither classification went with the arm, which is why this is a deletion rather than a loss. A
-/// crossing that ARRIVES and comes back non-zero without the [`crate::fleet::REACHED`] marker is
-/// still `Unread::Unreachable`, a few lines below; the local path still raises `Unread::Slow` off
-/// its own clock, in [`tried`]. Only the arm nothing could produce is gone — and with it the
-/// `timeout` and `started` this took for no other purpose than telling those two apart.
-fn from_sandbox(ran: crate::fleet::Ran, bin: &str, turn: Turn<'_>) -> Result<String, Unread> {
-    // **Did the script reach the sandbox at all?** `sbx exec` exits non-zero with its own message
-    // when the daemon is not responding, when the sandbox is not running, or when it does not
-    // exist — and the payload never runs. Read as an exit code alone that is indistinguishable
-    // from the CLI refusing, which is how a fleet whose sandbox was fine got told
-    // "`claude` exited 1: …" for a failure `claude` was never part of.
-    //
-    // The marker is printed by the script before it does anything else, so on a failure its ABSENCE
-    // is evidence that nothing in the sandbox ever ran. See [`crate::fleet::REACHED`].
-    let reached = ran.err.contains(crate::fleet::REACHED);
-    // And it is skein's own bookkeeping, not something to show a person.
-    let err = ran
-        .err
-        .lines()
-        .filter(|line| line.trim() != crate::fleet::REACHED)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
-    let said_all = format!("{} {}", String::from_utf8_lossy(&ran.out).trim(), err);
-    if ran.code != 0 && !reached {
-        let out = Unread::Unreachable {
-            sandbox: crate::fleet::fleet_sandbox(),
-            why: match said_all.trim().is_empty() {
-                true => format!("`sbx exec` exited {}, saying nothing", ran.code),
-                false => crate::util::clip(said_all.trim(), 240),
-            },
-        };
-        remember_refusal(&out, bin, turn);
-        return Err(out);
-    }
-    // The sandbox answered, and the shell in it could not find the CLI. `claude` never ran, so
-    // reporting its exit code would be reporting a number it did not produce — and the cure is in
-    // the sandbox, not on the server's PATH.
-    if ran.code == 127 && said_all.to_lowercase().contains("command not found") {
-        let out = Unread::AbsentInSandbox {
-            bin: bin.to_string(),
-            sandbox: crate::fleet::fleet_sandbox(),
-        };
-        remember_refusal(&out, bin, turn);
-        return Err(out);
-    }
-    if ran.code != 0 {
-        // Both streams, stdout first — `claude -p` puts its diagnosis there, and `Place::exec`
-        // would have thrown it away, which is why this path uses `Place::attempt`.
-        let why = Unread::Refused {
-            code: ran.code.to_string(),
-            said: [String::from_utf8_lossy(&ran.out).trim().to_string(), err]
-                .into_iter()
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>()
-                .join(" / "),
-        };
-        remember_refusal(&why, bin, turn);
-        return Err(why);
-    }
-    let said = String::from_utf8_lossy(&ran.out).trim().to_string();
-    match said.is_empty() {
-        true => Err(Unread::Silent),
-        false => {
-            forget_refusal();
-            Ok(said)
-        }
-    }
-}
-
 /// The same call, reporting why rather than only that. Used where the reason reaches a person.
 pub(crate) fn claude_oneshot_telling(
     prompt: &str,
     model: Option<&str>,
     timeout: Duration,
 ) -> Result<String, Unread> {
-    // No credential: this is the cheap summary ladder, and a call that only describes a change
-    // has nothing to do on GitHub. The token goes to the calls that ACT (`claude_in_conversation`).
-    // A one-shot has no conversation, so it has nowhere it must run: `Wherever` is not a fallback
-    // here, it is the whole truth.
-    // `Machine::Wherever` has no box to lose, so there is never anything on the answer beside the
-    // answer. See [`Answered`].
-    claude_in_turn(prompt, model, timeout, Turn::Alone, None, Machine::Wherever).map(|a| a.said)
-}
-
-/// One turn of THIS pull request's own conversation, resuming whatever earlier rounds left in it.
-///
-/// **The ladder asks the world rather than consulting a record** (SKEIN-376). Skein cannot see into
-/// the sandbox to find out whether the session is still there, and a note saying "I have read this
-/// before" would be a second source of truth that goes stale the moment a sandbox is recreated —
-/// which is a thing skein deliberately lets happen silently. So the call tries the resume and reads
-/// the answer.
-///
-/// Measured against the installed CLI (2026-08-26): `--resume` on an id it does not hold exits 1
-/// straight away with `No conversation found with session ID: <id>` and spends nothing. So the
-/// resume-first order costs one failed spawn on a pull request's first round and saves buying the
-/// whole diff again on every round after it.
-///
-/// **Only a refusal steps down.** A call that ran out of time was working, and retrying it twice
-/// more would spend three budgets on one reading. That includes a BOX that ran out of time
-/// ([`Unread::BoxSlow`], SKEIN-818): before it ended the call, the box's timeout fell through to a
-/// local spawn, whose `--resume` of a session that lives in the box answered with a refusal — and
-/// a refusal steps down, back into the box, for another full budget. Measured by
-/// `a_box_that_runs_out_of_time_is_asked_once_and_nothing_runs_here`. A missing binary or a refused login answers the
-/// same way whichever flag it is handed — and `ai`'s standing refusal makes the second and third
-/// attempts free — so stepping down there costs nothing and keeps the ladder one rule instead of a
-/// list of exceptions.
-///
-/// The LAST failure is the one returned. "No conversation found" is true and useless: it describes
-/// the attempt skein made on the reader's behalf, not the reason they have no reading.
-pub(crate) fn claude_in_conversation(
-    prompt: &str,
-    model: Option<&str>,
-    budget: Duration,
-    id: &str,
-    at: &Path,
-    github: Option<&crate::secret::Secret>,
-    machine: Machine<'_>,
-) -> Result<Answered, Unread> {
-    let ladder = [
-        Turn::Resuming { id, at },
-        Turn::Opening { id, at },
-        // A conversation could not be had at all. The reading still happens — losing the memory
-        // costs recall on the next round, and refusing to read costs the reader the review.
-        Turn::Alone,
-    ];
-    let mut last = Unread::Silent;
-    for turn in ladder {
-        match claude_in_turn(prompt, model, budget, turn, github, machine) {
-            Ok(said) => return Ok(said),
-            Err(Unread::Refused { code, said }) => last = Unread::Refused { code, said },
-            Err(other) => return Err(other),
-        }
-    }
-    Err(last)
+    // No credential: a call that only describes something has nothing to do on GitHub.
+    claude_in_turn(prompt, model, timeout, Turn::Alone, None)
 }
 
 /// The same call, in a named conversation.
@@ -484,8 +333,7 @@ pub(crate) fn claude_in_turn(
     timeout: Duration,
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
-    machine: Machine<'_>,
-) -> Result<Answered, Unread> {
+) -> Result<String, Unread> {
     // **The ceiling, in front of the fork below** (SKEIN-706). This is the door every model call
     // goes through — `claude_oneshot_telling`, `claude_in_conversation`'s ladder and
     // `review::checkout`'s two calls all arrive here, and the two destinations (a box, or the local
@@ -531,65 +379,7 @@ pub(crate) fn claude_in_turn(
     // — and `$SKEIN_CLAUDE_BIN` naming one means "run exactly this", which is also "run it here": a
     // path somebody named on this machine is not a path in the sandbox. `tried` is left meaning one
     // thing, "run it locally", which is what its callers in `model_reachable` and the tests want.
-    let named = env::var_os("SKEIN_CLAUDE_BIN").is_some_and(|v| !v.is_empty());
-    // **The downgrade, on its way to the reader** (SKEIN-799). Set only on the fall-through below,
-    // and carried out on the ANSWER rather than dropped there — because the call that follows it
-    // succeeds, so there is no [`Unread`] to put it in and nothing else would ever mention it.
-    // See [`Answered`] for why this is not a side channel.
-    let mut outside_box = None;
-    if !named {
-        // **A box is asked first and answered last**: it is the most specific destination, and it
-        // is the only one whose absence is ordinary. A review box that was never started, or was
-        // destroyed when its pull request closed, is not an error — it is a reading that happens
-        // the way every reading happened before §11. So a missing placement falls through to the
-        // two below rather than being reported, and a box that ANSWERS is the answer, whatever it
-        // said: `from_sandbox` already tells "the CLI refused" apart from "the script never ran".
-        // The credential crosses into `fleet` still a `Secret` (SKEIN-536). Its bytes are exposed
-        // in one place, `fleet::github_export`, at the moment they are written into the box.
-        if let Machine::Box(name) = machine {
-            match crate::fleet::model_call_in_box(
-                name,
-                &bin,
-                &model,
-                prompt,
-                timeout,
-                turn.args(),
-                github,
-            ) {
-                Ok(ran) => return from_sandbox(ran, &bin, turn).map(Answered::as_addressed),
-                // **A box that ran out of time ends the call here** (SKEIN-818). Every other `Err`
-                // below cost nothing — no record, a spawn that failed on the spot — and is right to
-                // fall through at once. This one has already spent the whole budget, and falling
-                // through handed the local spawn THE SAME budget again; the owner's decision is
-                // that spending it again is the reader's call, not skein's. Not remembered as a
-                // standing refusal: it is a fact about this box and this moment, not the setup.
-                Err(why) if box_ran_out_of_time(&why) => {
-                    eprintln!(
-                        "skein: {name} did not answer within its budget, so the call stops here \
-                         rather than spend it again outside the box — {why}"
-                    );
-                    return Err(Unread::BoxSlow(timeout));
-                }
-                Err(why) => {
-                    // Still said here, because the whole string belongs in a log: the PATH skein
-                    // had, the errno, the program's own name. What goes to the reader is the
-                    // sentence [`outside_box_because`] makes of it — see there for why those are
-                    // two different things.
-                    eprintln!(
-                        "skein: {name} could not take this turn, so it runs where readings ran \
-                         before — {why}"
-                    );
-                    outside_box = Some(outside_box_because(&why));
-                }
-            }
-        }
-        // A second destination used to sit here: a call shipped into the fleet sandbox, because
-        // that is where `skein login` put the credential and a host-driven skein was somewhere
-        // else. Skein is in that sandbox now (SKEIN-576), so
-        // running the call here IS running it where the login is, and the fall-through below is
-        // that destination rather than a fallback from it.
-    }
-    tried(&bin, &model, prompt, timeout, turn, github).map(|said| Answered { said, outside_box })
+    tried(&bin, &model, prompt, timeout, turn, github)
 }
 
 #[cfg(test)]
@@ -804,7 +594,6 @@ mod tests {
             Duration::from_secs(30),
             Turn::Alone,
             None,
-            Machine::Wherever,
         );
         assert_eq!(
             refused,
@@ -837,287 +626,12 @@ mod tests {
                 Duration::from_secs(30),
                 Turn::Alone,
                 None,
-                Machine::Wherever,
             )
-            .map(|a| a.said)
             .as_deref(),
             Ok("done"),
             "a prompt exactly at the ceiling was refused, so the limit is off by one — or has been \
              shrunk under what skein actually sends"
         );
-    }
-
-    /// **A call that has a box carries its prompt on stdin, and nowhere in the crossing's argv**
-    /// (SKEIN-799).
-    ///
-    /// This test was written for SKEIN-706 to pin the defect — it asserted the prompt was in
-    /// exactly one argv element, the last one — and it is that same test inverted. Both halves are
-    /// asserted together for `the_prompt_travels_on_stdin_and_is_nowhere_in_the_process_list`'s
-    /// reason: each alone is satisfiable in a way that loses the other, and this is the box arm of
-    /// the call that one covers locally.
-    ///
-    /// **The `/proc/<pid>/cmdline` half is measured on a real process, not on the recorded argv.**
-    /// The stand-in is spawned carrying the argv production built *as its own arguments*, so the
-    /// file any process on this machine can read holds the bytes skein would have put in `ps`.
-    /// That is SKEIN-706's own "done when", and it cannot be satisfied by a fixture that captured
-    /// nothing, because the call's flags are asserted to be in the same capture.
-    ///
-    /// **600,000 bytes, and the number is the point.** `MAX_ARG_STRLEN` caps a single argv element
-    /// at 32 pages: 131,072 on 4 KiB-page hardware and 524,288 on this box's 16 KiB pages. This
-    /// payload is past both, so with the prompt back inside the script the crossing cannot be
-    /// spawned at all — and [`claude_in_turn`] answers an unspawnable crossing by falling through
-    /// in silence, which is the whole of SKEIN-799.
-    ///
-    /// This is the test that did not exist, and its absence is why SKEIN-706 survived SKEIN-684.
-    /// Every review fixture pins `$SKEIN_CLAUDE_BIN`, which [`claude_in_turn`] reads as "run
-    /// exactly this, and therefore run it HERE" — so every one of them skips the box branch before
-    /// it is tried, and two of their comments went on claiming the prompt travels on stdin, which
-    /// is true of the path their own fixture pins and of nothing else.
-    ///
-    /// **How a test reaches that branch without being able to spawn a real agent.** Three things,
-    /// none of which touches [`agent_command`]'s guard:
-    ///
-    /// * `$SKEIN_CLAUDE_BIN` unset, so the branch is taken at all;
-    /// * [`crate::testutil::placed`], so the box has a placement record to be reached through —
-    ///   without one `model_call_in_box` returns `Err` before building anything;
-    /// * a [`crate::place::seam`] stand-in that **succeeds**, so `from_sandbox` reads an answer and
-    ///   `claude_in_turn` returns from the box path. It never falls through to [`tried`], so the
-    ///   local spawn — the only thing that could run the owner's real `claude` — is never reached.
-    ///   That fall-through is exactly what caught out
-    ///   `a_failure_names_the_program_that_failed`, which is why its failure arms assert on
-    ///   `model_call_in_box` directly; the arm that ANSWERS has no such hazard and can be driven
-    ///   the whole way.
-    ///
-    /// The seam is handed the argv production would have spawned, so where the prompt's bytes are
-    /// is a measurement rather than a reading of the source. `place::exec_argv` still ends
-    /// `argv.push(self.wrap(script))` — the change is that the script it wraps no longer contains
-    /// the prompt, and `Place::attempt` takes the prompt as a separate `feed` that becomes the
-    /// child's stdin.
-    #[cfg(unix)]
-    #[test]
-    fn a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_stdin() {
-        let _g = crate::testutil::env_lock();
-        forget_refusal();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", home);
-        env.set("SKEIN_FLEET_ROOT", home);
-        env::remove_var("SKEIN_CLAUDE_BIN"); // or the call never crosses at all
-        fs::write(
-            home.join("config.json"),
-            br#"{"fleet_sandbox":"skein-fleet"}"#,
-        )
-        .unwrap();
-        crate::testutil::placed("review-box");
-
-        // A marker long enough that it cannot be a coincidence, and shaped so a grep for it finds
-        // this test and nothing else.
-        let marker = "SKEIN-799-PROMPT-OFF-ARGV-MARKER";
-        let prompt = format!("{marker} ").repeat(19_000);
-        assert!(
-            prompt.len() > 524_288 && prompt.len() < PROMPT_CEILING,
-            "the payload has to be past MAX_ARG_STRLEN on a 16 KiB-page machine and under the \
-             ceiling, or this test passes with the prompt back inside the script: {} bytes",
-            prompt.len()
-        );
-
-        // Where the stand-in reports what it was actually handed. The argv the seam RECORDS is
-        // skein's own value; these two files are what a process on this machine could read off it.
-        let argv_at = home.join("argv-the-crossing-was-spawned-with");
-        let stdin_at = home.join("stdin-the-crossing-was-fed");
-
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
-        let recorder = std::sync::Arc::clone(&seen);
-        let (argv_to, stdin_to) = (argv_at.clone(), stdin_at.clone());
-        let _at = crate::place::seam::install(Box::new(move |argv: &[String]| {
-            recorder.lock().unwrap().push(argv.to_vec());
-            // **The argv production built becomes the stand-in's own arguments**, so `$$`'s
-            // cmdline below is the process list entry skein would have made. A stand-in that
-            // discarded them would prove nothing about `/proc/<pid>/cmdline`.
-            //
-            // Succeeds, reaching the far side: the marker on stderr is what `from_sandbox` reads
-            // to tell "the box answered" from "nothing in it ever ran".
-            let mut stand_in = vec![
-                "bash".to_string(),
-                "-c".into(),
-                format!(
-                    "printf '%s\\n' \"$@\" > {argv}\n\
-                     if [ -r \"/proc/$$/cmdline\" ]; then tr '\\0' '\\n' < \"/proc/$$/cmdline\" >> {argv}; fi\n\
-                     cat > {stdin}\n\
-                     printf '%s\\n' {reached} >&2\n\
-                     printf 'the box read it'\n",
-                    argv = argv_to.display(),
-                    stdin = stdin_to.display(),
-                    reached = crate::fleet::REACHED,
-                ),
-                "bash".into(),
-            ];
-            stand_in.extend(argv.iter().cloned());
-            Some(stand_in)
-        }));
-
-        let said = claude_in_turn(
-            &prompt,
-            Some("m"),
-            Duration::from_secs(30),
-            Turn::Alone,
-            None,
-            Machine::Box("review-box"),
-        );
-        assert_eq!(
-            said.map(|a| a.said).as_deref(),
-            Ok("the box read it"),
-            "a prompt past MAX_ARG_STRLEN never reached the box — which is the whole defect: the \
-             crossing cannot be spawned, and `claude_in_turn` falls through to the local reading \
-             without telling anybody"
-        );
-
-        // **Guarding against having captured nothing**, which is how a test like this passes for
-        // the wrong reason: an empty recording satisfies every `any(...)` below.
-        let seen = seen.lock().unwrap().clone();
-        assert_eq!(
-            seen.len(),
-            1,
-            "the crossing was not reached exactly once, so what follows is about nothing: {}",
-            seen.len()
-        );
-        let argv = &seen[0];
-
-        // The crossing really is the box's, and not some other fleet-scope command — and it really
-        // carries the model call, or "the prompt is not in it" would hold of an empty argv.
-        assert!(
-            argv.iter().any(|a| a.contains("review-box")),
-            "the argv reached is not this box's"
-        );
-        assert!(
-            argv.iter().any(|a| a.contains("-p --model")),
-            "the argv reached carries no model call, so the assertion below is about nothing"
-        );
-
-        // **The finding, inverted.** Not one element, not the last one, not anywhere.
-        assert!(
-            !argv.iter().any(|a| a.contains(marker)),
-            "the prompt is on the crossing's argv, so it is capped at MAX_ARG_STRLEN and readable \
-             in `ps` for the minutes the call runs — private repositories included"
-        );
-
-        // And the same thing asked of the kernel rather than of skein's own value.
-        let handed = fs::read_to_string(&argv_at).expect("the stand-in captured no argv at all");
-        assert!(
-            handed.contains("-p --model"),
-            "the capture holds no model call, so it would satisfy the next assertion however the \
-             prompt was sent"
-        );
-        assert!(
-            !handed.contains(marker),
-            "the prompt is in the spawned process's /proc/<pid>/cmdline"
-        );
-        assert_eq!(
-            fs::read_to_string(&stdin_at).expect("the stand-in was fed nothing at all"),
-            prompt,
-            "the box was not handed the prompt on stdin, or not all of it"
-        );
-
-        drop(_at);
-        crate::place::forget_place("review-box");
-        forget_refusal();
-    }
-
-    /// **The ceiling refuses a call with a box before the box is reached** — the half of
-    /// [`PROMPT_CEILING`] that did not exist (SKEIN-706).
-    ///
-    /// The check sat in [`tried`], which a call with a box reaches only after
-    /// `model_call_in_box` has been tried and has declined, so an over-ceiling prompt was handed to
-    /// the crossing first and the refusal fired — if it fired at all — on the way back from it.
-    /// This asserts the crossing is not reached AT ALL, which is what "nothing was spawned and no
-    /// model was asked" has to mean on a path whose spawn is somebody else's process.
-    ///
-    /// Its sibling `a_prompt_bigger_than_skein_will_send_is_refused_with_its_size_and_the_limit`
-    /// drives the local arm through the same door, and neither can pass while the check is in one
-    /// of the two arms.
-    #[cfg(unix)]
-    #[test]
-    fn the_ceiling_refuses_before_a_box_is_ever_reached() {
-        let _g = crate::testutil::env_lock();
-        forget_refusal();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", home);
-        env.set("SKEIN_FLEET_ROOT", home);
-        env::remove_var("SKEIN_CLAUDE_BIN");
-        fs::write(
-            home.join("config.json"),
-            br#"{"fleet_sandbox":"skein-fleet"}"#,
-        )
-        .unwrap();
-        crate::testutil::placed("review-box");
-
-        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = std::sync::Arc::clone(&reached);
-        // Succeeds if it is ever asked, so a ceiling that failed to refuse would come back `Ok`
-        // rather than erroring for some unrelated reason and looking like a refusal.
-        let _at = crate::place::seam::install(Box::new(move |_argv: &[String]| {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Some(vec![
-                "sh".to_string(),
-                "-c".into(),
-                format!(
-                    "printf '%s\\n' {} >&2; printf 'the box read it'",
-                    crate::fleet::REACHED
-                ),
-            ])
-        }));
-
-        let over = "x".repeat(PROMPT_CEILING + 1);
-        assert_eq!(
-            claude_in_turn(
-                &over,
-                Some("m"),
-                Duration::from_secs(10),
-                Turn::Alone,
-                None,
-                Machine::Box("review-box"),
-            ),
-            Err(Unread::TooLarge {
-                bytes: PROMPT_CEILING + 1,
-                limit: PROMPT_CEILING,
-            }),
-            "a prompt over the ceiling was sent to a box anyway, or refused as something else"
-        );
-        assert_eq!(
-            reached.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "the crossing was spawned with a prompt skein had already decided not to send"
-        );
-
-        // And a prompt under the ceiling still reaches the box, or the assertion above is bought by
-        // refusing everything.
-        forget_refusal();
-        assert_eq!(
-            claude_in_turn(
-                "read this change.",
-                Some("m"),
-                Duration::from_secs(10),
-                Turn::Alone,
-                None,
-                Machine::Box("review-box"),
-            )
-            .map(|a| a.said)
-            .as_deref(),
-            Ok("the box read it"),
-            "a prompt well under the ceiling never reached the box"
-        );
-        assert_eq!(
-            reached.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the crossing was not reached for a prompt that is nowhere near the ceiling"
-        );
-
-        drop(_at);
-        crate::place::forget_place("review-box");
-        forget_refusal();
     }
 
     /// **One check covers both destinations, derived from the source rather than asserted.**
@@ -1128,7 +642,7 @@ mod tests {
     /// only destination once. So this counts rather than paraphrases.
     ///
     /// It reads every file of this module, strips each one's test module, and requires that every
-    /// production call of [`tried`] and of [`crate::fleet::model_call_in_box`] is inside
+    /// production call of [`tried`] is inside
     /// `claude_in_turn`'s body — which is below the check. Add a third destination beside them,
     /// or call either one from somewhere new, and this fails instead of the ceiling quietly not
     /// applying to it.
@@ -1174,7 +688,7 @@ mod tests {
                 .find("prompt.len() > PROMPT_CEILING")
                 .expect("claude_in_turn does not check the ceiling at all");
 
-        for destination in ["tried(&bin", "fleet::model_call_in_box("] {
+        for destination in ["tried(&bin"] {
             let sites: Vec<usize> = production
                 .match_indices(destination)
                 .map(|(at, _)| at)
@@ -1196,114 +710,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// **The ladder and the pin, driven end to end through a real spawn** (SKEIN-376).
-    ///
-    /// The stub answers the way the installed CLI does — measured 2026-08-26: `--resume` on an id
-    /// it does not hold exits 1 saying `No conversation found with session ID: <id>`, while
-    /// `--session-id` opens one and answers. So a pull request read for the first time must climb
-    /// from resume to open by itself, without skein keeping a note of which rounds it has done.
-    ///
-    /// It also records the directory each attempt ran in, which is the half that would otherwise
-    /// ship broken in silence: a conversation is filed under the working directory, so a call that
-    /// does not pin one opens its session wherever the server was started and every later resume
-    /// looks somewhere else, finds nothing, and pays for the whole diff again. Nothing fails, so
-    /// only an assertion catches it.
-    #[test]
-    fn a_first_reading_opens_the_conversation_a_later_one_resumes_and_both_run_where_it_is_filed() {
-        use std::os::unix::fs::PermissionsExt;
-        let _g = crate::testutil::env_lock();
-        forget_refusal();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", home);
-        crate::testutil::switch_on(|c| c.ai_enrichment = true);
-        env.set("HOME", home);
-
-        let log = home.join("attempts");
-        let at = home.join("filed-here");
-        fs::create_dir_all(&at).unwrap();
-        let bin = home.join("claude");
-        // **The stub SCANS its arguments rather than counting them** — SKEIN-396's lesson, learned
-        // the expensive way: five fixtures pinned to `"$4"` all broke silently the day a flag was
-        // added before the prompt, and each reported a different innocent failure. `$PWD` rather
-        // than `pwd` because what is asserted is the directory the CHILD was started in.
-        fs::write(
-            &bin,
-            format!(
-                "#!/usr/bin/env bash\n\
-                 flag=none\n\
-                 for a in \"$@\"; do\n\
-                 \x20 case \"$a\" in --resume|--session-id) flag=$a;; esac\n\
-                 done\n\
-                 printf '%s %s\\n' \"$flag\" \"$PWD\" >> {log}\n\
-                 if [ \"$flag\" = --resume ]; then\n\
-                 \x20 echo 'No conversation found with session ID' >&2; exit 1\n\
-                 fi\n\
-                 printf 'the answer'\n",
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        env.set("SKEIN_CLAUDE_BIN", &bin);
-
-        let said = claude_in_conversation(
-            "read this",
-            None,
-            Duration::from_secs(30),
-            "the-id",
-            &at,
-            None,
-            Machine::Wherever,
-        );
-        assert_eq!(
-            said.map(|a| a.said).as_deref(),
-            Ok("the answer"),
-            "a pull request skein has never read got no reading at all — the resume it tries first \
-             was treated as the answer instead of as the question it is"
-        );
-
-        let tried = fs::read_to_string(&log).unwrap_or_default();
-        let steps: Vec<&str> = tried.lines().collect();
-        assert_eq!(
-            steps.len(),
-            2,
-            "the ladder did not climb: skein asked {} times, so a first reading either never tries \
-             to resume (and every round is a cold read) or never opens one (and there is nothing \
-             for the next round to resume). Attempts: {tried:?}",
-            steps.len()
-        );
-        assert!(
-            steps[0].starts_with("--resume ") && steps[1].starts_with("--session-id "),
-            "the order is wrong — skein must ASK whether the conversation is still there rather \
-             than assume, or a pull request read before pays for its whole diff again: {tried:?}"
-        );
-        let where_it_ran = at.canonicalize().unwrap();
-        for step in &steps {
-            let ran_in = std::path::PathBuf::from(step.split_once(' ').unwrap().1)
-                .canonicalize()
-                .unwrap();
-            assert_eq!(
-                ran_in, where_it_ran,
-                "the call ran in the wrong directory, so its conversation is filed where no later \
-                 round will look for it — every resume misses and the whole feature does nothing \
-                 while appearing to work: {tried:?}"
-            );
-        }
-
-        // **And the failed resume is not remembered as a standing refusal.** It is an ordinary
-        // answer to an ordinary question; remembering it would make one forgotten session refuse
-        // every model call skein makes until the memo aged out.
-        assert!(
-            standing_refusal().is_none(),
-            "a session the sandbox no longer has was recorded as skein being unable to read at \
-             all, so the next pull request is refused before it is tried"
-        );
-
-        forget_refusal();
     }
 
     /// A model call uses the login skein holds when the one it inherits will not do.
@@ -1626,99 +1032,4 @@ mod tests {
         forget_refusal();
     }
 
-    /// **A box that runs out of time is asked once, and nothing runs here after it** (SKEIN-818).
-    ///
-    /// The whole ladder is driven — [`claude_in_conversation`], not one [`claude_in_turn`] — because
-    /// the spend the item is about was the ladder's as much as the fall-through's. Every crossing
-    /// into the box and every local spawn appends one line to the same log, so the assertion is on
-    /// what actually ran, in order, and not on what a function returned.
-    ///
-    /// The local stand-in refuses a named conversation the way the real CLI does when the session
-    /// lives in the box and not here (`No conversation found`, exit 1) and answers a turn that names
-    /// none. That is the shape the design agent read out of the code: the box times out, the local
-    /// `--resume` refuses, a refusal steps down — back into the box. Seen when the fall-through was
-    /// put back (the sabotage recorded in the commit): the log read `box local box local box local`,
-    /// three full box budgets and three local spawns for one call, and the call SUCCEEDED from the
-    /// third local one, so nothing on the answer would have said any of it happened.
-    ///
-    /// **What makes it fail:** the `box_ran_out_of_time` arm in `claude_in_turn` removed (the log
-    /// gains `local`, and the box line repeats); or the ladder stepping down on `BoxSlow` (a second
-    /// `box`).
-    #[cfg(unix)]
-    #[test]
-    fn a_box_that_runs_out_of_time_is_asked_once_and_nothing_runs_here() {
-        use std::os::unix::fs::PermissionsExt;
-        let _g = crate::testutil::env_lock();
-        forget_refusal();
-        let home = crate::testutil::tempdir();
-        let home = home.as_ref() as &std::path::Path;
-        let mut env = crate::testutil::env_pins();
-        env.set("SKEIN_HOME", home);
-        env.set("SKEIN_FLEET_ROOT", home);
-        crate::testutil::switch_on(|c| c.ai_enrichment = true);
-        // Unset, so the box branch is reachable; the local binary is named through the seam.
-        env::remove_var("SKEIN_CLAUDE_BIN");
-        crate::testutil::placed("review-box");
-        let log = home.join("ran.log");
-
-        let stub = home.join("local-claude.sh");
-        fs::write(
-            &stub,
-            format!(
-                "#!/bin/sh\ncat >/dev/null\necho local >> '{log}'\n\
-                 case \" $* \" in *' --resume '*|*' --session-id '*) \
-                 echo 'No conversation found with session ID: x'; exit 1;; esac\n\
-                 printf 'the local reading'\n",
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        let _local = seam::stand_in(stub.to_string_lossy().into_owned());
-
-        // The box: it is entered, says so, and never answers inside the budget.
-        let entered = format!("echo box >> '{}'; exec sleep 5", log.display());
-        let _at = crate::place::seam::install(Box::new(move |_: &[String]| {
-            Some(vec!["sh".to_string(), "-c".into(), entered.clone()])
-        }));
-
-        let budget = Duration::from_millis(300);
-        let began = std::time::Instant::now();
-        let got = claude_in_conversation(
-            "hi",
-            None,
-            budget,
-            "3f1c9a52-0000-4000-8000-000000000818",
-            home,
-            None,
-            Machine::Box("review-box"),
-        );
-        let ran = fs::read_to_string(&log).unwrap_or_default();
-        let ran: Vec<&str> = ran.lines().collect();
-
-        assert_eq!(
-            ran,
-            ["box"],
-            "a box that ran out of time was followed by more spending — a local call, or a second \
-             trip into the box — where the owner decided the call stops: {ran:?}"
-        );
-        assert_eq!(
-            got,
-            Err(Unread::BoxSlow(budget)),
-            "the call did not end on the box's own timeout"
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(4),
-            "the box's budget was not enforced, so this is not the timeout arm at all"
-        );
-        assert!(
-            Unread::BoxSlow(Duration::from_secs(900))
-                .say()
-                .starts_with("its box did not answer within 15m, and skein stopped there"),
-            "the row's sentence is not the approved one"
-        );
-
-        crate::place::forget_place("review-box");
-        forget_refusal();
-    }
 }

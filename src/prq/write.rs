@@ -1765,7 +1765,6 @@ mod tests {
             slug: "acme/thing".into(),
             trunk: "main".into(),
             viewer: "me".into(),
-            ai: false,
             prs: vec![pr],
             blind_spots: Vec::new(),
             unreadable_set_aside: Vec::new(),

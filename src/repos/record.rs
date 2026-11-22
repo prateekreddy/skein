@@ -144,14 +144,6 @@ impl Default for Repo {
     }
 }
 
-pub(super) fn default_auto_review_on() -> Vec<String> {
-    vec!["requested".to_string()]
-}
-
-pub(super) fn default_auto_review_authors() -> String {
-    "mine".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

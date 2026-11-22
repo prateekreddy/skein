@@ -808,18 +808,6 @@ tokio::task_local! {
     static KNOCK: std::sync::Arc<skein::knock::Knock>;
 }
 
-/// Is a query flag on? Present, and spelled `1` or `true`.
-///
-/// One reading of the idiom rather than one per flag. There are five of them on the review routes
-/// now — `force`, `asked`, `rows`, `held`, `redraft` — and they all default the same safe way
-/// round: absent or misspelled means OFF, so a caller that fumbles a marker gets the cautious
-/// behaviour (the budgeted path, the full payload, the drafted review left where it is) rather
-/// than the permissive one. `redraft` is the sharpest case: fumbled, a reader's vetted review
-/// survives; honoured by accident, it is gone.
-fn flag(q: &HashMap<String, String>, key: &str) -> bool {
-    q.get(key).is_some_and(|v| v == "1" || v == "true")
-}
-
 #[cfg(test)]
 /// `SKEIN_HOME`, `SKEIN_GITHUB_API` and `GH_TOKEN` are PROCESS-wide, and `cargo` runs these
 /// tests as threads in one process. Two of them point skein at different GitHubs at the same
@@ -968,36 +956,6 @@ mod tests {
             .contains("no subcommands"));
     }
 
-    /// A marker nobody spelled is OFF, and that direction is the whole safety of these routes.
-    ///
-    /// `force`, `asked`, `rows` and `held` all pass through one reader, and every one of them is
-    /// written so that failing to send it costs a caller the permissive behaviour, never grants
-    /// it: no `asked` means the day's budget applies, no `held` means the request may compute, no
-    /// `rows` means the full payload. A reader that treated "present" as true would turn
-    /// `?asked=0` into an un-budgeted model call.
-    #[test]
-    fn a_review_marker_nobody_spelled_is_off() {
-        let q: std::collections::HashMap<String, String> = [
-            ("on", "1"),
-            ("alsoOn", "true"),
-            ("off", "0"),
-            ("alsoOff", "false"),
-            ("empty", ""),
-            ("shouty", "TRUE"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        assert!(flag(&q, "on") && flag(&q, "alsoOn"));
-        assert!(!flag(&q, "off") && !flag(&q, "alsoOff"));
-        assert!(!flag(&q, "missing"), "an absent marker read as ON");
-        assert!(!flag(&q, "empty"), "`?held=` read as ON");
-        assert!(
-            !flag(&q, "shouty"),
-            "a spelling the routes do not document read as ON, so the set of ways to un-gate a \
-             model call is larger than the set anybody wrote down"
-        );
-    }
 }
 
 /// Does the cockpit only ask for routes this server serves? (SKEIN-246)

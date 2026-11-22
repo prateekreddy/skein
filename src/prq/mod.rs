@@ -72,8 +72,6 @@ pub use write::{
 pub(crate) use types::newest_first;
 
 #[cfg(test)]
-pub(crate) use refresh::CachedQueues;
-#[cfg(test)]
 pub(crate) use store::remember_for_test;
 #[cfg(test)]
 pub(crate) use types::blank_pr;

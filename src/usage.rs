@@ -2121,16 +2121,12 @@ echo "$id"
                 "x",
                 Some("claude-sonnet-5"),
                 Duration::from_secs(30),
-                crate::ai::Turn::Opening {
-                    id: &conversation,
-                    at: dir,
-                },
+                crate::ai::Turn::Labelled { id: &conversation },
                 None,
-                crate::ai::Machine::Wherever,
             )
         })
         .expect("the stub answers");
-        assert_eq!(turned.said, conversation);
+        assert_eq!(turned, conversation);
 
         let r = refresh().expect("the fixture fleet reads");
         let site = |code: &str| r.own.sites.iter().find(|s| s.site == code).cloned();
