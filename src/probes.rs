@@ -1806,6 +1806,51 @@ mod tests {
         }
     }
 
+    /// **The rules a box is given name only tools the sync server lists** (SKEIN-1500). Both files
+    /// told agents to call `heartbeat`, which upstream's toolspec deliberately does not offer.
+    ///
+    /// What makes it fail: a backticked word in the block or the memory that is neither a tool in
+    /// `server/src/toolspec.ts` nor in `NOT_TOOLS`. Planted: `heartbeat` back in the block.
+    #[test]
+    fn the_shipped_rules_name_no_tool_the_sync_server_does_not_list() {
+        const NOT_TOOLS: &[&str] = &["sync"];
+        let spec =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("upstream/sync/server/src/toolspec.ts");
+        let Ok(spec) = fs::read_to_string(&spec) else {
+            crate::testutil::skip(
+                "no tool-name check: upstream/sync absent — run `git submodule update --init`",
+            );
+            return;
+        };
+        let tools: Vec<&str> = spec
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("name: '")?.split('\'').next())
+            .collect();
+        assert!(
+            tools.contains(&"claim") && tools.len() > 8,
+            "read {} tool names from upstream's toolspec, so this guard could not fail",
+            tools.len()
+        );
+        let mut read = 0;
+        for (file, text) in [
+            ("work-tracking.block.md", SYNC_BLOCK_MD),
+            ("work-tracking.memory.md", SYNC_MEMORY_MD),
+        ] {
+            for word in text.split('`').skip(1).step_by(2) {
+                if word.is_empty() || !word.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                    continue;
+                }
+                read += 1;
+                assert!(
+                    tools.contains(&word) || NOT_TOOLS.contains(&word),
+                    "src/store/sync/{file} names `{word}`, which the sync server does not list as \
+                     a tool"
+                );
+            }
+        }
+        assert!(read > 5, "read only {read} tool names out of the rules");
+    }
+
     /// The launcher exports `SKEIN_TMUX_SOCK`; the observer has to read it.
     ///
     /// It did not, and nothing said so: `pane_observer_start` set the variable, `box-pane.sh` used

@@ -13,7 +13,8 @@ list is scratch. Three rules:
    rather than working around it.
 3. **Finish explicitly.** End with `complete` — carrying the evidence, a PR link or commit and what
    you verified — or `release`. Going silent means the lease expires and someone redoes your work.
-   Call `heartbeat` on long tasks.
+   While your session runs, the sync plugin's monitor keeps the lease alive, so there is nothing to
+   call for it. Without the plugin nothing renews it: finish within the lease.
 
 After a restart, call `held` first to find out what you were in the middle of. Never take work by
 editing assignees or state in Plane directly — the gateway refuses it.
