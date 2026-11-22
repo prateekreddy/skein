@@ -129,9 +129,8 @@ pub struct Repo {
 ///
 /// Written through serde rather than derived, and that is the whole point. `Repo`'s defaults are
 /// not Rust's: `agent` is `default_agent()`, `review_queue` is TRUE because absent means a file
-/// written when every queue was on, and the reviewer's trigger set is `["requested"]`. A
-/// `#[derive(Default)]` would hand every fixture an empty agent, a switched-off queue and an empty
-/// trigger set — and an empty trigger set is a state [`auto_review_stands`] reports as OFF, so
+/// written when every queue was on, A
+/// `#[derive(Default)]` would hand every fixture an empty agent and a switched-off queue, so
 /// tests would inherit a repo that is quietly the opposite of the one they meant.
 ///
 /// Round-tripping the minimal entry means there is no second list of defaults to keep in step with

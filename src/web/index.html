@@ -5731,37 +5731,6 @@ function revStepNo(st, p) {
 // so a backslash continuation here is a truncated declaration in every suite that lifts it.
 const REV_UNROOTED_WHY = "the pull requests below this stack are not in your queue — merged, closed, or past the end of the search — so this is at least that deep, not exactly";
 
-// ── READING A WHOLE STACK (SKEIN-337) ─────────────────────────────────────────────────────────
-//
-// A stack is one change split across pull requests — the owner runs an 18-step one — and reading it
-// meant pressing the row's control eighteen times and waiting ~35 seconds after each. The per-step
-// control stays the default; this is a second, explicitly labelled one, which is what the owner
-// chose over replacing it: "read step 2" and "read all 18" are different sizes of decision and the
-// button should say which you are taking.
-
-// **Removed: the "no review — read again" affordance** (SKEIN-660; it was SKEIN-371's).
-//
-// What stood here was `revNoReviewCameBack` — true when skein held a reading of THIS commit, no
-// review of it, and a review HAD been bought here and had not come back — and with it go the three
-// surfaces it decided: the "noreview" answer `revWantsRead` used to give, the row control labelled
-// "no review — read again" carrying the reason in its tooltip, and the stack shortfall
-// "N read but with no review" in `revStackRunHtml`. `revStepNeedsReading` counted it too, so such a
-// step was re-read by "read all"; it no longer is.
-//
-// **It went because the wire has no field for it.** Its sole discriminator was `critique_because`,
-// and `Known` is a `Summary` and a `stale` flag (`src/review/summary.rs`) — neither names it, and
-// no server has sent it since the drafted review moved to GitHub (SKEIN-612). The branch could not
-// answer true on any real payload, so what was deleted was an affordance nothing could reach.
-//
-// **What that costs, decided with the cost in front of the owner.** A stack can no longer tell a
-// reviewed step from an unreviewed one. Read is read: nothing on a payload separates "a review came
-// back" from "a review was bought and failed" from "nobody ever asked for one". SKEIN-371 was a
-// real complaint — ten steps of a twenty-step stack counted as read with no review, and no retry
-// offered on any of them — and that failure mode did not stop existing; the page simply lost the
-// ability to say so. Saying it again is the SERVER's move first: a field on `Summary` recording
-// that a reading was bought and its review did not come back. Adding a client-side guess instead
-// would be this branch again, and it would be wrong the same way.
-
 function revStackRow(st) {
   const key = revStackKey(st);
   const open = revStackOpenKey === key;
@@ -5810,11 +5779,8 @@ function revStackSteps(st) {
     // step that starts a second branch says which step it left from, so a reader can see the tree in
     // a list without the list pretending to be a line.
     const from = st.branches.has(rk(p)) ? (st.depth.get(rk(p)) || 1) - 1 : 0;
-    // **The row's own cells, on a step** (SKEIN-352). `revGist` and `revRail` rather than anything
-    // written here: a step showing a summary in its own dialect is two renderings of one reading,
-    // and the second is the one that drifts. It is also what makes the stack read's "4 of 16 done"
-    // checkable — the four say what they found, the one in flight carries its counter, and the
-    // eleven left say `not read`.
+    // **The row's own cells, on a step** (SKEIN-352): `revRail` rather than anything written here,
+    // so a step and a row cannot drift apart.
     const mv = revStepMove(st, p);
     return `<div class="step${cls}${st.branches.has(rk(p)) ? " branch" : ""}${
       revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep(${esc(JSON.stringify(rk(p)))})">
@@ -9663,9 +9629,7 @@ function joinShareWarning(slug, chosen) {
 function saveRepoField(input) {
   const { id, key } = input.dataset;
   // Booleans on the wire. Sending the string "false" would deserialize-fail and the field would
-  // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
-  // than one name because the second such field arrived (`auto_review`) and a comparison that
-  // named one would have made the new one fail exactly that way, silently.
+  // report saved while nothing changed — the worst shape a settings bug can take.
   const BOOL_KEYS = ["review_queue"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;

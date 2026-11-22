@@ -996,8 +996,7 @@ pub(crate) fn send_json(
 /// silently under-reports, which is the one thing it must not do.
 ///
 /// **Nothing that goes out through here is ever sent a second time** (SKEIN-341). This is the half
-/// that carries skein's mutations: `update_branch` sends `updatePullRequestBranch` and
-/// `set_thread_resolved` sends `resolve`/`unresolveReviewThread`. A third non-test caller,
+/// that carries skein's mutations: `set_thread_resolved` sends `resolve`/`unresolveReviewThread`. A third non-test caller,
 /// `pr_body`, is a QUERY and goes through here anyway — forgoing the retry can cost it one
 /// avoidable failure and can never repeat an act, which is the only direction this wire may err
 /// in. All three, and nothing else: `grep -rn "github::graphql(" src/`. Every shape that would be

@@ -336,11 +336,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
             })
             .collect();
     }
-    // **Taken rather than looked up**, which every other write in this module already does
-    // (`add_label`, `merge_pr`, `update_branch`). It used to reach for the host token here, and nothing
-    // was wrong with the answer, but a credential a function reaches for is one no caller can see. The test for a verdict step
-    // had to set `GH_TOKEN` to make an assertion about a CEILING pass, which is the shape that says
-    // a coupling is hidden rather than absent.
+    // **Taken rather than looked up**: a credential a function reaches for is one no caller can see.
     //
     // The rule it enforced is unchanged and lives at the call site now: **a review is posted AS the
     // person**, so what arrives here is their own credential. There is deliberately no second,

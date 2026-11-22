@@ -397,8 +397,8 @@ pub fn remove_repo(id: &str) -> Result<Repo, String> {
 
 /// Turn this repo's boxes on or off the peer network.
 ///
-/// Its own function rather than a fifth argument to [`set_repo_settings`], for the reason
-/// [`set_read_prs`] is: this is the only setting here that changes a **mount**, and a route that
+/// Its own function rather than a fifth argument to [`set_repo_settings`], because
+/// this is the only setting here that changes a **mount**, and a route that
 /// could flip it as a side effect of saving an unrelated field would change what a repo's boxes can
 /// reach without anybody having asked.
 ///

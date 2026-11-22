@@ -84,11 +84,8 @@ pub(crate) fn claude_oneshot_with(
 /// is refused in a sentence rather than spent as a fifteen-minute model call.
 ///
 /// **Checked once, at the fork in [`claude_in_turn`], and not in either destination** (SKEIN-706).
-/// It was written inside [`tried`], which is the local spawn — one of the two places a call can
-/// run, and the one reached only after the box has been tried and has declined. So for every call
-/// that HAD a box the ceiling was never consulted: the refusal existed on the path that did not
-/// need it. The cure is not a second check in `fleet::model_call_in_box`; two checks of one rule
-/// are two places for it to stop agreeing, which is [`crate::util::fleet_root`]'s argument about
+/// Written inside one destination, it was never consulted for calls that took the other, and
+/// two checks of one rule are two places for it to stop agreeing, which is [`crate::util::fleet_root`]'s argument about
 /// its own default, made here about a limit. `claude_in_turn` is the single door — every caller in
 /// the crate arrives through it, and
 /// `the_ceiling_sits_in_front_of_both_destinations_and_not_inside_one` derives that from the source
@@ -114,13 +111,8 @@ pub(crate) fn tried(
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
 ) -> Result<String, Unread> {
-    // **The ceiling is NOT here, and it used to be** (SKEIN-706). It sat at the top of this
-    // function, which is one of the two destinations a model call has and not the door they share
-    // — so it covered the local spawn and never once ran for a call that had a box, because
-    // [`claude_in_turn`] tries [`crate::fleet::model_call_in_box`] *first* and only falls through
-    // to here. The path that needed it least was the only path that had it. It is at the fork now,
-    // in [`claude_in_turn`], in front of the choice rather than inside one arm of it; see
-    // [`PROMPT_CEILING`] for why one check and not two.
+    // **The ceiling is NOT here, and it used to be** (SKEIN-706). It is in
+    // [`claude_in_turn`], the door every call goes through; see [`PROMPT_CEILING`].
     //
     // Already told, and told something that asking again cannot change. Answering from memory is
     // the difference between one Keychain dialog and one per pull request.
@@ -151,10 +143,7 @@ pub(crate) fn tried(
     // sent. With a positional prompt alone the user message is that text; with stdin alone it is
     // the piped text, byte for byte the same message; with both it is `argv`, a newline, then
     // stdin. So dropping the positional argument and piping the same bytes sends the model exactly
-    // what it was being sent before. `fleet::model_call_script` had already reached this shape from
-    // the other side — it heredocs the prompt into `claude -p` with no positional argument — so
-    // the two paths now agree about where a prompt goes.
-    // **Which HOME the credential is read from**, because that is where this failed.
+    // what it was being sent before.     // **Which HOME the credential is read from**, because that is where this failed.
     //
     // `claude` finds its login at `$HOME/.claude/.credentials.json` and nowhere else — verified by
     // running it with HOME pointed at an empty directory, which reproduces the exact message a live
@@ -219,9 +208,7 @@ pub(crate) fn tried(
     //
     // On the environment here rather than in a file, because this spawn is a CHILD of skein — the
     // env is not visible in `ps` on any modern kernel, and there is no second machine for a file to
-    // be written on. The sandbox path has the opposite constraint and answers it the opposite way
-    // (`fleet::github_export`): there, a file with mode 600, because an argument or an exported
-    // shell line would sit in the sandbox's process list for the minutes the call runs.
+    // be written on.
     //
     // Both spellings, because tools disagree about which they read: `gh` prefers `GH_TOKEN`, the
     // GitHub Actions ecosystem writes `GITHUB_TOKEN`, and a session that reaches for the other one
@@ -330,12 +317,8 @@ pub(crate) fn claude_in_turn(
     turn: Turn<'_>,
     github: Option<&crate::secret::Secret>,
 ) -> Result<String, Unread> {
-    // **The ceiling, in front of the fork below** (SKEIN-706). This is the door every model call
-    // goes through — `claude_oneshot_telling`, `claude_in_conversation`'s ladder and
-    // `review::checkout`'s two calls all arrive here, and the two destinations (a box, or the local
-    // spawn in [`tried`]) are both chosen below this line. Checked here it is one check for both;
-    // checked in either arm it is a check for one of them, which is what it was, and the arm it was
-    // in was the arm that could not need it. See [`PROMPT_CEILING`].
+    // **The ceiling** (SKEIN-706). This is the door every model call goes through. See
+    // [`PROMPT_CEILING`].
     //
     // **Before the standing refusal in [`tried`], because this is a fact about THIS call.** A
     // cached refusal is a fact about the setup and answering from it is right for everything else;
@@ -553,8 +536,7 @@ mod tests {
     ///
     /// **Driven through [`claude_in_turn`] and no longer through [`tried`]** (SKEIN-706). `tried`
     /// is one of two destinations; the check moved to the door in front of both, so asserting it
-    /// where it used to live would assert it on the arm that never needed it. The sibling
-    /// `the_ceiling_refuses_before_a_box_is_ever_reached` drives the other arm.
+    /// where it used to live would assert it on one arm only.
     #[cfg(unix)]
     #[test]
     fn a_prompt_bigger_than_skein_will_send_is_refused_with_its_size_and_the_limit() {

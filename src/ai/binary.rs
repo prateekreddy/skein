@@ -127,11 +127,8 @@ pub mod seam {
 /// only "is the variable set" would refuse every one of them for it.
 ///
 /// **And the arm this catches is one that has already fired.** `a_failure_names_the_program_that_
-/// failed`'s own note records it: driving the unreachable-crossing case through [`claude_in_turn`]
-/// rather than through [`crate::fleet::model_call_in_box`] falls through to [`tried`], "and this
-/// one did, once, before that was noticed". The fall-through is still there in production, which is
-/// correct — a box that cannot be reached is not an error — so nothing but a check at the spawn can
-/// tell that reading apart from a real one.
+/// failed`'s own note records it: a call driven through [`claude_in_turn`] reaches [`tried`], "and this one did, once, before
+/// that was noticed", so nothing but a check at the spawn can tell that reading from a real one.
 pub(super) fn agent_command(bin: &str) -> Command {
     // **In front of the guard, not behind it.** A stand-in is this process saying which binary the
     // local spawn runs, which is exactly what the guard is asking for — so a call that has one has

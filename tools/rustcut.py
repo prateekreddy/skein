@@ -170,7 +170,7 @@ def blanked(text):
 
     Built on `skip_token` for the reason the gate that used to own a copy of this is a cautionary
     tale. That copy tracked quotes with a boolean flipped on every `"`, one line at a time, and so
-    could not see a raw string: at `src/bin/skein-server/review.rs:985` a fixture of the shape
+    could not see a raw string: at a raw string in the server a fixture of the shape
     `r#"…"…https://…"#` has an EVEN number of `"` before the `//`, the tracker believed it was
     outside a string, blanked to end of line, and took the closing `"#` and a `}}]` with it. The
     braces then unbalanced and `mod review_routes` (5123-5743) closed at 5465 — 278 lines of tests

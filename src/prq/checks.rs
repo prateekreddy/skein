@@ -41,10 +41,8 @@ fn verdict(c: &CheckContext) -> CheckVerdict {
 ///
 /// **Two sources, and the more cautious of them wins** (SKEIN-232). The contexts array is a page of
 /// a hundred; GitHub's own `state` is its verdict over all of them however many there are. Read
-/// from the page alone, a pull request whose 101st context is red reads "passing" — and
-/// `docs/pr-workflow.md`'s merge train acts on `checks:passing` by merging and deleting the branch,
-/// so that is not a wrong dot on a row, it is a merge performed on a guarantee that was never
-/// checked. So a red in either source is "failing", and where they disagree in the other direction
+/// from the page alone, a pull request whose 101st context is red reads "passing", and a
+/// person deciding to merge reads that row. So a red in either source is "failing", and where they disagree in the other direction
 /// — GitHub says green while a context this page holds has not finished — the answer is "pending".
 /// Both of those are the over-report direction this function already takes for a conclusion it does
 /// not recognise (see [`verdict`]): more of your attention, and never a merge on a check nobody read.

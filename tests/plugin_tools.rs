@@ -2355,7 +2355,7 @@ fn a_bad_disk_ask_is_refused_at_the_tool() {
 /// into the file, with nothing in the inbox, reads as waiting.
 ///
 /// What would make it fail: `requests` reading the disk ask's state from its file rather than
-/// from `answer_for` over the inbox.
+/// from the answer over the inbox.
 #[test]
 fn a_disk_ask_the_box_says_is_decided_still_waits() {
     let (b, state) = disk_box("skein-tools-it-diskforged");

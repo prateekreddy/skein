@@ -1,25 +1,7 @@
-// What survives a trip to a box and back to the review queue, and what gets asked again?
+// What the review queue draws from what it was handed: its lanes, stacks, search and failures.
 //
-// Two live reports, one root:
-//
-//   "it worked first time but when I clicked a box and went back to PRs the entire thing
-//    disappears" … "and it starts reading again"
-//   "for a bunch of PRs I am getting — not summarised — skein could not reach its own summary for
-//    this PR: no such repo"
-//
-// Both are the same mistake made twice: asking `view.repo` — the repo the VIEW happens to name —
-// for a question about the repo the pane's state BELONGS to. A box view names no repo, so
-//
-//   * `openReview` read a return from a box as a repo switch and threw away every summary read and
-//     every row expanded, then asked for all of them again; and
-//   * `revFetchSummary` built `/api/repos/undefined/review/N/summary`, whose honest 404 — "no such
-//     repo" — was then written into the row as if it were a reading of the pull request.
-//
-// The second was permanent: the pump skips any PR already in `revSums`, so a row that failed to be
-// fetched showed a transport error for ever and nothing ever asked again.
-//
-// The real `openReview`/`loadReview`/`renderReview`/`revFetchSummary` run here against a stubbed
-// fetch that answers the way the server does, including its 404.
+// The real `openReview`/`loadReview`/`renderReview` run here against a stubbed fetch that answers
+// the way the server does.
 //
 //   node tests/ui/review_return.mjs
 import { readFileSync } from "node:fs";
@@ -40,21 +22,11 @@ function board() {
   const body = `
     let view = { box: null, mode: "term", kind: "agent" };
     const repos = [{ id: "alpha" }, { id: "beta" }];
-    let revQueue = null, revOpen = new Set(), revSums = new Map(), revMods = null;
-    // A reading in flight is state of its own (SKEIN-333); the row's gist and its "updated" mark
-    // both consult it, so a world that lifts either needs one even when nothing here fills it.
-    let revInFlight = new Map();
-    let revUpdated = new Set();
+    let revQueue = null, revOpen = new Set(), revMods = null;
     let revSearch = "";
     let revFilter = "all", revLoading = false, revStaleTimer = null;
     let revRepoFilter = "";
-    // Read-ahead ON for both fixture repos: it is the pump's SCOPE (review::unasked_scope,
-    // SKEIN-242), so an empty map here would make every assertion about what the pane reads on its
-    // own vacuous.
-    const revFlows = new Map([["alpha", { read_prs: true }], ["beta", { read_prs: true }]]);   // read-ahead ON by default; readAhead() below moves it
     let revModsOpen = false, revCounts = [];
-    let revSumBusy = 0;
-    const REV_SUM_PARALLEL = 3;
     // Whose move a pull request is, from cockpit/src/move.mjs — the one place that rule lives
     // (SKEIN-302). The pane groups on it, the badge counts it and the row's mark paints it, so a
     // world that stubbed it would be proving a second copy of the rule rather than the rule.
@@ -99,9 +71,6 @@ function board() {
     ${grab("revSortWord")}
     ${grab("revSize")}
     ${grab("revAge")}
-    // What a stack's run says on its COLLAPSED row (SKEIN-370). Lifted with the row rather than
-    // stubbed: the row asking for it is exactly what was missing, and a stub would hide that.
-    let revStackRuns = new Map();
     ${grab("revStackRow")}
     // The stack's read control and progress (SKEIN-337) live above the steps. These suites are
     // about the step LIST, so the block is stubbed rather than lifted — conversation.mjs and
@@ -141,10 +110,6 @@ function board() {
     ${grab("revClearHtml")}
     // Which repos this page has heard the disk's answer for. The pump reads it and the bulk
     // refresh writes it, so a world holding both has to carry it too (SKEIN-704).
-    // A reading that COST a model call records how long it took, so a stack read can estimate
-    // (SKEIN-337, and SKEIN-352's correction: the server's own computed flag, not who asked).
-    let revReadMs = [];
-    // What the "updated" mark means — a reading REPLACED, not a reading arrived.
     // A read is STARTED by a request and ANSWERED on the page's live stream (SKEIN-366), so a world
     // that drives revFetchSummary carries both halves.
     // Where a landed reading came from (SKEIN-390). Lifted wherever revReadSettle or the bulk merge
@@ -199,10 +164,6 @@ function board() {
     const persistView = () => {};
     const toasts = [];
     const toast = m => toasts.push(m);
-    // Stubbed: this world sets revFlows directly, so the answer is already here. What matters is
-    // that switching read-ahead ASKS again, which the request log below shows.
-    let workflowReloads = 0;
-    const loadWorkflows = () => { workflowReloads++; };
     let revEdit = null;
     const revEditHtml = () => "";
     // Real, not stubbed (SKEIN-282): the control has to exist on the queue a person is actually
@@ -239,11 +200,6 @@ function board() {
       openRow: () => [...revOpen],
       search: q => revSearchSet(q),
       snoozeRed: () => revSnoozeRed(),
-      // The owner's per-repo consent as the workflows payload carries it (SKEIN-282).
-      readAhead: map => {
-        for (const [id, on] of Object.entries(map)) revFlows.set(id, { ...(revFlows.get(id) || {}), read_prs: on });
-        renderReviewNow();
-      },
       toasts: () => toasts.slice(),
       // A push landing on a row the pane already holds — what a queue refresh does to it, without
       // a refetch this world would have to fake anyway (SKEIN-254).
@@ -296,8 +252,6 @@ function board() {
   let outage = null;              // when set, the merged queue route answers with this failure
   let brokenRepos = [];           // repos whose queue the merged answer reports as failed
   let unaskedRepos = [];          // repos the merged answer says it deliberately did not ask about
-  let known = {};                 // readings already on disk, as the bulk route answers them
-  let drafted = [];               // numbers the merged model call drafted a review for, as it read
   const fetch = (url) => {
     asked.push(url);
     // The merged queue: every repo in one answer, the shape the pane opens on (SKEIN-146).
@@ -318,16 +272,7 @@ function board() {
         })),
       })));
     }
-    // Per-repo workflow state and stored critiques: nothing, immediately — these worlds are about
-    // queues and readings.
-    if (/\/workflows$/.test(url) || /\/critique$/.test(url)) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
-    }
     if (/\/snooze$/.test(url)) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
-    }
-    // Per-repo read-ahead consent (SKEIN-282). One POST per repo, whichever affordance pressed it.
-    if (/\/reading$/.test(url)) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
     }
     // The change itself, the shape /api/repos/:id/review/:n/diff serves (SKEIN-148).
@@ -358,60 +303,10 @@ function board() {
       }) });
     }
     const id = decodeURIComponent(url.match(/repos\/([^/]+)\//)[1]);
-    // The bulk read: what skein already holds. This fixture holds nothing — every scenario here is
-    // about what the pane ASKS for, so an empty answer keeps the pump as the only source and the
-    // assertions about it meaningful.
-    // `?rows=1` since SKEIN-287 — the row shape. Matched with the query, or the stub answers a
-    // call the page does not make and the pump becomes the only source.
-    if (/review\/summaries(\?|$)/.test(url)) {
-      return new Promise(resolve => pending.push(() => resolve({
-        ok: true,
-        // This route is read with `r.json()`, like the workflow one — the queue and the per-PR
-        // summaries are read with `r.text()`. Both shapes, or the stub answers a call the page does
-        // not make.
-        json: () => Promise.resolve(known),
-        text: () => Promise.resolve(JSON.stringify(known)),
-      })));
-    }
-    // **A read is started here and answered on the stream** (SKEIN-366): the request resolves at
-    // once and `deliver` plays the `EventSource` message that carries the reading.
-    const sum = url.match(/review\/(\d+)\/read/);
     return new Promise(resolve => pending.push(() => {
-      // Word for word what the server answers for a repo id it does not know.
-      if (sum && (refuse === id || id === "undefined")) {
-        return resolve({ ok: false, status: 404, text: () => Promise.resolve("no such repo") });
-      }
-      if (sum) {
-        const n = Number(sum[1]), head = id + sum[1];
-        resolve({ ok: true, text: () => Promise.resolve("{}") });
-        return deliver(id, n, {
-          number: n, head_sha: head, depth: "line", line: "x", computed: true,
-          // `review::known_at` — the summary flattened, with the review drafted at THIS head beside
-          // it. One model call produces both, so the route that answers one answers both
-          // (SKEIN-236); a fixture answering a bare summary would be testing a server that is gone.
-          // `has_critique` and `drafted` stood here and are gone (SKEIN-612). **No server sent
-          // either**: `Known` is a `Summary` and a `stale` flag and nothing else
-          // (`src/review/summary.rs`), and `Known::new`'s own doc records dropping them when the
-          // session began posting its reviews to GitHub. Nothing on the page read `drafted` at
-          // all, and the one line that read `has_critique` could only fall through. A stub
-          // inventing a payload is testing a server that does not exist, which is what these two
-          // were doing.
-          //
-          // `critique` stays, and is the honest half of the same question: what these sections
-          // assert is that a reading the page HOLDS survives a bulk answer that would overwrite
-          // it, and the draft is what makes one reading distinguishable from another here.
-          ...(drafted.includes(n)
-            ? { critique: { number: n, head_sha: head, overall: "one thing", comments: [] } }
-            : {}),
-        });
-      }
       resolve({ ok: true, text: () => Promise.resolve(JSON.stringify(queue(id))) });
     }));
   };
-  // The live stream, as this world plays it. A reading no longer comes back on the request that
-  // asked for one (SKEIN-366) — the request starts it and this hands the answer over, exactly as an
-  // `EventSource` message does.
-  let deliver = null;
   const revpane = { innerHTML: "", classList: { toggle() {} } };
   const document = { body: { classList: { remove() {}, toggle() {} } } };
   const localStorage = {
@@ -430,7 +325,6 @@ function board() {
     () => {},
     console,
   );
-  deliver = (repo, number, summary) => made.arrive({ repo_id: repo, number, summary });
   // One round of answers: what is outstanding right now, and not what those answers go on to ask
   // for. The pump refills itself, so the two are different moments and both matter here.
   const settle = async () => {
@@ -463,22 +357,11 @@ function board() {
     fire: () => { const due = waits.map(w => w.fn); waits.length = 0; due.forEach(f => f()); },
     // A pull request somebody has just pushed to.
     hot: ns => { hot = ns; },
-    // Readings skein already holds, which the pane must show without asking for any of them.
-    holds: map => { known = map; },
-    // Which pull requests the reading itself comes back with a drafted review for — the merged
-    // model call's other half, on the answer to the very request that triggered it.
-    drafts: ns => { drafted = ns; },
     // The branch moving under a reading that has already been made.
     moved: ns => { moved = ns; },
     // Somebody pushed: the queue learns the new head.
     push: (n, sha) => { pushed[n] = sha; made.moveHead(n, sha); },
-    // Summary requests only — the queue's own fetches are not what these counts are about.
-    reads: () => asked.filter(u => /review\/\d+\/read/.test(u)),
     posts: () => asked.filter(u => u.includes("/snooze")),
-    // NOT `reading` — the world already returns that name for the view, and the outer spread would
-    // shadow it into the request log (the same trap `brokenRows` is named around).
-    readingPosts: () => asked.filter(u => /\/reading$/.test(u))
-      .map(u => decodeURIComponent(u.match(/repos\/([^/]+)\//)[1])),
   };
 }
 

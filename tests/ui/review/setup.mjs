@@ -253,8 +253,8 @@ async function makeFixture() {
     // Approved, and GitHub has ASKED AGAIN. The re-request is what puts this row back in your
     // lane (SKEIN-354): `decided` reads GitHub's two answers — is your verdict standing, and is
     // skein still being asked — and the commit the review was left against is no longer one of
-    // them. Without the re-request this row is theirs, it leaves both the your-move lane and
-    // `worth_reading`'s, and every check below that drives it has nothing to drive.
+    // them. Without the re-request this row is theirs, it leaves the your-move lane, and every
+    // check below that drives it has nothing to drive.
     pr(3, "change the default timeout", "erin", {
       ...reviewed("APPROVED", "older"),
       reviewRequests: { totalCount: 1, nodes: [{ requestedReviewer: { login: "me" } }] },

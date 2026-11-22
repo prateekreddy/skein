@@ -226,7 +226,7 @@ fn detach_command(session: &str) -> String {
 /// [`detach_command`] against a script path the caller names, rather than one read from the
 /// environment as this runs.
 ///
-/// Split for the reason `box_ready_script_in` was: `fleet_root()` reads `$SKEIN_FLEET_ROOT`, unit
+/// Split because `fleet_root()` reads `$SKEIN_FLEET_ROOT`, unit
 /// tests run as threads of one process, and 711 of them call `set_var`. A test that built the
 /// command here and the expected path there read the variable TWICE, and a neighbour setting it in
 /// between made the two disagree — which is an order-dependent failure that says nothing about the

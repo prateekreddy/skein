@@ -389,8 +389,6 @@ def test_only_modules():
 
         src/lib.rs:72        #[cfg(test)] mod testutil;
         src/prq/mod.rs:44    #[cfg(test)] mod fixtures;
-        src/prwork/mod.rs:41 #[cfg(test)] mod testkit;
-        src/review/mod.rs:56 #[cfg(test)] mod testkit;
 
     `src/review/testkit.rs::drafting_fixture_for` sets `$SKEIN_HOME` at file scope with no
     attribute above it, so the span cut placed it in no test region and the structural walk did not

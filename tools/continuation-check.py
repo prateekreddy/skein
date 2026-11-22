@@ -26,7 +26,7 @@ this gate, because the mistake is invisible in a diff and reads as ordinary text
 HOW IT TELLS PROSE FROM ALIGNMENT, WHICH IS THE ONLY HARD PART. Deliberate runs of spaces are
 everywhere in this repository and must not be touched: `src/bin/skein.rs` aligns the description
 column of `skein help` and `skein doctor`, `src/signals.rs` holds captured terminal screens,
-`src/contracts.rs` and `src/owed.rs` hold diff fixtures, `src/workflow/` holds hand-aligned JSON.
+`src/contracts.rs` holds diff fixtures.
 The distinction is not the run of spaces — both populations have those. It is WHERE the run sits:
 
   * a collapsed continuation sits where a LINE WRAPPED, so there is a full line of prose in front
@@ -35,7 +35,7 @@ The distinction is not the run of spaces — both populations have those. It is 
     or more.
   * deliberate alignment sits after a LABEL, so there is almost nothing in front of it. The widest
     such lead in this tree is 15 characters (`src/fleet/containers.rs:149`, a python fixture's `config = {}`),
-    and the wordiest such line holds 8 (`src/workflow/file.rs:213`, a JSON row).
+    and the wordiest such line holds 8 (a hand-aligned JSON row).
 
 So the rule is three measurements with an order of magnitude between the two populations, not a
 guess about punctuation, and `--show` prints the margin so a threshold can be re-derived rather
@@ -343,7 +343,7 @@ NEAR_MISSES = {
     ),
     fixture_line("let _words ="): (
         "MIN_LINE_WORDS", 5,
-        "src/workflow/file.rs:213, a hand-aligned JSON row: 17 spaces, 43 characters of lead, "
+        "a hand-aligned JSON row: 17 spaces, 43 characters of lead, "
         "8 words",
     ),
 }

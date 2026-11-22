@@ -171,9 +171,7 @@ pub struct Pr {
     ///
     /// Carried because `head_ref` is only a NAME, and a name means nothing without the repository
     /// it is in. A fork's `develop` and the base repository's own `develop` are two branches that
-    /// share a string, and `prwork::acts::delete_merged_branch` deletes by name in the base
-    /// repository — so a merge train that deleted "the head branch" of a fork's pull request
-    /// deleted the base repository's branch of that name instead.
+    /// share a string.
     ///
     /// `None` is "nobody said": a queue remembered by an older skein, or an answer that did not
     /// carry the field. **It is not `Some(false)`**, and the delete reads it as the reason to leave
@@ -212,7 +210,7 @@ pub struct Pr {
     /// carries no labels — the exact claim a truncated list was making silently.
     ///
     /// Nothing reads this raw. [`Pr::labels_whole`] is the one rule, so the sentence the queue says
-    /// out loud and the fact the merge train acts on cannot disagree about what "short" means.
+    /// out loud and any reader of the field cannot disagree about what "short" means.
     #[serde(default)]
     pub labels_total: Option<u64>,
     /// GitHub's verdict on the pull request as a whole: `APPROVED`, `CHANGES_REQUESTED`,
@@ -229,9 +227,8 @@ pub struct Pr {
     /// The gap this closes: [`Pr::review_decision`] is the REPOSITORY's verdict and is empty
     /// wherever review is social, and [`Pr::my_review`] is the viewer's own. Between them they
     /// cannot see a third party's approval on a repository that requires no review, so
-    /// `prwork::facts_of` built `Facts::approved` from a pair of fields that were both silent and
-    /// the merge train sat on approved work. Under-reporting is the safe direction — it holds a
-    /// pull request rather than shipping one — but on a repo where you are the author and somebody
+    /// an approved pull request could read as unapproved. Under-reporting is the safe direction,
+    /// but on a repo where you are the author and somebody
     /// else reviews, it is the ordinary case, which makes it a gap rather than a design.
     ///
     /// **Counted from `latestOpinionatedReviews`**, the same connection [`my_review_state`] reads
@@ -242,17 +239,14 @@ pub struct Pr {
     ///
     /// **"Standing" here is the review's commit against the head**, derived exactly as
     /// [`Pr::review_is_current`] is — so the invariant `my_review == "approved" &&
-    /// review_is_current` ⟹ this is at least 1 holds by construction, and
-    /// `prwork::tests::an_approval_is_still_an_approval_where_the_repository_asks_for_none`'s
-    /// stale-approval half keeps its answer for everybody rather than only for you.
+    /// review_is_current` ⟹ this is at least 1 holds by construction.
     ///
-    /// `None` is "nobody counted": a queue remembered by an older skein. `prwork::facts_of` falls
-    /// back to [`Pr::my_review`] there, which is what that queue already knew — `Some(0)` would be
+    /// `None` is "nobody counted": a queue remembered by an older skein. `Some(0)` would be
     /// the claim that skein looked and found none.
     ///
     /// **A floor where [`Pr::reviews_whole`] is false**, and only ever a floor: the connection is
     /// capped, so an approval past the cap is not counted (SKEIN-386). The error is in the holding
-    /// direction — a merge train sits on a pull request rather than shipping one — and the queue
+    /// direction, and the queue
     /// says the hole out loud rather than this field claiming a number it cannot stand behind.
     #[serde(default)]
     pub standing_approvals: Option<u64>,
@@ -282,16 +276,14 @@ pub struct Pr {
     /// Can GitHub merge it as it stands? `None` where GitHub has not worked it out yet, which it
     /// reports as `UNKNOWN` for a while after every push.
     ///
-    /// **`Option`, not `bool`.** Unknown is not "no": a workflow that read it as a conflict would
-    /// rebase on a guess, and on a repository that dismisses stale approvals that rebase destroys
-    /// the approval authorising the merge. Flattening it here would undo `workflow::holds` quietly,
-    /// one layer down from the test that protects it.
+    /// **`Option`, not `bool`.** Unknown is not "no": GitHub reports UNKNOWN for a while after every
+    /// push, and reading that as a conflict would take merge away from a pull request that merges
+    /// perfectly well.
     #[serde(default)]
     pub mergeable: Option<bool>,
     /// GitHub's raw verdict on how this head sits against its base — `mergeStateStatus`, kept
     /// uppercase exactly as GitHub spells it: `BEHIND`, `CLEAN`, `DIRTY`, `BLOCKED`, `UNSTABLE`,
-    /// `UNKNOWN`, …. `BEHIND` is the one a merge train reads: the base has moved, so this cannot
-    /// ride until the base is merged in.
+    /// `UNKNOWN`, …. `BEHIND` means the base has moved.
     ///
     /// Empty when GitHub did not say — and a queue remembered by an older skein has no such field,
     /// so it parses as `""`. Same rule as [`Pr::mergeable`]'s `None`: empty is "not known", never
@@ -326,8 +318,7 @@ pub struct Pr {
     /// [`Pr::my_review`] and [`Pr::my_review_requested`], both of them GitHub's own answers.
     ///
     /// What it is still for is everything that is about the CODE rather than about you: the "new
-    /// commits" mark, the clock the your-move lane sorts on, and `review::worth_reading` deciding
-    /// that a reading of an older commit is stale. Evidence the head moved, not a verdict on your
+    /// commits" mark, and the clock the your-move lane sorts on. Evidence the head moved, not a verdict on your
     /// review.
     pub review_is_current: bool,
     /// **When you last said anything on this pull request** — `submittedAt` on your latest review,
@@ -424,9 +415,7 @@ impl Pr {
     /// **Did skein see every label this pull request carries?** (SKEIN-373)
     ///
     /// The one place "the list is short" is decided, so the blind spot the queue says out loud and
-    /// the fact `prwork::facts_of` hands the merge train cannot disagree — the failure that
-    /// version would have is a row promising completeness while a workflow acts on a hole, which
-    /// is the defect this came from wearing a second face.
+    /// any reader of the field cannot disagree.
     ///
     /// Compared against what actually ARRIVED rather than against [`LABELS_FETCHED`], the same way
     /// [`truncated_rollup`] is, so it stays true if the cap ever moves.
@@ -458,8 +447,7 @@ impl Pr {
     /// anything it was not already holding back.
     ///
     /// **What `false` costs is a sentence, not a refusal**, and that is the difference from the
-    /// label case. There, a truncated list made `workflow::Cond::NoLabel` answer PERMISSIVELY and a
-    /// `hold` could be merged over. Here every reader errs towards holding — a review skein never
+    /// label case. There, a truncated list reads as a label being absent. Here every reader errs towards holding — a review skein never
     /// saw cannot promote a lane or authorise a merge — so what truncation actually takes away is a
     /// person's ability to tell "nobody has approved this" from "skein read thirty of forty
     /// reviews", which is what `queue_within` says out loud.
@@ -524,12 +512,10 @@ impl Pr {
 
 /// A placeholder pull request for a test to build on, with the fields nobody can guess supplied.
 ///
-/// **Why this is here rather than in each test module.** `Pr` is built by hand in four fixtures
-/// across `src/review/` and `src/queue.rs`, every one of them exhaustive — so adding a field to
-/// it broke three files that had no opinion about the field (SKEIN-301). The fixtures in
-/// `src/prwork/` never broke, because they build theirs through `serde_json::from_value` and the
-/// `#[serde(default)]`s absorb a new key; this is the same tolerance for the ones that want a
-/// struct literal.
+/// **Why this is here rather than in each test module.** `Pr` is built by hand in fixtures, and
+/// an exhaustive literal in each meant adding a field broke files that had no opinion about it
+/// (SKEIN-301). This is the tolerance `#[serde(default)]` gives a fixture built from JSON, for the
+/// ones that want a struct literal.
 ///
 /// Used as `Pr { lane: Lane::Waiting, ..blank_pr(7, "abc") }`, so what a test cares about stays
 /// visible on the line and everything else stops being its problem. `NeedsYou` and `Reviewer` are
@@ -616,9 +602,7 @@ pub struct Queue {
     ///
     /// It is what anyone must read before treating a pull request's **absence** from `prs` as
     /// evidence about it. The archive and snooze prunes inside [`queue_within`] have read it since
-    /// SKEIN-229; `review::prune` runs outside this module — it is handed this list by the server —
-    /// and had no way to ask until this field existed, so it deleted nothing but paid a REST call
-    /// per summary file, for ever, for pull requests that were merely past the page.
+    /// SKEIN-229.
     ///
     /// `blind_spots` is not a substitute: it is non-empty for things that say nothing about
     /// completeness, `read:org` among them, so a caller reading it as this flag stands down for the
@@ -627,7 +611,7 @@ pub struct Queue {
     /// back that it was not already holding back.
     #[serde(default = "yes")]
     pub whole: bool,
-    /// The repository's default branch — the trunk a merge train advances. Filled during a
+    /// The repository's default branch. Filled during a
     /// refresh from `GET /repos/{slug}` (its `default_branch`), remembered per process like
     /// [`renamed_to`]'s answer beside it.
     ///
@@ -709,8 +693,7 @@ mod tests {
         // The same rule for the two counts added after it (SKEIN-373, SKEIN-356), and the same
         // reason: `Some(0)` here would say "GitHub has no labels on this and nobody has approved
         // it", which is a claim nobody made. What each absence then MEANS is decided where it is
-        // read — `labels_whole` reads it as whole, `prwork::facts_of` falls back to your own
-        // review — and both of those are the answer that queue was already giving.
+        // read — `labels_whole` reads it as whole — and that is the answer that queue was already giving.
         assert_eq!(
             (pr.labels_total, pr.standing_approvals),
             (None, None),

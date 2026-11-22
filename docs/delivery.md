@@ -736,6 +736,3 @@ check is a claim about some build, and twice they have been pinned on the wrong 
 6. **Turn state is attributed to its box.** A running box's `<store>/status/<box>.pane.json` carries
    `"box":"<that box>"`. An observation without one is accepted on purpose, so a box on an older
    probe does not go dark, but it is not checked either.
-7. **Read the merge train before switching it on.** With `pr_workflows` off, the workflows pane
-   already shows what the train *would* do — the front pull request, its step, everyone behind it,
-   and anything stopped with the reason. Agree with it, then turn it on.

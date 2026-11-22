@@ -812,9 +812,7 @@ function joinShareWarning(slug, chosen) {
 function saveRepoField(input) {
   const { id, key } = input.dataset;
   // Booleans on the wire. Sending the string "false" would deserialize-fail and the field would
-  // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
-  // than one name because the second such field arrived (`auto_review`) and a comparison that
-  // named one would have made the new one fail exactly that way, silently.
+  // report saved while nothing changed — the worst shape a settings bug can take.
   const BOOL_KEYS = ["review_queue"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
