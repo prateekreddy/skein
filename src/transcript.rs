@@ -396,7 +396,7 @@ pub fn read_transcript_at(
     let bytes = bytes.clamp(TRANSCRIPT_MIN_BYTES, TRANSCRIPT_MAX_BYTES);
     let empty = empty_view;
     let runtime = agent_for_box(name);
-    // Claude keeps `~/.claude/projects/<slug>/<session>.jsonl`. Codex's rollout files are a
+    // Claude keeps `~/.claude/projects/<slug>/<session>.jsonl`. Another runtime's files would be a
     // different shape and are NOT read here rather than guessed at — see docs/inventory.md §9.1 for
     // why skein captures a runtime's format from a real box before claiming to understand it.
     if runtime != "claude" {

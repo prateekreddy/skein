@@ -262,7 +262,7 @@ pub fn box_exposure(name: &str) -> Exposure {
 /// **Here rather than in the CLI**, and the difference is the whole point of putting it here.
 /// `skein start` already turns away a box with no registered repo, and that refusal is the *name*
 /// check — it never sees the box that is uncovered for the other reasons, and it is not on the path
-/// `reviewbox`, `takeover` or [`ensure_box_session`] take. The condition belongs where the manifest
+/// `reviewbox` or [`ensure_box_session`] take. The condition belongs where the manifest
 /// is computed, so every way of bringing a box up meets the same wall.
 ///
 /// **What it says, and why in that order** — the two standing UX rules, applied. *Inform and offer*:
@@ -394,7 +394,7 @@ fn setup_wait_script(markers: &str, wait_secs: u64) -> String {
 ///     (SKEIN-1258). The repo's store is writable by every box of the repo, so a snapshot there
 ///     was whatever a box had made of it by the time the kit ran.
 ///
-/// **Must run inside the box's namespace**, not the sandbox: it writes `~/.codex`, `~/.claude` and
+/// **Must run inside the box's namespace**, not the sandbox: it writes `~/.claude` and
 /// `~/shared`, and outside the namespace those are the sandbox's, shared by every box.
 pub fn provision_script(name: &str, store: &str) -> String {
     format!(

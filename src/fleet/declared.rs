@@ -74,7 +74,7 @@ pub fn allow_uncovered(name: &str, on: bool) -> Result<(), String> {
 /// (`box-session.sh`, the state cover), and `tests/isolation_bwrap/` reads it back from a real
 /// namespace as `see` rather than `write`. What the box writes are its conversation and
 /// transcripts, and those reach it through a *different, read-write* mount of the same directories
-/// at `$HOME/.claude/projects` and `$HOME/.codex/sessions` — separate mounts, so read-only here
+/// at `$HOME/.claude/projects` — a separate mount, so read-only here
 /// costs nothing there. `git-tokens/` is the other half and is the reason: the host mints and
 /// places those, and a box that could write this path could write itself a token for a repository
 /// it was never given.

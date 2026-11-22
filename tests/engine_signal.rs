@@ -4,7 +4,7 @@
 //! skein's mod writes `<store>/status/<box>.mod.json` from inside the agent's Claude Code session
 //! (`src/plugin/hooks/attention.ts`): the state the engine is in, entered on the event itself, and
 //! a `seen` heartbeat. `signals::turn_state` prefers it while `seen` is fresh and falls back to the
-//! hook edge fused with the screen otherwise, which is everything a Codex box, an old CLI or an
+//! hook edge fused with the screen otherwise, which is everything an old CLI or an
 //! account with mods off still has.
 //!
 //! The screen in every case below is a real capture of a box mid-turn, sampled now: the shape the

@@ -151,9 +151,8 @@ pub fn verdict(found: &[OnPath], ran: &Ran) -> HealthCheck {
     let Some(first) = found.first() else {
         // A fault rather than a shrug. `box-session.sh` says a box without `~/.local/bin` "has no
         // agent and no way to authenticate one", and `Place::wrap`'s doc records the regression
-        // where a box resolved the substrate's copy instead of the fleet's. The one fleet this
-        // would misjudge is one running codex boxes and nothing else, which no substrate image here
-        // produces — the image ships `/usr/local/bin/claude`, so an empty answer means the PATH
+        // where a box resolved the substrate's copy instead of the fleet's. The
+        // image ships `/usr/local/bin/claude`, so an empty answer means the PATH
         // itself is wrong, not that somebody chose a different runtime.
         return HealthCheck::unsatisfied(
             "no file named claude anywhere on a box's PATH — a box started now would have no agent",

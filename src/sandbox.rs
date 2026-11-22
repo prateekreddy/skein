@@ -1107,8 +1107,8 @@ pub fn restart_box(name: &str, branch: Option<&str>) -> Result<(), String> {
 ///    agent until somebody opens its terminal, which is what the board's own restart relies on — it
 ///    reconnects the terminal right after. The Update pane has no terminal to reconnect.
 /// 2. The session is created again, detached, by the same shell a reconnect runs
-///    ([`agent_session_shell`]) with the runtime's `interactive_resume` — `claude --continue`,
-///    `codex resume --last` — which reopens the conversation and waits at its prompt.
+///    ([`agent_session_shell`]) with the runtime's `interactive_resume`, `claude --continue`,
+///    which reopens the conversation and waits at its prompt.
 ///
 /// **Never [`resume_box`].** That runs the runtime's `headless_resume`, `--print` with a prompt
 /// ("Yes, please proceed." when none is given): it SENDS a turn. The offer this backs says

@@ -620,7 +620,7 @@ fn a_crossing_into_a_scoped_box_carries_its_own_github_token_or_none() {
         assert_eq!(
             field(crossed, "openai"),
             "skein-test-proxy-key",
-            "no box here has a Codex login, and a crossing into the {case} box lost the \
+            "a crossing into the {case} box lost the \
              OPENAI_API_KEY its session was given: {crossed:?}"
         );
     }

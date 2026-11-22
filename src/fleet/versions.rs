@@ -48,7 +48,7 @@ pub const AGENT_CLI: Kind = Kind {
     // which file the command is.
     links: Links::Internal,
     // Measured on the fleet's sandbox, 2026-10-30: claude-code 2.1.314 is 558 MB with its native
-    // binary, codex 390 MB. Twice the larger, for growth.
+    // binary. About twice that, for growth.
     fill_cap: 1200 << 20,
     // About four versions of each, which covers what running boxes use plus one for rollback.
     budget: 8 << 30,

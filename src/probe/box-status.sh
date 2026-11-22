@@ -6,7 +6,7 @@
 #   working      (UserPromptSubmit) you gave it work; new turn → reset the sub-agent counter,
 #                                    refresh the registry's branch, and mark the turn's start time
 #                                    (see refresh_branch / mark_turn_start below)
-#   working-tool (Codex PostToolUse) an approved tool completed → clear a permission-blocked state
+#   working-tool             an approved tool completed → clear a permission-blocked state
 #                                    without resetting the turn timer/counter
 #   agent-start  (PreToolUse Task)  it delegated to a sub-agent; still WORKING; counter++
 #   agent-stop   (SubagentStop)     a sub-agent finished; counter--; still working

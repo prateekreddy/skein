@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# skein box-handoff.sh — provider-neutral Claude <-> Codex takeover context.
+# skein box-handoff.sh — delivers a brief the removed takeover (SKEIN-1511) left for this box.
 #
-# Wired into SessionStart and UserPromptSubmit for both runtimes. The host writes a one-shot pending
-# brief before switching agents; this hook adds it as model-visible context, along with live in-box
+# Wired into SessionStart and UserPromptSubmit. Nothing writes a new brief; one written before the
+# takeover was removed is still waiting for a replacement box that has not started. This hook adds it as model-visible context, along with live in-box
 # git facts that the host cannot see for a clone-mode sandbox. The durable handoff remains in
 # <store>/handoffs/<vmid>.md; only the per-target pending copy is consumed.
 set -uo pipefail

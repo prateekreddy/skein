@@ -570,7 +570,7 @@ fi
 # the store's renderer and which the local file now overrides. The same pass RETIRES every skein
 # hook a past merge copied into either file: skein's turn-state hooks load from its read-only
 # plugin now (SKEIN-1062), and a copy left here would fire each of them twice. "skein's" is the
-# rule `takeover::sanitized_user_hooks` uses: a command that runs something under
+# rule the removed takeover used: a command that runs something under
 # `/.claude/skein/bin/`, skein's own namespace in the store.
 #
 # A clone whose `.claude` is still the store's own link — every box skein made before SKEIN-1053 —

@@ -190,7 +190,7 @@ function fixtureHome(base) {
  */
 export const FIXTURE_BOX_AGENT = "skein-fixture-box-agent";
 /** The executables `src/runtime.rs` names (`RuntimeInfo::executable`), one stand-in each. */
-const BOX_AGENT_EXECUTABLES = ["claude", "codex"];
+const BOX_AGENT_EXECUTABLES = ["claude"];
 function fixtureBoxAgent(executable) {
   return "#!/bin/sh\n# Written by tests/ui/harness/server.mjs: the agent CLI a box started by a UI suite's\n" +
     "# server finds first on its PATH. It runs nothing and says so (SKEIN-1312).\n" +

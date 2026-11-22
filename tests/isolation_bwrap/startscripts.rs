@@ -4,7 +4,7 @@
 use super::*;
 
 /// The helpers a box runs from skein as it starts or is attached to — the kit's, the attach
-/// shell's, the tracker's and the status line's — and the Codex hook wiring its installer reads.
+/// shell's, the tracker's and the status line's.
 /// Each is a file in the turn-state variant's `probe/` under `.skein` (SKEIN-1149).
 /// `probes::every_start_helper_runs_from_the_read_only_plugin` holds every caller to that directory;
 /// this list only says what box A tries to change.
@@ -31,7 +31,7 @@ const START_FILES: [&str; 6] = [
 /// and the kit is `src/kit/skein-startup.sh`, installed into this fixture fleet as
 /// `fleet::install_launcher` installs them, mode 755 and owned by the uid every box runs as. What
 /// box B runs is the kit, the way `fleet::provision_script` runs it, and then every string in
-/// `probes::start_invocations` — Codex's setup, the guide refresh, the screen observer, the
+/// `probes::start_invocations` — the guide refresh, the screen observer, the
 /// tracker's install and refresh, and the status line — each the production string.
 ///
 /// Box A (`web-main`) overwrites every one of those files in `.skein` with a script that leaves a

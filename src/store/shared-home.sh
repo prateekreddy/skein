@@ -4,7 +4,7 @@
 # The canonical data lives in the repo's Skein store, which is mounted into the box. Real $HOME
 # stays private: agent auth/runtime state, credentials, caches, sockets, and toolchains are never
 # shared between boxes. This helper is provider-neutral and is called both by kit startup and the
-# live SessionStart probe, so new and existing Claude/Codex boxes converge on the same layout.
+# live SessionStart probe, so new and existing boxes converge on the same layout.
 #
 # WHERE in the store is box-self.sh's `skein_shared_home`: for a store skein manages it is
 # `store/shared-home`, beside the store's `.claude` and not inside it (SKEIN-1324,

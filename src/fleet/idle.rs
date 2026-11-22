@@ -4,7 +4,7 @@
 //! open to the person, and no subagent is still running. Today skein can only see that through the
 //! board's fused turn state, which reads the box's hooks and its screen (`docs/inventory.md` §9.1):
 //! `waiting` is "the turn ended and the agent is at its prompt", and every other state is not idle.
-//! That is the fallback, and for Codex and for an older Claude Code it stays the only reading.
+//! That is the fallback, and for an older Claude Code it stays the only reading.
 //!
 //! **The exact reading** is [`ExactTurn`]: the three facts themselves, as the agent's own engine
 //! knows them. skein's plugin becoming a Claude Code mod (SKEIN-1358) is what can supply it. When it
