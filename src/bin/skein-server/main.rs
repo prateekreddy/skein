@@ -158,10 +158,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     if let Err(e) = skein::kit::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }
-    // An older config's fleet-wide base branch becomes each repo's own (the owner, 2026-09-27).
-    if let Err(e) = skein::repos::adopt_fleet_base_branch() {
-        eprintln!("skein: could not move the base branch from Settings onto each repo ({e}); new boxes start from each remote's default until it is set on the repo card");
-    }
     // Each store moves off a `.claude` name, where every write a box made to it asked for
     // permission: a managed one (SKEIN-1330) and one put at `<dir>/.claude` with `--store`
     // (SKEIN-1345). Before anything reads a store path, and before any box starts.

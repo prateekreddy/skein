@@ -105,15 +105,6 @@ pub struct Config {
     /// ([`crate::runtime::fleet_default_runtime`]). The only default: a repo has no runtime of its own.
     #[serde(default = "default_agent")]
     pub default_agent: String,
-    /// **Moved to each repo** ([`crate::repos::Repo::base_branch`], the owner, 2026-09-27): the
-    /// branch a new box starts from is a fact about one repository, and one fleet-wide value for it
-    /// was honoured only by the repos whose remote happened to have that branch.
-    ///
-    /// Kept only so an older `config.json` that set it is not lost: nothing reads it but
-    /// [`crate::repos::adopt_fleet_base_branch`], which copies it into every repo that has none and
-    /// then clears it. Never written back once empty.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub base_branch: String,
     /// Confirm before a destructive **Destroy** (clone-mode boxes lose unpushed commits). The cockpit
     /// reads this to decide whether to prompt.
     #[serde(default = "default_true")]
@@ -738,7 +729,6 @@ impl Default for Config {
             pr_workflows: false,
             review_model: String::new(),
             default_agent: default_agent(),
-            base_branch: String::new(),
             confirm_destroy: default_true(),
             scope_git_to_repo: default_true(),
             github_app_id: String::new(),

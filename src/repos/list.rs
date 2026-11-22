@@ -436,36 +436,10 @@ fn could_be_a_branch(branch: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
 }
 
-/// Copy an older `config.json`'s fleet-wide base branch into every repo that names none, then
-/// clear it there (the owner, 2026-09-27: the branch a new box starts from is per repo).
-///
-/// Repos first, config second, so an interruption between the two leaves the old value in place
-/// and the next run finishes the job: a repo that already has one is never overwritten, so running
-/// this twice changes nothing the first run did. Returns how many repos took the value.
-pub fn adopt_fleet_base_branch() -> Result<usize, String> {
-    let fleet = load_config().base_branch.trim().to_string();
-    if fleet.is_empty() {
-        return Ok(0);
-    }
-    let adopted = update_repos(|repos| {
-        let mut adopted = 0;
-        for repo in repos.iter_mut().filter(|r| r.base_branch.trim().is_empty()) {
-            repo.base_branch = fleet.clone();
-            adopted += 1;
-        }
-        Ok(adopted)
-    })?;
-    update_config(|c| {
-        c.base_branch.clear();
-        Ok(())
-    })?;
-    Ok(adopted)
-}
-
 /// Move every store off a `.claude` name and record where it went (SKEIN-1330,
 /// `docs/decisions/store-is-not-dot-claude.md`): a managed one from `store/.claude` to
 /// `store/data`, and one the person put at `<dir>/.claude` with `skein add --store` to `<dir>/data`
-/// (SKEIN-1345). Run once at server start, beside [`adopt_fleet_base_branch`].
+/// (SKEIN-1345). Run once at server start.
 ///
 /// The directory and its `store` value move together, inside the repo-list lock: a store renamed
 /// on disk with the record still naming the old path would leave every box of the repo with no
@@ -638,54 +612,6 @@ mod tests {
         assert_eq!(move_stores_off_dot_claude().unwrap(), (1, Vec::new()));
         assert_eq!(move_stores_off_dot_claude().unwrap(), (0, Vec::new()));
         assert_eq!(stores()[1].1, s(at("clash", "data")));
-    }
-
-    /// **An older config's fleet-wide base branch becomes each repo's own, once, and never over a
-    /// repo that already names one** (the owner, 2026-09-27).
-    ///
-    /// What would make it fail: the copy overwriting a repo's own value (`trunk` would become
-    /// `develop`); the config value left in place, so Settings and the repo card both claim it
-    /// (`the fleet-wide value is gone`); or a second run doing anything (`twice is once`).
-    #[test]
-    fn the_fleet_base_branch_moves_onto_each_repo_that_has_none() {
-        let _g = env_lock();
-        let home = tempdir();
-        let mut env = env_pins();
-        env.set("SKEIN_HOME", &home);
-        fs::write(home.join("config.json"), r#"{"base_branch":"develop"}"#).unwrap();
-        fs::write(
-            home.join("repos.json"),
-            serde_json::json!([
-                { "id": "plain", "source": "https://example.com/plain.git", "store": "/s", "agent": "claude" },
-                { "id": "own", "source": "https://example.com/own.git", "store": "/s", "base_branch": "trunk" },
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        let bases = || {
-            load_repos()
-                .into_iter()
-                .map(|r| (r.id, r.base_branch))
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(adopt_fleet_base_branch(), Ok(1));
-        assert_eq!(
-            bases(),
-            [
-                ("plain".into(), "develop".into()),
-                ("own".into(), "trunk".into())
-            ],
-            "each repo with none takes it, and one with its own keeps it"
-        );
-        let config = fs::read_to_string(home.join("config.json")).unwrap();
-        assert!(
-            !config.contains("base_branch"),
-            "the fleet-wide value is gone: {config}"
-        );
-
-        assert_eq!(adopt_fleet_base_branch(), Ok(0), "twice is once");
-        assert_eq!(bases()[0].1, "develop");
     }
 
     /// **The card's field takes a branch, clears to the remote's default, and refuses what cannot

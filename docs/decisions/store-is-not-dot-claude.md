@@ -53,7 +53,7 @@ checkout's `.claude`. The ones that name or derive the store's location are:
 Everything else reaches the store through `repos.json`'s `store` value or `$SKEIN_BOX_STORE`, so
 moving the value moves them.
 
-**The migration.** Host-side, at server start (beside `adopt_fleet_base_branch`), under the
+**The migration.** Host-side, at server start, under the
 repo-list lock: for each repo whose `store` has the managed shape `/…/repos/<id>/store/.claude`,
 rename the directory to `store/data` and rewrite the `store` value, both or neither. The same rules
 as SKEIN-1324's move: only the old one there → `rename`; only the new one → already done; both and
