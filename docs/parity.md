@@ -30,7 +30,7 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 120  (NOT '.route("' — that gives 104, missing every entry whose path is on the line below)
+grep -c '\.route('  src/bin/skein-server/main.rs               # 111  (NOT '.route("' — that gives 99, missing every entry whose path is on the line below)
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 187 unique, 192 occurrences
 grep -c 'function ' src/web/index.html                          # 548
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
@@ -391,7 +391,7 @@ nothing to fetch from, and would differ from a URL repo in nothing a box could o
 repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
 
 One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
-`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:316`)
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:254`)
 rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein

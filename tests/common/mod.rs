@@ -1051,7 +1051,7 @@ pub struct GhRequest {
 /// (`grep -rh 'TcpListener::bind' src/prq src/github.rs`), but every
 /// one of those 25 is a `#[cfg(test)] mod tests` inside `src/`, reachable only from unit tests in
 /// that same crate — none of them are in `tests/*.rs`. `tests/review_queue.rs` and `tests/server/`
-/// had their own pair (`stub_github`, `stub_github_for`), which is the actual count for this
+/// had their own pair (`stub_github` and another), which is the actual count for this
 /// directory: **2**, not 25. This function is what those two now share.
 ///
 /// A `testutil::fake_github` for the 25 in `src/` would be the other half, and belongs in
@@ -1066,7 +1066,7 @@ pub struct GhRequest {
 /// time, read the request line and headers, read exactly `Content-Length` bytes of body, write the
 /// status and payload back. What each server *answers* is unchanged: `stub_github`'s GraphQL
 /// alias-splitting, its `fail-<term>`/`dead-request`/`too-heavy` fixtures, and its request-counting
-/// `hits.log`, and `stub_github_for`'s PR-count fixture and `reading`-gated `/files`/`/pulls/`
+/// `hits.log`, and a PR-count fixture and `reading`-gated `/files`/`/pulls/`
 /// branches, all moved into their call sites' handler closures unchanged. Neither call site's
 /// assertions changed shape; only the loop and the wire format did.
 ///

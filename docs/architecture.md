@@ -504,7 +504,7 @@ Two consequences to state rather than discover:
   and refusing the path removes the asymmetry instead of documenting it.
 - **Three host-side features read the working checkout directly** — `diff`, `moduledocs`,
   `codeowners`. They repoint at the mirror. That is a refactor, not a deletion, and it is budgeted
-  in `docs/delivery.md`. Done, through `repos::Tree` (`src/repos/mirror.rs:316`), and one thing had to be
+  in `docs/delivery.md`. Done, through `repos::Tree` (`src/repos/mirror.rs:254`), and one thing had to be
   separated to do it: the files a repo keeps **out of git** are not in any mirror, so what
   `shared-paths.txt` names is surfaced into a box out of the store's own `shared-rw/` by
   `sandbox-bootstrap.sh` rather than read off a checkout. Nothing on the host seeds that directory
@@ -992,8 +992,8 @@ path in it (`src/box-session.sh:2478`) and binds back only the one store this bo
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
   — module notes and a repo pull. Neither exists: the module notes, the diff and CODEOWNERS read the
-  mirror through `repos::Tree` (`src/repos/mirror.rs:316`), and `pull_repo` fetches the mirror and does
-  nothing else (`src/repos/add.rs:260`). What has not changed is that skein still runs git **on the
+  mirror through `repos::Tree` (`src/repos/mirror.rs:254`), and `pull_repo` fetches the mirror and does
+  nothing else (`src/repos/add.rs:250`). What has not changed is that skein still runs git **on the
   host** against a tree inside `~/.skein/repos` — the mirror, via `fetch_mirror` — so a box that
   could write that mirror's `config` would still get execution as the host user at the next fetch.
   The cover above is what stops it, which means the cover is load-bearing for more than file

@@ -86,6 +86,7 @@ here. Format: a list item whose first backticked span is `Type.field`.
 - `Pr.reviews_read` — the other half of that pair; `Pr::reviews_whole` is never read without it (SKEIN-386)
 - `Pr.cross_repository` — no reader since the merge train was removed; kept for the same reason as `Pr.standing_approvals`
 - `Queue.viewer` — no reader since the review engine was removed; kept for the same reason as `Pr.standing_approvals`
+- `Queue.whole` — server-consumed in `src/prq/refresh.rs`: a queue that did not see everything is never remembered over one that did, and its set-aside prunes stand down
 - `Signal.symbol` — server-consumed by `src/shape.rs`
 - The two INPUTS to `Pr.replied_to_me` — its `my_review_at`, and each thread's `last_author`/`last_at` — are `skip_serializing` rather than listed here, because they are consumed at parse time and nothing reads them after a round trip. `replied_to_me` itself left this list on 2026-09-03: the page reads it now (`cockpit/src/move.mjs`, the `replied` lane), which is the exemption having done its job
 

@@ -19,7 +19,7 @@ answer. Stored credentials are read again on every call, so a token replaced in 
 from the next call; only the `gh` login is asked once per process.
 
 **Date.** 2026-09-05, while the credentials design was being written. Amended 2026-09-27 with the
-per-repository order and the record of `review_identity`.
+per-repository order and the record of the identity setting that has since gone.
 
 **Decided by.** The project owner, who rejected a proposal that review sessions post under a GitHub
 App identity with "on behalf of" text, and who later settled the per-repository order above.
