@@ -130,9 +130,9 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
             store.display().to_string()
         ));
     }
-    // A store still named `.claude` whose `data` is already there was moved after this caller read
-    // `repos.json`. Making the old one again would leave the repo two stores, and the next move
-    // would refuse them both (SKEIN-1330). For a store the person put elsewhere, `data` beside it
+    // A caller can hold a record naming `.claude` after the store moved to `data`. Making the old
+    // one again would leave the repo two stores, and a box whose own record still names `.claude`
+    // finds `data` only while `.claude` is gone (`skein_box_store`, SKEIN-1330). For a store the person put elsewhere, `data` beside it
     // counts only when it is a store, since it may be a folder of theirs (SKEIN-1345).
     let moved_to = store.with_file_name(STORE_NAME);
     let moved = if custom_store_on_dot_claude(store) {
@@ -276,7 +276,7 @@ fn ensure_repo_cache(store: &Path) -> Result<(), String> {
 /// allowed (`docs/decisions/store-is-not-dot-claude.md`).
 pub(crate) const STORE_NAME: &str = "data";
 
-/// The name the store had before [`STORE_NAME`], which [`move_store_off_dot_claude`] moves from.
+/// The name the store had before [`STORE_NAME`].
 const OLD_STORE_NAME: &str = ".claude";
 
 /// Which of the two names a store of the managed shape has: `Some` only for
@@ -305,7 +305,7 @@ pub(crate) fn managed_store_name(store: &Path) -> Option<&'static str> {
     }
 }
 
-/// Whether `store` is still at a `.claude` name that [`move_store_off_dot_claude`] moves: a managed
+/// Whether `store` is at a `.claude` name: a managed
 /// store at `/<…>/repos/<id>/store/.claude`, or a store put elsewhere with `skein add --store` at a
 /// path ending in `.claude` ([`custom_store_on_dot_claude`]). Asks nothing of the filesystem.
 pub(crate) fn store_has_old_name(store: &Path) -> bool {
@@ -313,8 +313,7 @@ pub(crate) fn store_has_old_name(store: &Path) -> bool {
 }
 
 /// A store of the person's own, put with `skein add --store` at a path ending in `.claude` (the
-/// documented `skein-shared/.claude`), which moves to `data` beside it by the owner's decision of
-/// 2026-10-26 (SKEIN-1345). Absolute, with no `.` or `..` and no doubled `/`, at least two
+/// documented `skein-shared/.claude`; SKEIN-1345). Absolute, with no `.` or `..` and no doubled `/`, at least two
 /// components deep, and not of the managed shape, whose rules are the managed move's own.
 fn custom_store_on_dot_claude(store: &Path) -> bool {
     use std::path::Component;
@@ -336,130 +335,6 @@ fn custom_store_on_dot_claude(store: &Path) -> bool {
 fn is_a_store(dir: &Path) -> bool {
     let real = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
     real(dir) && real(&dir.join("skein"))
-}
-
-/// Move a store off a `.claude` name to `data` beside it, once, and say where it is now.
-///
-/// `Ok(store)` unchanged for any store not named `.claude`. For a managed store,
-/// `/<…>/repos/<id>/store/.claude`, the answer is `/<…>/repos/<id>/store/data`, and the directory
-/// is moved there by a rename, by the same rules as the shared home's move:
-///
-/// * only the old one is there: renamed, contents and all;
-/// * only the new one is there: already moved, which is every run after the first;
-/// * neither is there: nothing to move, and the store is made at the new name when it is next used;
-/// * both are there and the old one is empty: the empty one is removed;
-/// * both are there and the old one holds anything: **refused**, naming both, and nothing moves;
-/// * either is a link or not a directory: refused, and never followed.
-///
-/// A store the person put elsewhere at a `.claude` path moves too (SKEIN-1345), by
-/// [`move_custom_store_off_dot_claude`], whose rules are stricter where the new name could be a
-/// folder of theirs rather than skein's.
-///
-/// The caller records the answer in `repos.json` ([`crate::repos::move_stores_off_dot_claude`]).
-/// A refusal leaves the store where it was, working as before, and costs only the prompts.
-pub(crate) fn move_store_off_dot_claude(store: &Path) -> Result<PathBuf, String> {
-    if custom_store_on_dot_claude(store) {
-        return move_custom_store_off_dot_claude(store);
-    }
-    if !store_has_old_name(store) {
-        return Ok(store.to_path_buf());
-    }
-    let Some(parent) = store.parent() else {
-        return Ok(store.to_path_buf());
-    };
-    let new = parent.join(STORE_NAME);
-    let what = "this repo's store";
-    let old_is_dir = real_dir_of(store, what)?;
-    let new_is_dir = real_dir_of(&new, what)?;
-    match (old_is_dir, new_is_dir) {
-        (false, _) => Ok(new),
-        (true, false) => rename_store(store, &new),
-        (true, true) => {
-            if dir_is_empty(store)? {
-                fs::remove_dir(store).map_err(|e| format!("rmdir {}: {e}", store.display()))?;
-                return Ok(new);
-            }
-            Err(format!(
-                "this repo's store is in two places, {} and {}, and skein will not merge them. \
-                 Nothing was moved, and the repo keeps using {} until one is left: move what you \
-                 want to keep into {}, remove {}, and restart skein.",
-                store.display(),
-                new.display(),
-                store.display(),
-                new.display(),
-                store.display()
-            ))
-        }
-    }
-}
-
-/// [`move_store_off_dot_claude`] for a store the person put at `<dir>/.claude` (SKEIN-1345).
-///
-/// The same rename, never a copy, never through a link, and refused naming both paths when both
-/// hold files. Stricter in one way: `<dir>/data` is in a directory of the person's, so it may be a
-/// folder of theirs, and skein takes it for the store only when it holds skein's own `skein/`
-/// directory. So an old store that is gone moves the record only to a new one that is a store,
-/// and an empty old one is removed only beside a new one that is.
-///
-/// Such a store is mounted into the fleet sandbox by its own path (`fleet::fleet_mounts`), and
-/// inside the sandbox a mount point cannot be renamed (`EBUSY`), so there it is refused with what
-/// to do on the host instead.
-fn move_custom_store_off_dot_claude(store: &Path) -> Result<PathBuf, String> {
-    let Some(parent) = store.parent() else {
-        return Ok(store.to_path_buf());
-    };
-    let new = parent.join(STORE_NAME);
-    let what = "this repo's store";
-    let old_is_dir = real_dir_of(store, what)?;
-    let new_is_dir = real_dir_of(&new, what)?;
-    match (old_is_dir, new_is_dir) {
-        (false, _) if is_a_store(&new) => Ok(new),
-        (false, _) => Ok(store.to_path_buf()),
-        (true, false) => rename_store(store, &new),
-        (true, true) if is_a_store(&new) && dir_is_empty(store)? => {
-            fs::remove_dir(store).map_err(|e| format!("rmdir {}: {e}", store.display()))?;
-            Ok(new)
-        }
-        (true, true) => Err(format!(
-            "skein moves this repo's store from {} to {}, so its boxes stop asking before every \
-             write there, but {} is already there, and skein will not merge them. Nothing was \
-             moved: move {} aside, or move what you want to keep into one of them, and restart \
-             skein.",
-            store.display(),
-            new.display(),
-            new.display(),
-            new.display()
-        )),
-    }
-}
-
-/// Rename a store to its new name, saying plainly when it is a mount point that cannot move.
-fn rename_store(store: &Path, new: &Path) -> Result<PathBuf, String> {
-    match fs::rename(store, new) {
-        Ok(()) => Ok(new.to_path_buf()),
-        Err(e) if e.kind() == std::io::ErrorKind::ResourceBusy => Err(format!(
-            "{} is mounted into the fleet sandbox under that name, so skein cannot rename it to {} \
-             from inside. Nothing was moved; its boxes keep working, and ask before every write \
-             there. To move it: stop the fleet, rename it to {} on your machine, change this \
-             repo's \"store\" in repos.json to match, and create the fleet again.",
-            store.display(),
-            new.display(),
-            new.display()
-        )),
-        Err(e) => Err(format!(
-            "could not move this repo's store from {} to {}: {e}. Nothing was moved, and the \
-             repo keeps its store where it was.",
-            store.display(),
-            new.display()
-        )),
-    }
-}
-
-fn dir_is_empty(dir: &Path) -> Result<bool, String> {
-    Ok(fs::read_dir(dir)
-        .map_err(|e| format!("read {}: {e}", dir.display()))?
-        .next()
-        .is_none())
 }
 
 /// Make the store's shared home, moving it out of the store's `.claude` the first time.
@@ -829,250 +704,35 @@ mod tests {
         home.join("repos").join("x").join("store").join(".claude")
     }
 
-    /// **A store at `store/.claude` is moved to `store/data` by a rename, once** (SKEIN-1330).
+    /// **A record from before the rename does not make the old store again.**
     ///
-    /// What would make this fail: `move_store_off_dot_claude` copying rather than renaming (the old
-    /// directory is still there), answering the old path, or doing anything on the second run.
+    /// A box's own `.git/skein-store` can still name `store/.claude`, and that box finds `data` only
+    /// while `.claude` is gone (`skein_box_store`). What would make this fail: the guard in
+    /// [`store_freshly_created`] removed (the old directory is made), or a folder of the person's
+    /// called `data` taken for a store (the last case is refused).
     #[test]
-    fn an_old_store_is_moved_to_data_once() {
-        let home = tempdir();
-        let old = old_managed_store(&home);
-        let new = managed_store(&home);
-        fs::create_dir_all(old.join("memory")).unwrap();
-        fs::write(old.join("memory/MEMORY.md"), "- kept\n").unwrap();
-        fs::create_dir_all(old.join("mailbox")).unwrap();
-        fs::write(old.join("mailbox/1.json"), "{}").unwrap();
-        let inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&old).unwrap());
-
-        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
-        assert!(!old.exists(), "the old store is still there");
-        assert_eq!(
-            fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
-            "- kept\n"
-        );
-        assert_eq!(
-            std::os::unix::fs::MetadataExt::ino(&fs::metadata(&new).unwrap()),
-            inode,
-            "the store was copied, not renamed: a running box's bind follows the directory"
-        );
-
-        // The second run, and a store already at the new name, change nothing.
-        fs::write(new.join("later.md"), "x").unwrap();
-        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
-        assert_eq!(move_store_off_dot_claude(&new), Ok(new.clone()));
-        assert!(new.join("later.md").is_file() && !old.exists());
-    }
-
-    /// **Two stores with files are refused and nothing moves**; an empty old one beside a real new
-    /// one is a leftover and goes. And `ensure_store` will not make the old one again.
-    ///
-    /// What would make this fail: merging the two, renaming one over the other, answering `Ok`
-    /// with files at both, or `ensure_store` re-creating `store/.claude` from a stale record.
-    #[test]
-    fn two_stores_with_files_are_refused_and_nothing_moves() {
+    fn a_record_from_before_the_rename_does_not_make_the_old_store_again() {
         let _g = env_lock();
         let home = tempdir();
         let mut pins = env_pins();
         pins.set("SKEIN_HOME", &home);
+
         let old = old_managed_store(&home);
-        let new = managed_store(&home);
-        fs::create_dir_all(&old).unwrap();
-        fs::create_dir_all(&new).unwrap();
-        fs::write(old.join("a.md"), "old").unwrap();
-        fs::write(new.join("b.md"), "new").unwrap();
-
-        let err = move_store_off_dot_claude(&old).unwrap_err();
-        assert!(
-            err.contains(&old.display().to_string()) && err.contains(&new.display().to_string()),
-            "the refusal must name both places: {err}"
-        );
-        assert_eq!(fs::read_to_string(old.join("a.md")).unwrap(), "old");
-        assert!(
-            !new.join("a.md").exists() && !old.join("b.md").exists(),
-            "merged"
-        );
-
-        fs::remove_file(old.join("a.md")).unwrap();
-        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
-        assert!(!old.exists(), "an empty leftover stayed");
-
-        // A caller holding the record from before the move.
-        let err = ensure_store(&old).unwrap_err();
-        assert!(err.contains("moved to"), "{err}");
-        assert!(!old.exists(), "ensure_store made the old store again");
-    }
-
-    /// **A link at either name is refused and never followed**, and a path of no shape the move
-    /// knows is left exactly as it is.
-    ///
-    /// What would make this fail: `fs::metadata` (which follows) in place of `symlink_metadata`,
-    /// so the link is renamed or read as "already moved", or the shape test accepting a `..` in
-    /// the path, a doubled `/`, or a store not named `.claude`.
-    #[test]
-    fn a_link_at_either_store_is_refused_and_other_stores_are_not_renamed() {
-        use std::os::unix::fs::symlink;
-        let home = tempdir();
-        let elsewhere = tempdir();
-        fs::write(elsewhere.join("private.txt"), "not the store's").unwrap();
-        let old = old_managed_store(&home);
-        let new = managed_store(&home);
-        fs::create_dir_all(old.parent().unwrap()).unwrap();
-
-        symlink(&elsewhere, &old).unwrap();
-        let err = move_store_off_dot_claude(&old).unwrap_err();
-        assert!(err.contains("is a link"), "{err}");
-        assert!(old.is_symlink() && !new.exists() && !new.is_symlink());
-        fs::remove_file(&old).unwrap();
-
-        fs::create_dir_all(&old).unwrap();
-        symlink(&elsewhere, &new).unwrap();
-        let err = move_store_off_dot_claude(&old).unwrap_err();
-        assert!(err.contains("is a link"), "{err}");
-        assert!(old.is_dir() && new.is_symlink());
-        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
-
-        let theirs = elsewhere.join("thing-shared/store");
-        fs::create_dir_all(&theirs).unwrap();
-        for kept in [
-            theirs.clone(),
-            PathBuf::from("/x/repos/a/store/../store/.claude"),
-            PathBuf::from("/x/repos/a//store/.claude"),
-            PathBuf::from("/x/thing/../.claude"),
-            PathBuf::from("/.claude"),
-        ] {
-            assert_eq!(move_store_off_dot_claude(&kept), Ok(kept.clone()));
-        }
-        assert!(theirs.is_dir());
-    }
-
-    /// **A store the person put at `<dir>/.claude` with `--store` moves to `<dir>/data` by a
-    /// rename, once, and never onto a folder of theirs** (SKEIN-1345, the owner's decision of
-    /// 2026-10-26).
-    ///
-    /// What would make this fail: `custom_store_on_dot_claude` gone or answering false, so the
-    /// store stays at `.claude` (the first assertion); a copy in place of the rename (the inode);
-    /// the managed rules applied here, so an old store that is gone moves the record onto a `data`
-    /// that is not a store, or an empty old store is removed beside one; merging two that both hold
-    /// files; or `ensure_store` declining to make a store whose `data` is not one.
-    #[test]
-    fn a_store_put_at_a_dot_claude_path_moves_to_data_beside_it() {
-        use std::os::unix::fs::symlink;
-        let _g = env_lock();
-        let home = tempdir();
-        let mut pins = env_pins();
-        pins.set("SKEIN_HOME", &home);
-        let dir = tempdir().join("thing-shared");
-        let old = dir.join(".claude");
-        let new = dir.join("data");
-        fs::create_dir_all(old.join("skein")).unwrap();
-        fs::write(old.join("shared-home"), "kept").unwrap();
-        let inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&old).unwrap());
-
-        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
-        assert!(!old.exists(), "the old store is still there");
-        assert_eq!(fs::read_to_string(new.join("shared-home")).unwrap(), "kept");
-        assert_eq!(
-            std::os::unix::fs::MetadataExt::ino(&fs::metadata(&new).unwrap()),
-            inode,
-            "copied, not renamed"
-        );
-        // Every later start: the record follows the store that moved, and the new name stays.
-        assert_eq!(move_store_off_dot_claude(&old), Ok(new.clone()));
-        assert_eq!(move_store_off_dot_claude(&new), Ok(new.clone()));
-        // A caller holding the record from before the move does not make the old one again.
+        fs::create_dir_all(managed_store(&home)).unwrap();
         assert!(ensure_store(&old).unwrap_err().contains("moved to"));
-        assert!(!old.exists());
+        assert!(!old.exists(), "ensure_store made the old store again");
 
-        // A `data` of the person's that is not a store: never taken for one.
-        let dir = tempdir().join("project");
-        let old = dir.join(".claude");
-        let new = dir.join("data");
-        fs::create_dir_all(&new).unwrap();
-        fs::write(new.join("theirs.csv"), "1,2").unwrap();
-        assert_eq!(move_store_off_dot_claude(&old), Ok(old.clone()));
-        fs::create_dir_all(&old).unwrap();
-        let err = move_store_off_dot_claude(&old).unwrap_err();
-        assert!(
-            err.contains(&old.display().to_string()) && err.contains(&new.display().to_string()),
-            "the refusal must name both places: {err}"
-        );
-        assert!(
-            old.is_dir(),
-            "an empty store was removed beside a folder that is not one"
-        );
-        fs::write(old.join("a.md"), "old").unwrap();
-        assert!(move_store_off_dot_claude(&old).is_err());
-        assert_eq!(fs::read_to_string(old.join("a.md")).unwrap(), "old");
-        assert_eq!(fs::read_dir(&new).unwrap().count(), 1, "merged");
-        fs::remove_file(old.join("a.md")).unwrap();
-        fs::remove_dir(&old).unwrap();
+        let custom = home.join("project");
+        fs::create_dir_all(custom.join("data/skein")).unwrap();
+        let old = custom.join(".claude");
+        assert!(ensure_store(&old).unwrap_err().contains("moved to"));
+        assert!(!old.exists(), "ensure_store made the old store again");
+
+        let theirs = home.join("theirs");
+        fs::create_dir_all(theirs.join("data")).unwrap();
+        let old = theirs.join(".claude");
         ensure_store(&old).unwrap();
-        assert!(
-            old.join("skein").is_dir(),
-            "ensure_store refused to make the store"
-        );
-
-        // A link at either name is refused and never followed.
-        let dir = tempdir().join("linked");
-        fs::create_dir_all(dir.join("real/skein")).unwrap();
-        symlink(dir.join("real"), dir.join(".claude")).unwrap();
-        assert!(move_store_off_dot_claude(&dir.join(".claude"))
-            .unwrap_err()
-            .contains("is a link"));
-        assert!(dir.join(".claude").is_symlink() && !dir.join("data").exists());
-    }
-
-    /// **A store mounted under its `.claude` name is refused with what to do on the host**, which
-    /// is every `--store` store in a fleet skein runs in: the sandbox mounts it by its own path, and
-    /// a mount point cannot be renamed. Run for real: the test binary re-runs itself under bwrap
-    /// with the store bound over itself.
-    ///
-    /// What would make this fail: `rename_store` without its `ResourceBusy` arm, so the refusal is
-    /// the bare "Device or resource busy" with nothing to do next (the wording assertion).
-    #[test]
-    fn a_store_mounted_under_its_dot_claude_name_says_what_to_do_instead() {
-        if !bwrap_works() {
-            skip("bwrap cannot make a user namespace here, so no mount point can be made");
-            return;
-        }
-        let dir = tempdir().join("mounted");
-        let old = dir.join(".claude");
-        fs::create_dir_all(old.join("skein")).unwrap();
-        let out = Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--bind"])
-            .arg(&old)
-            .arg(&old)
-            .arg("--")
-            .arg(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "kit::tests::mounted_store_refusal_from_inside",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("SKEIN_TEST_MOUNTED_STORE", &old)
-            .output()
-            .unwrap();
-        let said = String::from_utf8_lossy(&out.stdout).into_owned()
-            + &String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "{said}");
-        assert!(
-            said.contains("1 passed"),
-            "the inner test did not run: {said}"
-        );
-        assert!(old.join("skein").is_dir() && !dir.join("data").exists());
-    }
-
-    /// The inside half of the test above, run only by it.
-    #[test]
-    #[ignore = "run by a_store_mounted_under_its_dot_claude_name_says_what_to_do_instead"]
-    fn mounted_store_refusal_from_inside() {
-        let old = PathBuf::from(env::var_os("SKEIN_TEST_MOUNTED_STORE").unwrap());
-        let err = move_store_off_dot_claude(&old).unwrap_err();
-        assert!(
-            err.contains("is mounted into the fleet sandbox") && err.contains("on your machine"),
-            "{err}"
-        );
+        assert!(old.join("skein").is_dir(), "a folder of theirs read as a store");
     }
 
     /// **A box whose store moved under it follows it to `store/data`, and the shared home is

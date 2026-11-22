@@ -158,20 +158,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     if let Err(e) = skein::kit::ensure_kit() {
         eprintln!("skein: kit not installed ({e}); boxes will fail to provision");
     }
-    // Each store moves off a `.claude` name, where every write a box made to it asked for
-    // permission: a managed one (SKEIN-1330) and one put at `<dir>/.claude` with `--store`
-    // (SKEIN-1345). Before anything reads a store path, and before any box starts.
-    match skein::repos::move_stores_off_dot_claude() {
-        Ok((moved, refused)) => {
-            if moved > 0 {
-                eprintln!("skein: moved {moved} repo store(s) from .claude to data; a box already running keeps working, and picks up the rest at its next restart");
-            }
-            for why in refused {
-                eprintln!("skein: {why}");
-            }
-        }
-        Err(e) => eprintln!("skein: could not move the repo stores off .claude ({e}); they stay where they are and keep working"),
-    }
     // Bring an existing fleet sandbox into line with this binary: it keeps the launcher and the
     // ceilings it was last given, and an upgrade that changes what skein passes the launcher stops
     // every box in that fleet starting until the copy out there is replaced. A restart is the only

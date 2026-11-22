@@ -138,12 +138,11 @@ the same calls against the new one, as the kit and launcher now set a box up:
 
 **Enforced at.**
 
-- `kit::move_store_off_dot_claude` and `repos::move_stores_off_dot_claude` (`src/kit.rs`,
-  `src/repos/list.rs`), run from `src/bin/skein-server/main.rs`: tests
-  `an_old_store_is_moved_to_data_once`, `two_stores_with_files_are_refused_and_nothing_moves`,
-  `a_link_at_either_store_is_refused_and_other_stores_are_not_renamed` and
-  `stores_move_off_dot_claude_and_their_records_follow`. New repos get the name from
-  `kit::STORE_NAME` (`src/repos/add.rs`).
+- The server-side move ran once per store and was removed under SKEIN-1513, when every store on
+  the fleet was at `data`. A store still at a `.claude` name stays there and keeps working. What
+  remains is the guard in `kit::ensure_store`, which will not recreate an old name once `data`
+  exists: test `a_record_from_before_the_rename_does_not_make_the_old_store_again`. New repos get
+  the name from `kit::STORE_NAME` (`src/repos/add.rs`).
 - `skein_box_store` and `skein_shared_home` (`src/probe/box-self.sh`): test
   `a_box_follows_its_store_to_its_new_name`.
 - The kit (`src/kit/skein-startup.sh`): tests
@@ -194,6 +193,4 @@ own path, so in the fleet sandbox, where the server runs, the store is a mount p
 point cannot be renamed (`EBUSY`, measured with bwrap and with `unshare -rm`). There the move is
 refused with what to do on the host instead: stop the fleet, rename the directory, change the repo's
 `store` in `repos.json`, and create the fleet again, since sbx fixes mounts at create. A store under
-a directory the sandbox already mounts (skein's own volume) is renamed in place. Tests:
-`a_store_put_at_a_dot_claude_path_moves_to_data_beside_it` and
-`a_store_mounted_under_its_dot_claude_name_says_what_to_do_instead` (`src/kit.rs`).
+a directory the sandbox already mounts (skein's own volume) is renamed in place.
