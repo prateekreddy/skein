@@ -2,9 +2,8 @@
 
 **Decision.** A box is accident-prone, not hostile. skein stops one agent's mistake from damaging
 another's work. It does not try to stop an agent that means harm, including one turned by a prompt
-injection. The guards have three levels, and none is a wall against a box that sets out to cross it:
-`/run/docker.sock` is open to every box and gives a root container with any bind mount, which
-reaches past all of them. Do not use it to reach anything outside your own box's work.
+injection. The guards have three levels, and none is a wall against a box that sets out to cross it.
+Every box shares one Docker daemon, so touch only your own containers, images and volumes.
 
 1. **Around the person's machine, their credentials, and skein itself.** Ordinary work in a box does
    not touch the fleet's credentials or what skein runs and is built from. The `sbx` microVM is the
