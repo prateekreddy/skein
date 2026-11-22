@@ -56,15 +56,14 @@
 #                     function answers `skein-mcp clean [PATH...]` on the command line, so a caller
 #                     that is not an MCP client gets the one implementation and not a second.
 #
-# `skein-mcp requests` is `skein_requests` on the command line the same way, for the band skein's
+# `skein-mcp requests` is `skein_requests` on the command line the same way, for the line skein's
 # hooks module draws above the prompt (SKEIN-1362).
 #
 # And one makes and removes this box's lanes (SKEIN-1374):
 #
 #   skein_lane        a worktree, branch and brief per lane, recorded in the box's private
 #                     `~/.local/state/skein/lanes/`, and its removal. `skein-mcp lane
-#                     create|drop|list` is the same function on the command line, which the hooks
-#                     module's agents panel reads. Its rules are written above `lane_root`.
+#                     create|drop|list` is the same function on the command line. Its rules are written above `lane_root`.
 #
 # Three more rules carry `skein_clean`, each with a test that fails without it:
 #
@@ -1561,8 +1560,7 @@ def ask_person(args):
 # branch of its own, with its build output inside it (SKEIN-1374). skein records each one in
 # `~/.local/state/skein/lanes/<name>.json` (`lanes_dir`), carrying `"schema": 1`, and this is the
 # one implementation of making, listing and removing them: the `skein_lane` tool and `skein-mcp lane create|drop|list` on
-# the command line both call it, and the hooks module's agents panel reads `lane list`
-# (docs/decisions/skein-is-a-mod.md). skein never merges a lane and drives no merge.
+# the command line both call it. skein never merges a lane and drives no merge.
 #
 # Every lane's worktree is `<lane root>/<name>`. The lane root is `/var/tmp/skein-lanes`, because
 # `/var/tmp` is private to each box (the launcher's `vartmp` bind), so no other box sees it;

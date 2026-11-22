@@ -1,6 +1,6 @@
 // One input, one answer, at both doors of skein's lane list (docs/decisions/skein-is-a-mod.md, "The
-// shape a feature takes"): the `skein_lane` MCP tool and `skein-mcp lane list` on the command line,
-// which the hooks module's agents panel reads (SKEIN-1374).
+// shape a feature takes"): the `skein_lane` MCP tool and `skein-mcp lane list` on the command line
+// (SKEIN-1374).
 //
 // `records` are the files in `~/.local/state/skein/lanes/`, by lane name; `result` and `said` are
 // what skein answers for them. `tests/plugin_lanes.rs`

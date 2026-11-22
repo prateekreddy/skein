@@ -97,8 +97,7 @@ pub(super) async fn api_health() -> Json<serde_json::Value> {
 /// two are free to differ and neither is a copy of the other.
 ///
 /// It is also the period of [`warm_usage`], which reads the fleet once an hour with nobody asking,
-/// so each box's own spend is never older than this (SKEIN-1384). The box's band trusts that file
-/// for this hour and ten minutes more: the spend's own window in `src/plugin/hooks/band.tsx`.
+/// so each box's own spend is never older than this (SKEIN-1384).
 const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 
 /// One fleet scan at a time, across every caller.

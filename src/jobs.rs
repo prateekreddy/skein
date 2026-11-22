@@ -535,7 +535,7 @@ pub struct Pool {
     pub lent: u32,
 }
 
-/// One box's view of its jobs: what the wrapper waits on and the agents panel shows.
+/// One box's view of its jobs: what the wrapper waits on.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct View {
     #[serde(default = "schema_one")]

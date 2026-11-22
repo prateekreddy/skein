@@ -355,14 +355,6 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
     ("hooks/tracker.ts", include_str!("plugin/hooks/tracker.ts")),
     // An idle agent woken with the owner's answer to its question (SKEIN-1467).
     ("hooks/wake.ts", include_str!("plugin/hooks/wake.ts")),
-    // skein's tool results and a waiting `skein-job` drawn for the person (SKEIN-1440).
-    (
-        "hooks/tool-results.tsx",
-        include_str!("plugin/hooks/tool-results.tsx"),
-    ),
-    // The band's readers (SKEIN-1450), and the CI toasts (SKEIN-1452).
-    ("hooks/vitals.ts", include_str!("plugin/hooks/vitals.ts")),
-    ("hooks/toasts.ts", include_str!("plugin/hooks/toasts.ts")),
     // What `hooks/guide.ts` puts in the system prompt (SKEIN-1365), as the bytes of each one source:
     // the kit's box guide, the trust levels, and the shared-home rules the kit's guide writer holds.
     ("guide/kit-spec.yaml", include_str!("kit/spec.yaml")),
@@ -371,21 +363,6 @@ pub(crate) const PLUGIN_FILES: &[(&str, &str)] = &[
         include_str!("../docs/decisions/repos-are-the-trust-boundary.md"),
     ),
     ("guide/agent-guide.sh", include_str!("store/agent-guide.sh")),
-    // The agents panel (SKEIN-1361), its lane facts and price table, and the MIT notice of the
-    // mod it was adapted from, which ships with the code it covers.
-    (
-        "hooks/agents-panel.tsx",
-        include_str!("plugin/hooks/agents-panel.tsx"),
-    ),
-    (
-        "hooks/agents-panel.LICENSE",
-        include_str!("plugin/hooks/agents-panel.LICENSE"),
-    ),
-    ("hooks/lanes.ts", include_str!("plugin/hooks/lanes.ts")),
-    ("hooks/prices.ts", include_str!("plugin/hooks/prices.ts")),
-    // The skein pane and its lanes board (SKEIN-1440, step 3).
-    ("hooks/pane.tsx", include_str!("plugin/hooks/pane.tsx")),
-    ("hooks/board.ts", include_str!("plugin/hooks/board.ts")),
 ];
 
 pub(crate) fn agent_session_name(name: &str, runtime: &str) -> String {
