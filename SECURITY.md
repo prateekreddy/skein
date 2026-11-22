@@ -67,12 +67,15 @@ and the known gaps listed under their tracker items. Read it first.
 
 The design is argued in [`docs/architecture.md`](docs/architecture.md) — §9 is the trust model,
 §7 is the privilege split, and §8 is the host warden. The short version is that **a box is
-untrusted by construction.** It runs somebody's coding agent, that agent runs arbitrary code, and
-every mechanism named below exists on the assumption that it will eventually be hostile.
+accident-prone, not hostile.** skein guards against one agent's mistake damaging another's work. It
+does not defend against a box that means harm, including an agent turned by a prompt injection: the
+Docker socket alone reaches past every file cover. The threat-model page says what that accepts.
 
 ### In scope
 
-Anything that lets a box, a page, or a repository skein reads cross a line skein claims to hold:
+Anything that lets a page or a repository skein reads cross a line skein claims to hold, or lets a
+box cross one **by an ordinary mistake**. A box crossing one on purpose, by a route the threat-model
+page lists, is the accepted risk and not a vulnerability; a new route is still worth reporting.
 
 * **A box reaching another box's files, working tree, credentials or conversation.** Each box gets
   a `bwrap` namespace inside the shared sandbox; `tests/isolation_bwrap/` runs a real namespace
@@ -81,9 +84,9 @@ Anything that lets a box, a page, or a repository skein reads cross a line skein
   the Docker socket described under [Not in scope](#not-in-scope) below.
 * **A box reaching the Docker socket when the design does not mean it to, or using it to cross the
   *sandbox* boundary rather than the box one.** Today the design excludes no box from the socket:
-  an ordinary box's `/run` cover never touches `/run/docker.sock` at all (`src/box-session.sh:1736`),
-  and the workshop box reaches it too, by skipping the whole isolation block instead
-  (`src/box-session.sh:1485`, `SKEIN_BOX_PRIVILEGED=1`). A future box type the design means to
+  an ordinary box's `/run` cover never touches `/run/docker.sock` at all (`grep -n 'docker.sock'
+  src/box-session.sh`), and the workshop box reaches it too, by skipping the whole isolation block
+  instead (`SKEIN_BOX_PRIVILEGED=1`). A future box type the design means to
   exclude from the socket, reaching it anyway, is in scope. So is reaching the socket, or the
   daemon behind it, other than through an ordinary box's own crossing — from the cockpit, the
   warden, or the host — and so is using the root container the socket grants to reach past the
@@ -150,15 +153,14 @@ Not because they do not matter, but because they are the product rather than a d
   inside the bound.
 * **An ordinary box reaching the sandbox's Docker socket, or becoming root in the sandbox through
   it.** `/run/docker.sock` is left reachable on purpose: `grep -n 'docker.sock' src/box-session.sh`
-  finds only the comment that says so (`src/box-session.sh:1736`), because skein points the
-  sandbox's dockerd at the workload cgroup so that containers a box starts are accounted for
-  (architecture §9.5 R11, `docs/architecture.md:1722`). That is a complete escape from the box: a
-  root container in the sandbox, with any bind mount it asks for, reaches every other box's files,
-  the fleet root and the volume (`docs/architecture.md:1724`). A report that an ordinary box can do
+  finds only the comment that says so, because skein points the sandbox's dockerd at the workload
+  cgroup so that containers a box starts are accounted for (architecture §9.5 R11). That is a
+  complete escape from the box: a root container in the sandbox, with any bind mount it asks for,
+  reaches every other box's files, the fleet root and the volume. A report that an ordinary box can do
   this is describing the design, not a defect in it — see [In scope](#in-scope) above for what is
   still a real report about that same socket.
 * **Anything that needs host root, physical access, or an already-compromised host.** skein trusts
-  the machine it is installed on; the whole design is about not trusting what runs *inside* it.
+  the machine it is installed on; the design is about keeping what runs *inside* it from damaging each other by mistake.
 * **`SKEIN_NO_API_AUTH=1` *outside* the fleet.** It is a documented off-switch for an owner who has
   some other boundary, and it is an environment variable rather than a setting precisely so that it
   cannot be reached through the API it disarms. **Inside the fleet it is refused** (SKEIN-962): the

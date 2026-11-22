@@ -293,6 +293,9 @@ too. Process-level isolation was already there: `/proc/<pid>/{root,cwd,environ,m
 box is denied, because each box is its own user namespace. What leaked was the filesystem, and that
 is what this closes.
 
+This guards against accidents, not a box that means harm: the Docker socket is open to every box and
+reaches past these covers. [`docs/threat-model.md`](docs/threat-model.md) states the limits.
+
 Existing boxes migrate by restarting. Nothing moves on disk and no ownership changes — a running box
 keeps the namespace it was given, and gets the new one at its next start.
 
@@ -406,7 +409,7 @@ from, the credential each box holds, what the fleet may install, and every knob 
   has to pass, and the commit-message voice, which is distinctive enough that it is worth reading
   twenty of them before writing one.
 * [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately, and what counts as one in
-  a tool whose whole job is to sandbox agents. Please read the scope section: the line between a
+  a tool that runs many agents side by side. Please read the scope section: the line between a
   vulnerability and the product working as designed is not in the usual place here.
 * [`docs/threat-model.md`](docs/threat-model.md) — what a box can and cannot reach, in one table,
   with the test behind each row.

@@ -52,7 +52,7 @@ cited_by = ["docs/decisions/warden-or-prompt.md"]
 line = "### 8.3 Capabilities are compiled"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["docs/architecture.md:1811"]
+["docs/architecture.md:1812"]
 line = "everything above it.** `fleet::install_docker_config` points the sandbox's dockerd at the workload"
 cited_by = ["docs/threat-model.md"]
 
@@ -739,7 +739,12 @@ cited_by = ["docs/threat-model.md"]
 line = "seed_paths=(\".gitconfig\" \".bashrc\" \".profile\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1196"]
+["src/box-session.sh:1152"]
+line = "seed_paths=(\".codex\" \".gitconfig\" \".bashrc\" \".profile\")"
+window = "# that box writes. Existing boxes keep what they have.\u000bseed_paths=(\".codex\" \".gitconfig\" \".bashrc\" \".profile\")\u000b# **Nothing from the sandbox's home is bound read-write into a box any more** (SKEIN-1350). A list"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:1197"]
 line = "overlay_paths=(\".local\")"
 cited_by = ["docs/threat-model.md"]
 
@@ -751,15 +756,15 @@ cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 line = "merge_login \"$mine\" \"$canon\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1724"]
+["src/box-session.sh:1740"]
 line = "data[\"crossSessionInbound\"] = \"accept\""
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1872"]
+["src/box-session.sh:1888"]
 line = "binds+=(--overlay-src \"$HOME/$rel\" --tmp-overlay \"$HOME/$rel\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:1906"]
+["src/box-session.sh:1922"]
 line = "binds+=(--bind-fd \"${state_at##*/}\" \"$HOME/.local/state\")"
 cited_by = ["docs/threat-model.md"]
 
@@ -796,31 +801,35 @@ cited_by = ["docs/architecture.md", "docs/decisions/shared-home-outside-claude.m
 line = "box_shared_home=\"${SKEIN_BOX_STORE%/*}/shared-home\""
 cited_by = ["docs/decisions/shared-home-outside-claude.md"]
 
-["src/box-session.sh:2604"]
+["src/box-session.sh:2622"]
 line = "[ -n \"$repo_cache\" ] && binds+=(--bind \"$repo_cache\" \"$repo_cache\")"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:2655"]
 line = "binds+=(--bind-fd \"$repo_tools_fd\" \"$HOME/.repo-tools\")"
-cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
+cited_by = ["docs/decisions/repos-are-the-trust-boundary.md"]
 
-["src/box-session.sh:2749"]
+["src/box-session.sh:2673"]
+line = "binds+=(--bind-fd \"$repo_tools_fd\" \"$HOME/.repo-tools\")"
+cited_by = ["docs/threat-model.md"]
+
+["src/box-session.sh:2767"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2750"]
+["src/box-session.sh:2768"]
 line = "[ -d /run/secrets ] && binds+=(--tmpfs /run/secrets)"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:2813"]
+["src/box-session.sh:2831"]
 line = "[ \"$peers\" = \"1\" ] || binds+=(--tmpfs \"$peer_socks\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3054"]
+["src/box-session.sh:3072"]
 line = "binds+=(--remount-ro \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:3056"]
+["src/box-session.sh:3074"]
 line = "binds+=(--ro-bind \"$npm_prefix\" \"$npm_prefix\")"
 cited_by = ["docs/threat-model.md"]
 
@@ -840,13 +849,17 @@ cited_by = ["docs/threat-model.md"]
 line = "exec bwrap \\"
 cited_by = ["docs/threat-model.md"]
 
-["src/box-session.sh:4082"]
+["src/box-session.sh:4100"]
 line = "export DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1"
 cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:4148"]
 line = "export SKEIN_REPO_TOOLS=\"$repo_tools\" CARGO_INSTALL_ROOT=\"$repo_tools/tools\" \\"
-cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
+cited_by = ["docs/decisions/repos-are-the-trust-boundary.md"]
+
+["src/box-session.sh:4166"]
+line = "export SKEIN_REPO_TOOLS=\"$repo_tools\" CARGO_INSTALL_ROOT=\"$repo_tools/tools\" \\"
+cited_by = ["docs/threat-model.md"]
 
 ["src/config.rs:25"]
 line = "pub fn skein_home() -> PathBuf {"
