@@ -189,8 +189,8 @@ skein update-agents    update the agent CLIs every box shares (they live in the 
                       not in a box, and a running box keeps its version until next session)\n  \
 skein save [<box>…]   copy every box's work out of the sandbox onto the host, and say where\n  \
                       each one went (nothing is stopped or destroyed; name boxes for just those)\n  \
-skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
-                      (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
+skein resize <mem>    show what a rebuild at a new size costs and the host lines to run\n  \
+                      (changes nothing; `skein save` first. --disk <size> for the 20G disk)\n  \
 skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
 skein cockpit-stop    stop the cockpit; its port stays held and every box keeps running\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
@@ -1245,8 +1245,8 @@ fn cmd_doctor() -> Result<(), String> {
                 .any(|m| m.starts_with(&format!("{escaped}/")));
             let there = probe(&format!("test -d '{path}' && echo yes")) == "yes";
             let rebuild = format!(
-                "`skein resize {}` rebuilds it with the create line above and carries every box \
-                 across",
+                "Run `skein save` to copy every box's work out, then `skein resize {}` for the destroy \
+                 and create lines to run on the host; it rebuilds nothing itself",
                 match cfg.fleet_memory.trim() {
                     "" => "26g",
                     size => size,

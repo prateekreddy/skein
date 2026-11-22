@@ -537,14 +537,14 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
         // together, not on Docker. One build can then reach the VM's memory, and with no swap the
         // kernel's global OOM killer picks a victim by badness rather than by blame.
         // The fix REBUILDS the sandbox — sbx has no resize, so changing the size means a new
-        // sandbox — which is why it is marked destructive even though `skein resize` carries every
+        // sandbox, so it is marked destructive. `skein resize` only prints lines; `skein save` takes each
         // box across. Nothing may drive this on its own.
         None => HealthCheck::unsatisfied(
             "no memory ceiling anywhere: not per box, not on the boxes together, not on Docker. \
              One build can reach the VM's memory, and with no swap the kernel picks a victim by \
              badness rather than by blame",
-            "skein resize 26g   (or Settings → Fleet → Memory, at the next create; it rebuilds the sandbox and carries \
-             every box's work across)",
+            "skein save, then skein resize 26g   (prints the host commands that rebuild the sandbox; it \
+             changes nothing itself. Settings → Fleet → Memory applies at the next create)",
         )
         .destroys(),
     };
