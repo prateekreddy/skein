@@ -6,7 +6,7 @@
 //! 7 of a stack, reading it and pressing merge once merged step 6 into step 7 (SKEIN-237), which
 //! is what the base check is for.
 
-use super::{base_and_head, merge, trunk_of};
+use super::{base_and_head, trunk_of};
 
 /// Merge pull request `number`, if it is on the trunk and still at `seen_head`.
 ///
@@ -54,7 +54,7 @@ pub fn merge_by_hand(slug: &str, number: u64, seen_head: &str) -> Result<String,
             short(&live_head)
         ));
     }
-    merge(slug, number, seen_head)
+    crate::prq::merge(slug, number, seen_head)
 }
 
 /// Enough of a sha to recognise, for a sentence a person reads. `get` rather than a slice so a
