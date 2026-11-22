@@ -222,7 +222,7 @@ const ONE = { prs: [{ ...PR }] };
 
 // --- a merge names the commit the row shows, and posts at once ---------------------------------
 //
-// The one act that carries `drafted_at` (SKEIN-365): `prwork::merge_by_hand` checks the sha it is
+// The one act that carries `drafted_at` (SKEIN-365): `prq::merge_by_hand` checks the sha it is
 // given against the live head, so sending "" would leave the server to guess from a queue that may
 // have lagged — and the reader would be refused for not having read the code they were looking at.
 // Break it by making `mergeHead` "" in `revAct` and this is the check that goes red.

@@ -1835,10 +1835,8 @@ mod tests {
 
     /// A GitHub that records the request line and answers one canned commit.
     ///
-    /// A listener rather than a mock, for [`crate::prwork::testkit::github`]'s reason: the question
-    /// is what skein PUT ON THE WIRE, and only something that reads the socket can answer it. Its
-    /// own copy because that one is `pub(super)` to `prwork` and this is the only thing in
-    /// `update` that talks to GitHub at all.
+    /// A listener rather than a mock: the question is what skein PUT ON THE WIRE, and only something
+    /// that reads the socket can answer it.
     fn recording_github() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));

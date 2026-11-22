@@ -64,7 +64,7 @@ pub fn add_repo_with_token(
     }
     // **This is the one place a repo id is ever minted**, so it is the one place the id has to be
     // checked — and everything that later joins an id onto a path (`mirror_path` here,
-    // `prq::review_dir`, `prwork`'s three workflow files, `moduledocs`) reads it back out of
+    // `prq::review_dir`, `moduledocs`) reads it back out of
     // `repos.json` and is safe by that. The alternative, a guard at each join, is the shape that
     // left two review routes writing outside `~/.skein`.
     //

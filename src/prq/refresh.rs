@@ -86,8 +86,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 /// each would be a network round trip per repo per tab, which is the steady-state spend that got a
 /// live fleet rate-limited once already (see [`queue_within`]'s own note about it). Ten minutes
 /// is the badge poller's interval — the slowest thing that asks — so at worst the mirror trails the
-/// queue by one of those, and any reader that needs an exact commit still fetches for itself
-/// (`review::stand_the_change_up`).
+/// queue by one of those, and any reader that needs an exact commit still fetches for itself.
 ///
 /// Errors are dropped on purpose and this returns nothing: the caller asked for a queue. A mirror
 /// that could not be fetched is the mirror that was already there, which is what every reader had
@@ -351,10 +350,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
             );
             // A label list cut off at [`LABELS_FETCHED`] (SKEIN-373). Said out loud for the same
             // reason the truncated rollup above is: the row would otherwise show a set of labels
-            // that looks like the whole set, and `workflow::Cond::NoLabel` would answer a question
-            // about a label skein never received. The sentence names what it costs, because the
-            // cost is not a missing chip — it is a merge train that will not act, on purpose,
-            // rather than acting on a hole.
+            // that looks like the whole set.
             if !pr.labels_whole() {
                 blind_spots.push(format!(
                     "#{number}'s labels: GitHub says it has {}, skein read {} — so no workflow \
@@ -509,8 +505,8 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
 /// a test that never mentions caching would fail because of one that does.
 ///
 /// **Why it can be switched on** (SKEIN-314). Off unconditionally, no test could put a queue that
-/// is OLD in front of a caller, so three stated defences had nothing that could fail on them: the
-/// `invalidate` after a workflow acts (`crate::prwork::sweep`), the 60s-vs-600s split between the
+/// is OLD in front of a caller, so the stated defences had nothing that could fail on them: the
+/// 60s-vs-600s split between the
 /// pane and the badge poll, and anything else that turns on a queue being stale rather than
 /// absent. Each was pinned by reading the source instead — which catches a call being deleted and
 /// nothing about whether it works.

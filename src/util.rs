@@ -104,12 +104,8 @@ pub fn with_lock<T>(lock_path: &Path, f: impl FnOnce() -> Result<T, String>) -> 
 /// One function rather than the same `format!` written wherever a lock is taken, because two
 /// writers that agree on the FILE and disagree about which lock guards it is the lost update
 /// [`with_lock`] exists to prevent, with more moving parts and nothing to see in either diff.
-/// [`update_json`] takes this lock, and so does the locked read-modify-write in
-/// [`crate::prwork`], whose three files keep their own refusal wording and therefore cannot go
-/// through `update_json` itself (SKEIN-414).
-///
-/// Beside the file rather than one lock for the directory: `review/<repo>/` holds the stops, the
-/// assignments and the journal, and a shared lock would make a journal entry wait on a merge.
+/// [`update_json`] takes this lock (SKEIN-414). Beside the file rather than one lock for the
+/// directory, so a write to one file never waits on a write to its neighbour.
 pub(crate) fn lock_beside(path: &Path) -> Result<std::path::PathBuf, String> {
     let dir = path.parent().ok_or("no directory to write into")?;
     let name = path

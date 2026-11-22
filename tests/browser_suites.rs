@@ -128,11 +128,7 @@ const NODE_SUITES: [&str; 25] = [
 ];
 
 /// Needs Playwright's chromium as well.
-///
-/// `connections` is here rather than in the node tier because the thing it measures does not exist
-/// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
-/// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 22] = [
+const BROWSER_SUITES: [&str; 21] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -144,7 +140,6 @@ const BROWSER_SUITES: [&str; 22] = [
     // typed line on a question that offered options too, and answered ones under a closed row
     // until two days have passed (SKEIN-1466).
     "asks",
-    "connections",
     // A box's ask for a bigger disk allowance, approved on its card in the Decisions strip: the
     // reason as plain text, the allowance raised at once, and the box's inbox told (SKEIN-1425).
     "diskask",

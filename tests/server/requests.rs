@@ -275,15 +275,6 @@ fn the_review_queue_payload_can_be_asked_for_rows_instead_of_prose() {
     );
 }
 
-// The test that stood here — "the read route replaces a drafted review only when the caller asks"
-// — guarded a distinction that no longer exists. `force=1` re-read and kept the review the reader
-// had vetted; `redraft=1` replaced it. There is no vetted review to keep: the session posts its
-// own to GitHub, and skein stores none.
-//
-// What `redraft=1` still MEANS is `review::Review::Always` — review it even on a pull request
-// skein would not review unasked — and that is asserted where the decision is made,
-// `src/review.rs`'s `visit` tests.
-
 /// **A string from a request that becomes a host path is refused when it is not a name — and an
 /// ordinary name still works.**
 ///

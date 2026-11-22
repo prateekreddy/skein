@@ -279,18 +279,6 @@ impl Drop for CallNoted {
     }
 }
 
-/// Write down that a pull-request reading ended, and whether it finished.
-///
-/// "Finished" is a reading that produced a summary; one that came back unread — refused, out of
-/// time, a box that did not answer, an answer skein could not parse — did not, and its spend is
-/// charged to the readings that did.
-pub fn note_reading(finished: bool) {
-    append(serde_json::json!({
-        "reading": if finished { "finished" } else { "unfinished" },
-        "at": epoch_ms(),
-    }));
-}
-
 /// One call's window, as the ledger has it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {

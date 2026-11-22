@@ -125,10 +125,9 @@ pub fn re_anchor(
     comments: &[ReviewComment],
     new_diff: &str,
 ) -> (Vec<ReviewComment>, Vec<ReviewComment>) {
-    // ONE diff grammar, and it lives where the vetting happens (SKEIN-233). This was a
-    // second body with the same name: identical code, and `review::commentable` had a
-    // THIRD reading of the same bytes that lacked the `\ No newline at end of file` case
-    // and silently discarded the rest of its hunk. `prq -> review` is already declared.
+    // ONE diff grammar, and it lives where the vetting happens (SKEIN-233). A second
+    // reading of the same bytes once lacked the `\ No newline at end of file` case and silently
+    // discarded the rest of its hunk.
     let lines = right_side_lines(new_diff);
     let mut anchored = Vec::new();
     let mut displaced = Vec::new();
@@ -256,7 +255,7 @@ pub struct ReviewPost<'a> {
     pub token: &'a crate::secret::Secret,
 }
 
-/// Post one review carrying line comments — the vetted output of `crate::review::critique`.
+/// Post one review carrying line comments.
 ///
 /// `head_sha` is the LIVE head, sent as `commit_id` — always. `drafted_at` is the head the
 /// comments were drafted against; empty means "assume current". When they differ, the review is
@@ -339,8 +338,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
     }
     // **Taken rather than looked up**, which every other write in this module already does
     // (`add_label`, `merge_pr`, `update_branch`). It used to reach for the host token here, and nothing
-    // was wrong with the answer — `prwork`'s tick and the server's route both source the same one —
-    // but a credential a function reaches for is one no caller can see. The test for a verdict step
+    // was wrong with the answer, but a credential a function reaches for is one no caller can see. The test for a verdict step
     // had to set `GH_TOKEN` to make an assertion about a CEILING pass, which is the shape that says
     // a coupling is hidden rather than absent.
     //
@@ -649,8 +647,7 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
 /// the person read: GitHub answers 409 if somebody pushed in between, and this translates that 409
 /// into the sentence a reader can act on instead of leaving GitHub's own wording — *"Head branch
 /// was modified"* — to stand for it. Until SKEIN-338 this function sent `merge_method` and nothing
-/// else, while `prwork::merge_pr` beside it sent `sha`; the automated merge could not land a
-/// revision nobody had looked at and the merge a PERSON pressed could, which is the wrong way round.
+/// else, so the merge a PERSON pressed could land a revision nobody had looked at.
 ///
 /// The empty string is refused rather than defaulted to the live head because "assume current" is
 /// precisely the hole: a caller with no idea what the reader saw must say so and be stopped, not
@@ -685,7 +682,7 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
         "PUT",
         &format!("{}/pulls/{number}/merge", crate::github::repo_path(slug)),
         &token_for(slug, Need::Write)?,
-        // `sha` is the head the person read. Same field, same reason, as `prwork::merge_pr`: GitHub
+        // `sha` is the head the person read. GitHub
         // refuses with a 409 if the branch has moved, and a merge decided about code that is no
         // longer what would be merged is the one outcome this whole path exists to prevent.
         &serde_json::json!({ "merge_method": method, "sha": expected_head }),

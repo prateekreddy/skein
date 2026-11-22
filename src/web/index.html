@@ -1930,12 +1930,6 @@
             <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
             <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b>, <b>Issues: write</b> (what lets a box comment on a PR), <b>Checks: read</b> and <b>Actions: read</b> (what lets a box see whether CI passed), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
-            <!-- Whose identity a pull-request review acts with (SKEIN-516). Words approved by the owner on
-                 SKEIN-516, verbatim; "app" hands a review no token at all until an App is configured. -->
-            <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity" onchange="renderReviewIdentityNote()"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
-            <!-- Owner-approved on SKEIN-516, verbatim. Shown by `renderReviewIdentityNote` from the server's
-                 `app_ready`, which is the same `gitgate::app_credentials()` a review's credential is chosen by. -->
-            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.</p>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
 
@@ -3645,17 +3639,6 @@ let revStaleTimer = null;
 let revStaleTries = 0;
 const REV_STALE_TRIES = 5;
 
-// The day's reading budget lives on the SERVER, and only there (`review::over_budget`). The page
-// used to keep its own — six unasked readings per repo — and it was wrong twice over: it counted
-// requests rather than model calls, so a reload spent the whole allowance on free cache hits and
-// every row past the sixth went unread for ever; and every approve reloaded the pane, which handed
-// out a fresh six. A budget the client holds is a budget any client action can refill. What is left
-// here is REV_SUM_PARALLEL, which is a throttle on the burst and not a limit on the total.
-//
-// The one-hour settle gate is gone with it: the server stopped applying it (`prq::settled` is no
-// longer consulted by `review::worth_reading`) when re-anchoring by line text made a reading of a
-// moving head worth having, so a copy of the rule here would only refuse rows skein itself reads.
-
 // The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
 // is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
 //
@@ -4752,9 +4735,7 @@ function revRail(pr) {
 
 // **The one order, asked once.** The lane decides which clock a row is on, and both the sort and
 // the column it is audited by read it from here — because "how long has this waited" computed twice
-// is how the two came apart in the first place (`review::waited_since`, whose doc already says
-// "Do not invent a second order here", mirrors `revWaitedSince` field for field; the column was the
-// third implementation and the only one that disagreed).
+// is how the two came apart in the first place.
 //
 // Your move is how long it has been waiting on YOU: a head that landed after your approval is the
 // moment it came back, and a comment since then does not restart it. Every other lane is recency —
@@ -4764,9 +4745,7 @@ function revRail(pr) {
 // Asked of `moveOf` rather than of the lane (SKEIN-302), because the list is what the column
 // audits and the list mixes both roles now. On a pull request you opened, `revWaitedSince` falls
 // through to `updated_at` — your own PR has no request time, and the last touch is the comment or
-// the review that put it back in your hands. That fallthrough is why this stays one function:
-// `review::waited_since` mirrors it field for field to decide what skein reads ahead, and a second
-// clock invented here would be the third implementation of an order that already came apart once.
+// the review that put it back in your hands. That fallthrough is why this stays one function.
 function revSortAt(p) {
   return moveOf(p) === "yours" ? revWaitedSince(p) : (p.updated_at || "");
 }
@@ -5130,7 +5109,7 @@ function revAct(repo, number, kind) {
   const key = repo + "#" + number;
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
   // **The revision the reader is looking at, taken once** (SKEIN-365). The question below names it
-  // and the request sends it, out of the one value — so `prwork::merge_by_hand` refusing with "you
+  // and the request sends it, out of the one value — so `prq::merge_by_hand` refusing with "you
   // read abc1234, #41 is now at def5678" quotes back the sha the dialog put in front of the reader,
   // instead of one nothing on screen ever said.
   //
@@ -8413,18 +8392,6 @@ function gitCredRow(c) {
 // The pane's own status line. No single control can give this answer: the scope switch can be on
 // while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
 // "on" would otherwise misreport.
-// **"app" chosen with no App to act as** (SKEIN-516). The answer is the server's: `app_ready` in
-// `/api/fleet/git-grants` is `gitgate::app_credentials().is_ok()`, the very check
-// `review::asking::acting_credential` hands `choose_acting` — so this cannot say "no App" about a
-// fleet whose reviews would in fact act as one. Hidden until that payload has answered at all
-// (`app_ready` absent), rather than flashing the warning while it is in flight.
-function renderReviewIdentityNote() {
-  const note = document.getElementById("set-review-identity-note");
-  const chosen = document.getElementById("set-review-identity");
-  if (!note || !chosen) return;
-  note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
-}
-
 // **The GitHub App is missing a read it should have** (SKEIN-1344, the owner's decision of
 // 2026-10-26: the App setup requires Checks: read and Actions: read). The server learns it when a
 // token request naming them is refused and one without them is not, so pushing keeps working; this
@@ -8444,7 +8411,6 @@ function appReadsFor(slug) {
 }
 
 function renderGitState(d) {
-  renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
@@ -9059,8 +9025,6 @@ function openSettings(pane = "repos") {
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
-    document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
-    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
@@ -9782,7 +9746,6 @@ function settingsPayload() {
     fleet_one_disk: document.getElementById("set-onedisk").checked,
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
-    review_identity: document.getElementById("set-review-identity").value,
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.

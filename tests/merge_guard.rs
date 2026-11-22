@@ -1,21 +1,16 @@
 //! Every road to a merge carries the same two guards. (SKEIN-338)
 //!
-//! There were two roads and they were not equally safe. The merge train's `PUT …/merge` carried
-//! `sha` — the head skein decided about, so GitHub answers 409 rather than merging something
-//! nobody looked at — and every act it took passed
-//! `workflow::instead_of_merging_off_the_trunk`, which refuses to land a stacked child's commits
-//! on its parent's branch (SKEIN-237). The merge a PERSON pressed in the cockpit carried neither:
-//! `prq::merge` sent `{"merge_method": …}` and nothing else, and
-//! `grep -rn instead_of_merging_off_the_trunk src/` found the trunk guard reachable only from
-//! `workflow.rs` and `prwork.rs`. `$SKEIN_PR_WORKFLOWS` is off on the owner's fleet, so the road
-//! with no guards was the only road anybody was driving.
+//! The merge a PERSON pressed in the cockpit once carried neither guard: `prq::merge` sent
+//! `{"merge_method": …}` and nothing else, so it could land a commit nobody had looked at or a
+//! stacked child's commits on its parent's branch. `prq::merge_by_hand` now carries both: `sha`,
+//! the head the reader saw, so GitHub answers 409 rather than merging anything newer, and the trunk
+//! check (SKEIN-237).
 //!
-//! The behaviour is tested where it lives — `src/prwork/acts.rs` drives a posed GitHub through
-//! `merge_by_hand`, `src/prq.rs` covers the wire and the 409's wording, `src/workflow/` pins the
-//! two spellings of the trunk rule together. **What none of those can see is a THIRD merge**: a new
-//! `PUT …/merge` somewhere else, or the cockpit route quietly going back to calling `prq::merge`
-//! directly and stepping around the trunk check. Those are shape claims about the whole crate, so
-//! they are checked against the whole crate, mechanically, here.
+//! The behaviour is tested where it lives, in `src/prq/handmerge.rs` against a posed GitHub.
+//! **What that cannot see is a SECOND merge**: a new `PUT …/merge` somewhere else, or the cockpit
+//! route quietly going back to calling `prq::merge` directly and stepping around the trunk check.
+//! Those are shape claims about the whole crate, so they are checked against the whole crate,
+//! mechanically, here.
 //!
 //! Read from the source rather than from a running server on purpose. The claim is not "this merge
 //! is guarded" — a test for that passes while an unguarded second one is added beside it. The claim
@@ -116,10 +111,6 @@ fn every_merge_request_names_the_head_it_was_decided_about() {
 /// anchor and NOT the base check — half a guard, which is exactly the shape SKEIN-338 was: the
 /// cockpit route called `prq::merge` and a stacked child merged into its parent.
 ///
-/// The module graph is what makes this the right split rather than an accident of taste:
-/// `docs/modules.toml` gives `prq` no dependency on `workflow`, so the trunk rule cannot live in
-/// `prq` at all, and `prwork` — which depends on both — is where the two compose. This test is the
-/// part of that arrangement a reader cannot see from either file alone.
 #[test]
 fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
     // The walk reaches the server binary itself now that it is a directory (SKEIN-1103); it used
@@ -148,12 +139,9 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
          function nobody uses, or the cockpit lost its merge entirely"
     );
 
-    // Found rather than named: `merge_by_hand` moved from `src/prwork.rs` to
-    // `src/prwork/acts.rs` when that module became a directory (SKEIN-578), and a hard-coded path
-    // would have panicked on the directory rather than reported anything about the guard. The
-    // line arithmetic below is per-file, so this has to be the ONE file holding it, not the
-    // module's text joined — `callers` carries per-file line numbers too.
-    let (holder, prwork) = all
+    // Found rather than named, so a move reports on the guard instead of panicking on a path. The
+    // line arithmetic below is per-file, so this has to be the ONE file holding it.
+    let (holder, body) = all
         .iter()
         .find(|(_, text)| text.contains("pub fn merge_by_hand"))
         .cloned()
@@ -161,16 +149,16 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
             "merge_by_hand has been renamed or removed — the trunk guard on the hand path is \
              gone with it",
         );
-    let guarded = prwork
+    let guarded = body
         .find("pub fn merge_by_hand")
         .expect("just found it above");
     // Where the NEXT item begins: a call after this is in some other function.
-    let after = prwork[guarded..]
+    let after = body[guarded..]
         .find("\n}\n")
         .map(|n| guarded + n)
-        .unwrap_or(prwork.len());
+        .unwrap_or(body.len());
     let inside: Vec<usize> =
-        (prwork[..guarded].lines().count() + 1..=prwork[..after].lines().count()).collect();
+        (body[..guarded].lines().count() + 1..=body[..after].lines().count()).collect();
 
     for (file, line) in &callers {
         assert_eq!(

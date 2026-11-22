@@ -102,7 +102,7 @@ function revAct(repo, number, kind) {
   const key = repo + "#" + number;
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
   // **The revision the reader is looking at, taken once** (SKEIN-365). The question below names it
-  // and the request sends it, out of the one value — so `prwork::merge_by_hand` refusing with "you
+  // and the request sends it, out of the one value — so `prq::merge_by_hand` refusing with "you
   // read abc1234, #41 is now at def5678" quotes back the sha the dialog put in front of the reader,
   // instead of one nothing on screen ever said.
   //

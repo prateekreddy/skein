@@ -141,9 +141,7 @@ function revRail(pr) {
 
 // **The one order, asked once.** The lane decides which clock a row is on, and both the sort and
 // the column it is audited by read it from here — because "how long has this waited" computed twice
-// is how the two came apart in the first place (`review::waited_since`, whose doc already says
-// "Do not invent a second order here", mirrors `revWaitedSince` field for field; the column was the
-// third implementation and the only one that disagreed).
+// is how the two came apart in the first place.
 //
 // Your move is how long it has been waiting on YOU: a head that landed after your approval is the
 // moment it came back, and a comment since then does not restart it. Every other lane is recency —
@@ -153,9 +151,7 @@ function revRail(pr) {
 // Asked of `moveOf` rather than of the lane (SKEIN-302), because the list is what the column
 // audits and the list mixes both roles now. On a pull request you opened, `revWaitedSince` falls
 // through to `updated_at` — your own PR has no request time, and the last touch is the comment or
-// the review that put it back in your hands. That fallthrough is why this stays one function:
-// `review::waited_since` mirrors it field for field to decide what skein reads ahead, and a second
-// clock invented here would be the third implementation of an order that already came apart once.
+// the review that put it back in your hands. That fallthrough is why this stays one function.
 function revSortAt(p) {
   return moveOf(p) === "yours" ? revWaitedSince(p) : (p.updated_at || "");
 }

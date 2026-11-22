@@ -184,8 +184,7 @@ pub(crate) fn stop_script(name: &str, rec: &crate::place::PlaceRecord) -> String
 ///
 /// **`python3`, because a shell has no way to open an `AF_UNIX` socket** — no redirection, no
 /// builtin. A sandbox without python3 answers "nothing is listening", and that is the direction
-/// every caller already degrades in: `box_is_ready` says so out loud ("the caller's fallback is to
-/// start the box, which is what it did unconditionally before"), and a launch that finds no session
+/// every caller already degrades in: a launch that finds no session
 /// runs the launcher, which refuses rather than starting a second one. There is deliberately no
 /// `tmux` fallback for a fleet without python3: a fallback that restores the exposure is a way to
 /// ask for it.

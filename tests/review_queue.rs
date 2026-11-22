@@ -758,7 +758,7 @@ fn a_pull_request_with_more_labels_than_the_page_says_how_many_it_lost() {
     assert!(
         spot.contains("no-label"),
         "the blind spot must say what the truncation COSTS — `no-label:` conditions stop holding \
-         on this pull request, so a merge train that looked stuck has a reason here: {spot}"
+         on this pull request, so a pull request that looked stuck has a reason here: {spot}"
     );
 
     // The counter-case: nothing was lost, so nothing is said.

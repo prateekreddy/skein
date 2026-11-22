@@ -856,9 +856,9 @@ fn scratch_dir(what: &str) -> std::path::PathBuf {
 /// This binary's source, EVERY file of it, for the tests that read the server as text.
 ///
 /// It was one file, and they read it with `include_str!` of that file. Re-rooting each to the one
-/// file its subject lives in now would read less than it did: `the_route_the_pane_opens_is_what_prunes`
-/// counts the callers of `review::prune` across the whole server, and a second caller in a sibling
-/// file is exactly what it exists to catch (SKEIN-1103). So the directory is read rather than a list
+/// file its subject lives in now would read less than it did: a check
+/// that counts callers across the whole server must see a second caller in a sibling file
+/// (SKEIN-1103). So the directory is read rather than a list
 /// of it, and a file added later is read without anybody remembering to add it.
 ///
 /// `main.rs` first and the rest by name. A read that finds `main.rs` alone refuses: a `!contains`

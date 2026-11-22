@@ -47,17 +47,6 @@ let revStaleTimer = null;
 let revStaleTries = 0;
 const REV_STALE_TRIES = 5;
 
-// The day's reading budget lives on the SERVER, and only there (`review::over_budget`). The page
-// used to keep its own — six unasked readings per repo — and it was wrong twice over: it counted
-// requests rather than model calls, so a reload spent the whole allowance on free cache hits and
-// every row past the sixth went unread for ever; and every approve reloaded the pane, which handed
-// out a fresh six. A budget the client holds is a budget any client action can refill. What is left
-// here is REV_SUM_PARALLEL, which is a throttle on the burst and not a limit on the total.
-//
-// The one-hour settle gate is gone with it: the server stopped applying it (`prq::settled` is no
-// longer consulted by `review::worth_reading`) when re-anchoring by line text made a reading of a
-// moving head worth having, so a copy of the rule here would only refuse rows skein itself reads.
-
 // The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
 // is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
 //

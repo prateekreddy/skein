@@ -54,10 +54,9 @@ pub(crate) fn claude_oneshot(prompt: &str) -> Option<String> {
 /// degrades to "read it yourself" rather than to a wrong answer, but degrades all the same.
 ///
 /// **This function does not check whether AI is switched on — its caller must.** There are two
-/// budgets now and they default opposite ways: [`ai_enabled`] gates the background enrichment that
-/// runs whether or not you asked for it, while [`crate::review::summaries_enabled`] gates reading a
-/// PR you have already opened a queue to look at. A single gate in here would force one policy on
-/// both, and the wrong one on whichever it wasn't written for.
+/// switches and they default opposite ways: [`ai_enabled`] gates the background enrichment that
+/// runs whether or not you asked for it, while [`summaries_enabled`] gates a module note you
+/// pressed for. A single gate in here would force one policy on both.
 ///
 /// `None` on every failure path: absent binary, non-zero exit, timeout, or empty output. Callers
 /// must treat `None` as "fall back", never as an answer.
@@ -80,11 +79,8 @@ pub(crate) fn claude_oneshot_with(
 /// caller has a bug. Measured 2026-09-08 against 27 real pull requests, reconstructed from the
 /// owner's own review store and put through the real prompt builders: the largest prompt skein has
 /// ever built was 305,366 bytes — one pull request of the busiest repository in that store, whose
-/// 510,931-byte diff was truncated to
-/// `review::asking::CRITIQUE_BYTES` — and the largest it *can* build is that truncation plus the
-/// merged prompt's 4,858-byte scaffold plus the author's description — a little over 313,000. One
-/// mebibyte is three times the ceiling of the design, which is room for the diff budgets to grow
-/// before anybody has to think about this again, and small enough that a prompt built by accident
+/// 510,931-byte diff was truncated. One
+/// mebibyte is three times that, and small enough that a prompt built by accident
 /// is refused in a sentence rather than spent as a fifteen-minute model call.
 ///
 /// **Checked once, at the fork in [`claude_in_turn`], and not in either destination** (SKEIN-706).

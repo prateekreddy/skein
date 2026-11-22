@@ -32,15 +32,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// The modules whose `Serialize` structs are queue payloads: the queue, the merge train, the
-/// review pane, the contract signals. Widening the gate is adding a module here.
+/// The modules whose `Serialize` structs are queue payloads: the queue and the contract
+/// signals. Widening the gate is adding a module here.
 ///
 /// **Modules, not files** — each entry is read by [`read_unit`], which takes `src/<name>.rs` and
 /// `src/<name>/**.rs` together. A module that outgrows one file and becomes a directory is still
-/// one module, and this gate went blind to `src/prwork` the moment it was split (SKEIN-578): the
-/// hard-coded `src/prwork.rs` would have panicked on a directory, and naming the submodules one by
+/// one module, and a hard-coded file would panic on a
+/// directory the moment its module was split (SKEIN-578), and naming the submodules one by
 /// one would have made every future split a silent hole in the census instead of a loud failure.
-const PAYLOAD_UNITS: [&str; 4] = ["src/prq", "src/prwork", "src/review", "src/contracts"];
+const PAYLOAD_UNITS: [&str; 2] = ["src/prq", "src/contracts"];
 
 /// **The page is two files, and reading one of them was a bug in this gate** (SKEIN-328).
 ///
