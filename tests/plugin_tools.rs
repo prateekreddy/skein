@@ -2079,10 +2079,10 @@ fn contract_box(case: &Value) -> (Box_, Vec<String>, String) {
 }
 
 /// **One input gives one answer at both doors of skein's clean**: the `skein_clean` MCP tool, and
-/// `skein-mcp clean` on the command line, which the hooks module's `clean` tool runs
+/// `skein-mcp clean` on the command line, which `/skein clean PATH` runs
 /// (docs/decisions/skein-is-a-mod.md, SKEIN-1362). Each is held to the answer
-/// `src/plugin/tests/clean-contract.ts` writes down, and `band.test.tsx` holds the hooks module's
-/// tool to the same answer given the command line's output, so the three cannot drift apart.
+/// `src/plugin/tests/clean-contract.ts` writes down, and `band.test.tsx` holds `/skein clean PATH`
+/// to the same sentence given the command line's output, so the three cannot drift apart.
 ///
 /// What would make it fail: a removal, a refusal or its sentence changed at one door and not the
 /// other (the command line building its own answer rather than calling `clean`), a refusal that
@@ -2137,7 +2137,7 @@ fn both_doors_of_clean_give_the_contracts_answer() {
     }
 }
 
-/// **`skein-mcp requests` on the command line is the `skein_requests` tool**, for the band the
+/// **`skein-mcp requests` on the command line is the `skein_requests` tool**, for the line the
 /// hooks module draws above the prompt (SKEIN-1362): the same rows, the same states, read the same
 /// way, and only the inbox's word is an answer.
 ///

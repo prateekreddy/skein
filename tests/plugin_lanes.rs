@@ -326,9 +326,8 @@ fn contract() -> Value {
 }
 
 /// **One input gives one answer at both doors of skein's lane list**: the `skein_lane` MCP tool,
-/// and `skein-mcp lane list` on the command line, which the agents panel reads. Each is held to the
-/// answer `src/plugin/tests/lane-contract.ts` writes down, and `agents-panel.test.tsx` holds the
-/// panel to the lanes in that answer, so the three cannot drift apart.
+/// and `skein-mcp lane list` on the command line. Each is held to the answer
+/// `src/plugin/tests/lane-contract.ts` writes down, so the two cannot drift apart.
 ///
 /// What would make it fail: the command line building its own answer rather than calling the
 /// tool's function, a refusal said at one door and not the other, or the contract no longer saying

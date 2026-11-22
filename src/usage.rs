@@ -123,9 +123,6 @@ pub struct Price {
 /// would otherwise price them as `claude-opus-5` and `claude-sonnet-5`. For Sonnet the numbers are
 /// the same; for Opus 5.5 they are lower, and before its row it read 25% dear.
 ///
-/// The agents panel in the box's hooks module prices with this same table, copied row for row into
-/// `src/plugin/hooks/prices.ts`; `the_mods_price_table_is_usages` holds the two equal.
-///
 /// **What is deliberately absent.** `claude-mythos-5-1` and `claude-sonnet-4-5` are used by this
 /// fleet or adjacent to it and are *not* here, because their cache-read rate is either unsettled or
 /// not something this file can cite. Nor is `claude-haiku-5-5`, whose price depends on the length
@@ -1701,57 +1698,6 @@ mod tests {
             "but they are still counted as tokens"
         );
         assert!(!r.models[0].priced, "the model row says it was not priced");
-    }
-
-    /// The agents panel's price table (`src/plugin/hooks/prices.ts`) is this one, row for row.
-    ///
-    /// Fails if a row is added, dropped or changed on one side only, if a row there no longer reads
-    /// as `['<model>', in, out, read, write_5m, write_1h],`, or if the two dates differ: the box
-    /// would then show a subagent's cost on prices the cockpit does not use.
-    #[test]
-    fn the_mods_price_table_is_usages() {
-        let source = include_str!("plugin/hooks/prices.ts");
-        let date = source
-            .lines()
-            .find_map(|l| l.strip_prefix("export const PRICES_AS_OF = '"))
-            .and_then(|rest| rest.strip_suffix('\''))
-            .expect("prices.ts states PRICES_AS_OF");
-        assert_eq!(date, PRICES_AS_OF);
-
-        let rows: Vec<(String, [f64; 5])> = source
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.starts_with("['claude-"))
-            .map(|l| {
-                let inner = l
-                    .strip_prefix('[')
-                    .and_then(|r| r.strip_suffix("],"))
-                    .unwrap_or_else(|| panic!("a row that does not read as one: {l}"));
-                let mut parts = inner.split(',').map(str::trim);
-                let model = parts.next().unwrap().trim_matches('\'').to_string();
-                let nums: Vec<f64> = parts
-                    .map(|n| n.parse().unwrap_or_else(|_| panic!("not a number in {l}")))
-                    .collect();
-                let nums: [f64; 5] = nums
-                    .try_into()
-                    .unwrap_or_else(|_| panic!("five prices in {l}"));
-                (model, nums)
-            })
-            .collect();
-        let ours: Vec<(String, [f64; 5])> = PRICES
-            .iter()
-            .map(|(m, p)| {
-                let prices = [
-                    p.input,
-                    p.output,
-                    p.cache_read,
-                    p.cache_write_5m,
-                    p.cache_write_1h,
-                ];
-                (m.to_string(), prices)
-            })
-            .collect();
-        assert_eq!(rows, ours);
     }
 
     /// Opus 5.5 is priced as itself, not as Opus 5 through the prefix rule.

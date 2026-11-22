@@ -69,9 +69,10 @@ bound read-only as a box binds it, and a stand-in `resources.json` asking for a 
   imports it under the feature's name and calls it in one line. A direct call, never a loop over a
   list: `claude plugin validate` reads the module's source and refuses a call it cannot trace.
 - An event that more than one feature only watches is hooked once, bare, in `register.tsx`:
-  `session.start`, `agent.spawn`, `turn.step`, `turn.complete`, `tool.call` today, and any other
+  `session.start`, `turn.start`, `turn.complete`, `tool.call`, `session.measure` and `session.end`
+  today, and any other
   the moment a second feature needs it. That hook calls `next(e)` itself, once, then calls each
-  feature's exported `on<Event>` (`onStart($, e)`, `onSpawn($, e, started)`) in the order written
+  feature's exported `on<Event>` (`onStart($, e)`, `onTurnComplete($, e)`) in the order written
   there, each passed by if it fails, so the order the features hear an event is read in one place.
   A hook that refuses or rewrites, where its place in the chain and its `next` matter, stays in its
   feature file under a real matcher of its own: a tool, a command, a component, a pane's id.
@@ -91,8 +92,8 @@ bound read-only as a box binds it, and a stand-in `resources.json` asking for a 
 - A feature that wraps something a box can already do (clean its own disk, link the fleet's
   browsers, restart onto a new CLI after the turn) has one implementation: the box-side entry
   point. The `skein_*` MCP tool calls it for Codex and for a CLI without mods; the mod feature calls
-  the same entry point through `$.process.run`, and adds what only a mod can (a `$.tool.register`
-  tool, a band button, a `/skein` command, firing on `session.measure`, `turn.complete` or a timer).
+  the same entry point through `$.process.run`, and adds what only a mod can (a `/skein` command,
+  firing on `session.measure`, `turn.complete` or a timer).
   A contract test drives both doors with one input and holds them to one answer.
 
 **Limits.**
@@ -115,6 +116,14 @@ to run on any other; the fleet fetches that same version into its depot, tests i
 script, and rolls out no other claude-code version to its boxes
 (`docs/decisions/versions-roll-out-when-idle.md`). So moving a box to a newer build is a reviewed
 commit to that file, whose CI checks the mod first, and then the owner's "Roll out".
+
+**What the terminal draws (2026-11, the owner's decision 9, SKEIN-1512).** One line above the prompt
+saying what waits on the person, and nothing when nothing waits (`hooks/band.tsx`). Everything else
+a person reads about a box is the web cockpit's: the pane, the agents panel, the redrawn tool
+results and the toasts this record's phase 3 built were deleted. The mod keeps what only it can do
+for the agent and the host: the session's state, the guide, the keeper, the wake and the tracker's
+status line. `/skein clean` stays because the cockpit removes build output and scratchpads only from
+a stopped box.
 
 **Rules out.** A second hooks module in the plugin (the engine refuses one). Removing a command hook
 because a mod version exists, before that version is proven in a box. Writing a feature's logic

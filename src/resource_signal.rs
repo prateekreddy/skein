@@ -281,7 +281,7 @@ pub struct Signals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_ask: Option<DiskAskView>,
     /// What skein tells this box's agent and asks nothing for (SKEIN-1455). Apart from `asks` so
-    /// that nothing which reads `asks` for the person, in the band, the pane or a toast, ever
+    /// that nothing which reads `asks` for the person, the band above the prompt among them, ever
     /// shows one: a note is the agent's to act on. The plugin's hooks say each once per crossing,
     /// and never hold a command for one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -321,8 +321,8 @@ case "$cmd" in
 
   unread)
     # Read-only, so it takes no lock: a message marked while this counts is off by one until the
-    # next count, and nothing is marked or pruned here. Read by skein's band above the prompt
-    # (SKEIN-1362), which must never deliver mail itself: delivery is the turn-boundary hooks'.
+    # next count, and nothing is marked or pruned here. A count must never deliver mail
+    # itself (SKEIN-1362): delivery is the turn-boundary hooks'.
     n=0
     for f in "$box"/*.json; do
       [ -e "$f" ] || break
