@@ -51,9 +51,7 @@ pub use credentials::{
     slug_for_write, token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
 };
 pub use handmerge::merge_by_hand;
-pub use refresh::{
-    counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue,
-};
+pub use refresh::{counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue};
 pub use search::forget_batch_widths;
 pub use store::{
     archived, move_set_aside_aside, remembered, remembered_head, review_dir, set_archived,

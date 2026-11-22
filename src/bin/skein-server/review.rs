@@ -8,9 +8,7 @@ use super::*;
 pub(super) async fn api_review_merged(Query(q): Query<HashMap<String, String>>) -> Response {
     let force = q.get("force").is_some_and(|v| v == "1" || v == "true");
     match tokio::task::spawn_blocking(move || skein::prq::merged(force)).await {
-        Ok(m) => {
-            Json(m).into_response()
-        }
+        Ok(m) => Json(m).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -522,5 +520,4 @@ pub(super) mod review_routes {
             "the background refresh is gone, or no longer spelled the way this reads it:\n{block}"
         );
     }
-
 }

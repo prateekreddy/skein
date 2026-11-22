@@ -1,6 +1,5 @@
 //! Which session a model call is filed under, and the hash a test's session id is made from.
 
-
 /// Which session a model call is filed under.
 ///
 /// [`Turn::Alone`] is a fresh context, thrown away. [`Turn::Labelled`] is the same call with a

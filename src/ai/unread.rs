@@ -472,5 +472,4 @@ mod tests {
 
         env::set_var("PATH", real_path);
     }
-
 }

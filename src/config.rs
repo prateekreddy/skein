@@ -664,8 +664,7 @@ fn default_fleet_memory() -> String {
     "26g".to_string()
 }
 
-impl Config {
-}
+impl Config {}
 
 /// Every field here calls the SAME function its `#[serde(default = …)]` names.
 ///

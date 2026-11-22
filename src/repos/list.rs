@@ -720,13 +720,7 @@ mod tests {
             ..Default::default()
         }])
         .unwrap();
-        assert!(set_repo_settings(
-            "web",
-            Some("the backlog one"),
-            None,
-            None
-        )
-        .is_err());
+        assert!(set_repo_settings("web", Some("the backlog one"), None, None).is_err());
         assert_eq!(
             load_repos()[0].plane_project,
             "",
@@ -850,7 +844,7 @@ mod tests {
     /// `save_repos` refuses too, because a whole-list save reaches the same file.
     ///
     /// `update_repos` is the locked path and the one `add_repo` takes; this is the unlocked shape
-    /// beside it — read the list somewhere, change a field, `save_repos(&repos)`. 
+    /// beside it — read the list somewhere, change a field, `save_repos(&repos)`.
     /// `tracking::migrate_legacy_sync_config` still has it, and could otherwise write a default over
     /// a file it could not read.
     #[test]

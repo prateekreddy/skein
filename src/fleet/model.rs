@@ -1,6 +1,5 @@
 //! Where a model call keeps its scratch directory, and the environment it must not inherit.
 
-
 /// Where a model call skein makes keeps its scratch: under the HOME skein already chose for it.
 ///
 /// **Why skein decides this rather than the CLI.** Claude Code puts its temp directory at
@@ -88,4 +87,3 @@ pub fn model_scratch_export() -> String {
         "if [ -n \"${{HOME:-}}\" ]; then export CLAUDE_CODE_TMPDIR=\"$HOME/{MODEL_SCRATCH}\"; fi"
     )
 }
-

@@ -955,7 +955,6 @@ mod tests {
             .expect("help")
             .contains("no subcommands"));
     }
-
 }
 
 /// Does the cockpit only ask for routes this server serves? (SKEIN-246)
@@ -1542,16 +1541,6 @@ mod cockpit_routes {
                 "POST",
                 "a repo's declared CI build output and its cap (SKEIN-1476), set by the owner \
                  through the API until the repo card has its control, SKEIN-1478",
-            ),
-            (
-                "/api/repos/:id/review/:number/triggers",
-                "POST",
-                "§10's per-pull-request trigger override, deliberately with no page caller yet. \
-                 The MECHANISM is the part that was missing — the repo's set was the only one a \
-                 pull request could be governed by — and what it should look like on a row is the \
-                 owner's call rather than this build's: a picker over the trigger words is a \
-                 surface, and skein has a rule about inventing those. Reachable by API and by the \
-                 workflow file until then",
             ),
             (
                 "/api/repos/:id/review",

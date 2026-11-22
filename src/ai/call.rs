@@ -566,13 +566,7 @@ mod tests {
 
         let over = "x".repeat(PROMPT_CEILING + 1);
         forget_refusal();
-        let refused = claude_in_turn(
-            &over,
-            Some("m"),
-            Duration::from_secs(30),
-            Turn::Alone,
-            None,
-        );
+        let refused = claude_in_turn(&over, Some("m"), Duration::from_secs(30), Turn::Alone, None);
         assert_eq!(
             refused,
             Err(Unread::TooLarge {
@@ -1009,5 +1003,4 @@ mod tests {
 
         forget_refusal();
     }
-
 }
