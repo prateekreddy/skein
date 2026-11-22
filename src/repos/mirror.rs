@@ -635,7 +635,6 @@ mod tests {
         // Registered WITHOUT going through `add_repo`, which would make the mirror as a side effect
         // and leave nothing for the racing readers to do.
         let repo = Repo {
-            read_prs: false,
             id: "proj".into(),
             source: checkout.to_string_lossy().to_string(),
             store: home.join("store").to_string_lossy().to_string(),
@@ -687,7 +686,6 @@ mod tests {
 
         let checkout = tempdir();
         let repo = Repo {
-            read_prs: false,
             id: "proj".into(),
             source: checkout.to_string_lossy().to_string(),
             store: home.join("store").to_string_lossy().to_string(),

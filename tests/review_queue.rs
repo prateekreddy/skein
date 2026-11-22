@@ -148,7 +148,6 @@ fn repo(id: &str) -> skein::repos::Repo {
         id: id.into(),
         // Reading unattended is off unless somebody says so, per repo — the queue tests are about
         // what the queue SAYS, not about what skein would go and read from it.
-        read_prs: false,
         source: "https://github.com/acme/thing.git".into(),
         store: "/nonexistent".into(),
         plane_project: String::new(),

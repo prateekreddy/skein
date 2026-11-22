@@ -13,10 +13,6 @@ pub(super) struct RepoSettingsReq {
     sync_connection: Option<String>,
     /// whether this repo has a review queue the badge may poll
     review_queue: Option<bool>,
-    /// may the reviewer engine act on this repo at all — `docs/pr-review.md` §10, layer 3
-    auto_review: Option<bool>,
-    /// how far it may go unattended: none | comment | changes | approve
-    auto_review_ceiling: Option<String>,
     /// the branch a new box of this repo starts from; empty = the remote's default
     base_branch: Option<String>,
     /// the kinds of project this repo is, which decide its boxes' shared caches (SKEIN-1373):
@@ -57,10 +53,6 @@ pub(super) async fn api_set_repo_settings(
         req.plane_project.as_deref(),
         req.sync_connection.as_deref(),
         req.review_queue,
-        skein::repos::ReviewerSettings {
-            auto_review: req.auto_review,
-            ceiling: req.auto_review_ceiling,
-        },
     ) {
         Ok(repo) => Json(repo).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error).into_response(),

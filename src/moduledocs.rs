@@ -24,7 +24,7 @@
 //!
 //! # What they are for
 //!
-//! Answering *your* questions ([`crate::review::ask`]), not writing summaries. A summary is about a
+//! Answering *your* questions, not writing summaries. A summary is about a
 //! diff and the diff carries its own before-state; a question is usually about the thing the diff
 //! landed in, which the diff cannot show. They are deliberately **not** fed into every summary:
 //! that would multiply the cost of the one path that runs thirty times a day to improve the path
@@ -326,7 +326,7 @@ fn collect(tree: &crate::repos::Tree, module: &str) -> Vec<String> {
 /// Returns an error rather than a stale note when the model is unavailable: a caller that wanted
 /// current context is better served by knowing it does not have it.
 pub fn write(repo: &Repo, module: &str) -> Result<Doc, String> {
-    if !crate::review::summaries_enabled() {
+    if !crate::ai::summaries_enabled() {
         return Err(
             "reading is switched off — turn \"Read pull requests\" back on in Settings → Boxes."
                 .into(),
@@ -498,7 +498,6 @@ mod tests {
         git(&work, &["add", "-A"]);
         git(&work, &["commit", "-q", "-m", "one"]);
         let repo = Repo {
-            read_prs: false,
             id: "r".into(),
             // Adopted in place, not a URL: the mirror's origin is then this checkout, so
             // `publish()` fetches from a path on disk instead of reaching for the network.

@@ -584,9 +584,6 @@ pub struct Queue {
     pub repo_id: String,
     pub slug: String,
     pub viewer: String,
-    /// Is skein allowed to read PRs? Without it every summary is [`crate::review::Depth::Unread`],
-    /// so the page says so once instead of asking the server thirty times to be told the same thing.
-    pub ai: bool,
     pub prs: Vec<Pr>,
     /// What this queue could **not** see, in plain words.
     ///

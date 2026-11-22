@@ -763,16 +763,6 @@ fn it_conflicts_with_its_base(number: u64, said: String) -> String {
 ///
 /// The gate [`it_conflicts_with_its_base`] above states in full, and nothing but the gate — the
 /// rule written out there is what this holds, and the paragraphs there are its documentation.
-///
-/// **Shared because the wire shape is one fact and the sentence is two.** There are two merges in
-/// this crate: [`merge`], which a person presses, and `prwork::merge_pr`, which a train drives, and
-/// SKEIN-423 is the second one arriving at the same 405. What they must agree about is which
-/// answers from GitHub *are* this refusal — that is knowledge of `crate::github`'s two wrappers,
-/// and a second copy of it is a second thing to miss when a wrapper changes. What they must NOT
-/// share is the words: "resolve them on the branch, push, then merge" is advice to somebody
-/// standing at a button, and the reader of a stop is somebody who was not watching, reading later.
-/// So the predicate is `pub(crate)` and each caller writes its own sentence
-/// (`prwork::conflicts_stopped_the_train` is the other one).
 pub(crate) fn refused_for_conflicts(said: &str) -> bool {
     let refused = said.starts_with("GitHub said 405") || said.starts_with("GitHub answered 405");
     refused && said.to_ascii_lowercase().contains("conflict")

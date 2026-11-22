@@ -1340,7 +1340,6 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
-            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -1418,7 +1417,6 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
-            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -1491,7 +1489,6 @@ mod tests {
         // A *registered* repo with nothing picked is not a gap: it is "not tracked", and no number
         // of connections may override that.
         save_repos(&[Repo {
-            read_prs: false,
             id: "stray".into(),
             source: "/s".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -1527,7 +1524,6 @@ mod tests {
         .unwrap();
         fs::write(dir.join("plane-token"), "skein-test-plane-secret\n").unwrap();
         let repo = |id: &str, gw: &str| Repo {
-            read_prs: false,
             id: id.into(),
             source: format!("/src/{id}"),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -1616,7 +1612,6 @@ mod tests {
         )
         .unwrap();
         save_repos(&[Repo {
-            read_prs: false,
             id: "web".into(),
             source: "/src/web".into(),
             store: dir.join("store").to_string_lossy().into_owned(),
@@ -2302,7 +2297,6 @@ mod tests {
         }])
         .unwrap();
         let repo = Repo {
-            read_prs: false,
             id: "r1".into(),
             source: "s".into(),
             store: store.display().to_string(),

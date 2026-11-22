@@ -122,7 +122,6 @@ mod tests {
         git(&["commit", "-q", "--allow-empty", "-m", "one"]);
 
         save_repos(&[Repo {
-            read_prs: false,
             id: "adopted".into(),
             // A path, the way a repos.json written before URLs-only still reads.
             source: work.to_string_lossy().into_owned(),

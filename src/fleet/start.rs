@@ -1572,7 +1572,6 @@ mod tests {
             fs::create_dir_all(store.join(dir)).unwrap();
         }
         let repo = Repo {
-            read_prs: false,
             id: "bridge".into(),
             source: String::new(),
             store: store.to_string_lossy().into_owned(),
@@ -1705,7 +1704,6 @@ mod tests {
         let store = home.join("store");
         std::fs::create_dir_all(&store).unwrap();
         crate::repos::save_repos(&[crate::repos::Repo {
-            read_prs: false,
             id: "web".into(),
             source: "https://example.invalid/web.git".into(),
             store: store.to_string_lossy().into_owned(),

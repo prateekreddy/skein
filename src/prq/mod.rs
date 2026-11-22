@@ -52,7 +52,7 @@ pub use credentials::{
 };
 pub use handmerge::merge_by_hand;
 pub use refresh::{
-    counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,
+    counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue,
 };
 pub use search::forget_batch_widths;
 pub use store::{
@@ -70,7 +70,6 @@ pub use write::{
 };
 
 pub(crate) use types::newest_first;
-pub(crate) use write::refused_for_conflicts;
 
 #[cfg(test)]
 pub(crate) use refresh::CachedQueues;

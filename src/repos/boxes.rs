@@ -197,7 +197,6 @@ mod tests {
         env.set("SKEIN_HOME", &home);
         let repos = vec![
             Repo {
-                read_prs: false,
                 id: "web".into(),
                 source: "s".into(),
                 store: "/s".into(),
@@ -208,7 +207,6 @@ mod tests {
                 ..Default::default()
             },
             Repo {
-                read_prs: false,
                 id: "web-api".into(),
                 source: "s".into(),
                 store: "/s".into(),
@@ -335,7 +333,6 @@ mod tests {
         let store = home.join("st").join(".claude");
         fs::create_dir_all(&store).unwrap();
         let repos = vec![Repo {
-            read_prs: false,
             id: "thing".into(),
             source: "s".into(),
             store: store.to_string_lossy().to_string(),

@@ -233,7 +233,6 @@ mod tests {
         symlink("CASE_PREP.md", box_home.join("shortcut")).unwrap();
 
         save_repos(&[Repo {
-            read_prs: false,
             id: "demo".into(),
             source: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),

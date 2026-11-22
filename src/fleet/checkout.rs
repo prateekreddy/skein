@@ -513,7 +513,6 @@ mod tests {
         git(&origin, &["commit", "-m", "one"]);
 
         let repo = Repo {
-            read_prs: false,
             id: "bridge".into(),
             source: origin.to_string_lossy().into_owned(),
             store: String::new(),

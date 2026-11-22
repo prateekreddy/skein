@@ -443,7 +443,6 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         slug,
         trunk,
         viewer: login,
-        ai: crate::review::summaries_enabled(),
         prs,
         blind_spots,
         unreadable_set_aside,
@@ -617,16 +616,6 @@ pub struct Count {
     /// the pane and notice the repo was missing from it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub skipped: String,
-    /// PRs whose workflow has stopped and is waiting on a person — the merge train's skips. On the
-    /// badge poll rather than the pane's answer, because the pane is only open when somebody is
-    /// already looking: this is the row that has to reach them when they are not.
-    ///
-    /// **Filled by the counts route, not here.** The stops live in `prwork`'s file, and `prq`
-    /// reading them would put `prq` inside the module cycle (`docs/modules.toml`); the server
-    /// already stands on both modules, so the decoration is its one line. Everything `prq` builds
-    /// leaves this empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stopped: Vec<StoppedPr>,
     /// What this repo's queue could **not** see, in the queue's own words — carried onto the
     /// badge rather than left behind in the pane.
     ///
@@ -642,15 +631,6 @@ pub struct Count {
     /// Empty means the count is whole, and that is the only case a bare number may be drawn for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blind_spots: Vec<String>,
-}
-
-/// One pull request a workflow has stopped on, and why — the shape the counts poll carries to the
-/// cockpit's banner row. Defined here beside [`Count`], the payload it rides in; `prwork::stops`
-/// produces it, because the stops file is that module's.
-#[derive(Debug, Clone, Serialize)]
-pub struct StoppedPr {
-    pub number: u64,
-    pub why: String,
 }
 
 /// Take the count for every repo that has a review queue switched on.
@@ -682,7 +662,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: 0,
                     error: String::new(),
                     skipped,
-                    stopped: Vec::new(),
                     // Nothing was looked at, so there is nothing this repo failed to see.
                     // `skipped` is the whole story for it.
                     blind_spots: Vec::new(),
@@ -694,7 +673,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
                     error: String::new(),
                     skipped: String::new(),
-                    stopped: Vec::new(),
                     // The number and what it is missing travel together, or the number is a
                     // claim the queue never made (SKEIN-239).
                     blind_spots: q.blind_spots,
@@ -704,7 +682,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: 0,
                     error: e,
                     skipped: String::new(),
-                    stopped: Vec::new(),
                     // No queue was built, so there are no blind spots to report — `error` is
                     // already the strongest thing this can say.
                     blind_spots: Vec::new(),
@@ -723,9 +700,6 @@ pub fn counts() -> Vec<Count> {
 /// list of failures rather than one flattened result that could only be as good as its worst repo.
 #[derive(Debug, Clone, Serialize)]
 pub struct MergedQueue {
-    /// The one global switch, said once — the per-queue `ai` repeats it, but the pane asks the
-    /// merged answer, not a queue it may not have.
-    pub ai: bool,
     pub queues: Vec<Queue>,
     /// Repos that could not be read, each with its reason. Attributed, never pooled: "a repo
     /// failed" hides exactly the information that decides whether you care.
@@ -738,7 +712,6 @@ pub struct MergedQueue {
 
 pub fn merged(force: bool) -> MergedQueue {
     let mut out = MergedQueue {
-        ai: crate::review::summaries_enabled(),
         queues: Vec::new(),
         failed: Vec::new(),
         skipped: Vec::new(),
@@ -751,7 +724,6 @@ pub fn merged(force: bool) -> MergedQueue {
         };
         if !skipped.is_empty() {
             out.skipped.push(Count {
-                stopped: Vec::new(),
                 blind_spots: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
@@ -796,7 +768,6 @@ pub fn merged(force: bool) -> MergedQueue {
         match queue(&repo, force) {
             Ok(q) => out.queues.push(q),
             Err(e) => out.failed.push(Count {
-                stopped: Vec::new(),
                 // The queues this repo's siblings DID build carry their own blind spots on the
                 // `Queue` itself; a repo that built none has only its error.
                 blind_spots: Vec::new(),

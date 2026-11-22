@@ -613,7 +613,6 @@ mod tests {
         let store = home.join("store/.claude");
         std::fs::create_dir_all(store.join("mailbox")).unwrap();
         let _ = save_repos(&[Repo {
-            read_prs: false,
             id: "web".into(),
             source: "https://example.com/web.git".into(),
             store: store.to_string_lossy().into_owned(),
@@ -941,7 +940,6 @@ mod tests {
         fs::create_dir_all(store_b.join("mailbox")).unwrap();
         save_repos(&[
             Repo {
-                read_prs: false,
                 id: "a".into(),
                 source: "a".into(),
                 store: store_a.to_string_lossy().into_owned(),
@@ -952,7 +950,6 @@ mod tests {
                 ..Default::default()
             },
             Repo {
-                read_prs: false,
                 id: "b".into(),
                 source: "b".into(),
                 store: store_b.to_string_lossy().into_owned(),

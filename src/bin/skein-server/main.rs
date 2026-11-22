@@ -52,7 +52,6 @@ mod terminal;
 mod update;
 mod upload;
 mod versions;
-mod workflows;
 
 use agents::*;
 use asks::*;
@@ -70,7 +69,6 @@ use terminal::*;
 use update::*;
 use upload::*;
 use versions::*;
-use workflows::*;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
 // They are no longer four constants and four handlers — `skein::assets` generates the table from the
 // directory, because a build step emits files whose names carry content hashes and neither the count
@@ -231,55 +229,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
                     healed.len()
                 ),
                 _ => {}
-            }
-        }
-    });
-    // **Reading the queue you have to work, before you open it.** Nothing here until a repo is
-    // switched on for it, and then only pull requests somebody asked you to review — your own
-    // limits, and the reason there is no daily quota: the scope is the budget.
-    //
-    // Ten minutes. This is the one tick that spends money, and what it waits for is a branch going
-    // quiet for an HOUR, so a faster pass would only ask the same question sooner and get the same
-    // answer. Three per pass keeps a queue that settles all at once from firing thirty model calls
-    // in a minute.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(600));
-        loop {
-            tick.tick().await;
-            match tokio::task::spawn_blocking(skein::review::read_waiting).await {
-                Ok(read) => {
-                    for what in read {
-                        eprintln!("skein: {what}");
-                    }
-                }
-                Err(e) => eprintln!("skein: the reading pass did not finish ({e})"),
-            }
-        }
-    });
-    // **What makes a workflow automation rather than a button.** One pass over every repo skein
-    // manages, one step per pull request, and the pass is the only thing that acts.
-    //
-    // Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts
-    // to are minutes-scale — a review lands, CI finishes, somebody pushes — and the queue underneath
-    // is cached for a minute, so a faster tick would mostly re-read its own cache. A slower one
-    // would leave a green, approved pull request sitting unmerged for no reason a person could see.
-    //
-    // Does nothing at all until `pr_workflows` is switched on, including no GitHub reads: a feature
-    // that is off should be invisible in every way somebody might notice, a rate limit included.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(120));
-        loop {
-            tick.tick().await;
-            match tokio::task::spawn_blocking(skein::prwork::sweep).await {
-                // Silent when nothing happened, which is nearly always. A line per action, because
-                // this is skein doing something outward-facing that nobody asked for just now —
-                // the audit has it with its authority, and this is what a person watching sees.
-                Ok(did) => {
-                    for what in did {
-                        eprintln!("skein: {what}");
-                    }
-                }
-                Err(e) => eprintln!("skein: the workflow pass did not finish ({e})"),
             }
         }
     });
@@ -458,7 +407,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         )
         .route("/api/review", get(api_review_merged))
         .route("/api/review/counts", get(api_review_counts))
-        .route("/api/review/reading", get(api_review_reading))
         .route("/api/repos/:id/modules", get(api_modules))
         .route("/api/repos/:id/modules/write", post(api_write_module))
         .route("/api/repos/:id/review", get(api_review_queue))
@@ -474,28 +422,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route(
             "/api/repos/:id/set-aside/:file/move-aside",
             post(api_move_set_aside_aside),
-        )
-        .route(
-            "/api/repos/:id/review/:number/summary",
-            get(api_review_summary),
-        )
-        // The same reading, started rather than awaited: the answer arrives on `/api/events`, so
-        // ten of these cost one browser connection between them instead of ten (SKEIN-366).
-        .route("/api/repos/:id/review/:number/read", post(api_review_read))
-        .route("/api/repos/:id/review/summaries", get(api_review_summaries))
-        .route("/api/repos/:id/workflows", get(api_workflows))
-        .route("/api/repos/:id/reading", post(api_set_reading))
-        .route(
-            "/api/workflows",
-            get(api_workflow_file).put(api_save_workflows),
-        )
-        .route(
-            "/api/repos/:id/review/:number/workflow",
-            post(api_set_workflow),
-        )
-        .route(
-            "/api/repos/:id/review/:number/triggers",
-            post(api_set_pr_triggers),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         // The shape of a change: which modules moved and how. The same route shape for both
