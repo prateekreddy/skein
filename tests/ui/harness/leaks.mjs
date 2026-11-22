@@ -1229,6 +1229,14 @@ answer.`);
   return others;
 }
 
+/** Does `text` name `checkout` itself, once every checkout of `all` nested inside it is removed? */
+function names(text, checkout, all) {
+  const nested = all.filter(c => c.startsWith(`${checkout}/`)).sort((a, b) => b.length - a.length);
+  const left = nested.reduce(
+    (t, c) => t.replace(new RegExp(worktreeRegex(c).source, "g"), " "), text);
+  return worktreeRegex(checkout).test(left);
+}
+
 /** Which checkout `p` belongs to: `"mine"` for `repo`, `"elsewhere"` for one of `others`, and
  * `"unclear"` when it names this one and another and there is nothing left to tell them apart.
  *
@@ -1256,11 +1264,18 @@ answer.`);
  * worktree is still read out of the environment alone. The asymmetry is deliberate and only ever
  * subtracts: a `skein-server` exec'd from `<lane>/.target/debug/skein-server` names its lane in
  * argv and nowhere else, and there is no direction in which reading that can turn somebody else's
- * process into this run's leak. */
+ * process into this run's leak.
+ *
+ * **A path inside a nested checkout names that checkout and not the one around it** (SKEIN-1533).
+ * Lanes live at `<checkout>/.worktrees/<lane>`, so `<checkout>/` is a textual prefix of every path
+ * in a lane. Read as a mention, it made the main checkout a rival of every process of every lane,
+ * and an orphan standing outside both came out `unclear`: a gate run from a lane was green over
+ * that lane's own leak. [`names`] takes the nested checkouts out before it asks. */
 export function whose(p, repo = REPO, others = otherWorktrees(repo)) {
   if (p.envState !== "read") return "elsewhere";
-  if (!worktreeRegex(repo).test(p.env)) return "elsewhere";
-  const rivals = others.filter(w => worktreeRegex(w).test(p.env) || worktreeRegex(w).test(p.args));
+  const all = [repo, ...others];
+  if (!names(p.env, repo, all)) return "elsewhere";
+  const rivals = others.filter(w => names(p.env, w, all) || names(p.args, w, all));
   if (!rivals.length) return "mine";
   const standing = standsIn(p.pid, [repo, ...rivals]);
   if (standing === repo) return "mine";

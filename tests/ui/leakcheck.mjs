@@ -1881,6 +1881,23 @@ check("a worktree does not claim a sibling whose path merely starts with its own
     itsOwnSubdirectory: sibling.test("CARGO_MANIFEST_DIR=/var/tmp/skein-wt-leak/tests PWD=/"),
     itsOwnRootAtTheEnd: sibling.test("CARGO_MANIFEST_DIR=/var/tmp/skein-wt-leak") },
   { longerSibling: false, itsOwnSubdirectory: true, itsOwnRootAtTheEnd: true });
+
+// **Asked of `whose` with both layouts written out, because which one this file runs in is an
+// accident of where it was checked out** (SKEIN-1533). From a lane nested in the main checkout, the
+// main checkout was a rival of everything the lane ran; from the main checkout, a lane's process
+// named it. Fails if `names` stops removing the nested checkout.
+const OUTER = "/var/tmp/nest-check", INNER = `${OUTER}/.worktrees/lane`;
+const inLane = { pid: process.pid, envState: "read", env: `CARGO_MANIFEST_DIR=${INNER}`, args: "sleep 30" };
+const inOuter = { ...inLane, env: `CARGO_MANIFEST_DIR=${OUTER}` };
+check("a nested lane's process is the lane's, and the checkout around it does not claim it",
+  under.whose
+    ? { fromTheLane: under.whose(inLane, INNER, [OUTER]),
+        fromAround: under.whose(inLane, OUTER, [INNER]),
+        outerFromAround: under.whose(inOuter, OUTER, [INNER]),
+        outerFromTheLane: under.whose(inOuter, INNER, [OUTER]) }
+    : "no whose",
+  { fromTheLane: "mine", fromAround: "elsewhere", outerFromAround: "mine",
+    outerFromTheLane: "elsewhere" });
 rmSync(skeleton, { recursive: true, force: true });
 
 // --- an environment that cannot be read is not a clean miss ------------------------------------
