@@ -135,7 +135,6 @@ fn an_uncovered_box_is_refused_until_it_is_allowed_and_then_says_so_where_someon
         plane_project: String::new(),
         sync_connection: String::new(),
         review_queue: true,
-        sync_gateway_url: String::new(),
         ..Default::default()
     };
     save_repos(std::slice::from_ref(&repo)).expect("register the repo");

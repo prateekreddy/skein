@@ -1000,7 +1000,7 @@ mod tests {
                     "store": home.join("repos/inside/store/.claude").to_string_lossy(),
                     "agent": "claude",
                     "plane_project": "", "sync_connection": "",
-                    "review_queue": true, "sync_gateway_url": ""
+                    "review_queue": true
                 },
                 {
                     "id": "elsewhere",
@@ -1009,7 +1009,7 @@ mod tests {
                     "store": outside.to_string_lossy(),
                     "agent": "claude",
                     "plane_project": "", "sync_connection": "",
-                    "review_queue": true, "sync_gateway_url": ""
+                    "review_queue": true
                 }
             ]))
             .unwrap(),

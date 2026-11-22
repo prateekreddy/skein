@@ -263,35 +263,35 @@ cited_by = ["docs/recovery-survey.md"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:182"]
+["src/bin/skein-server/main.rs:164"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:190"]
+["src/bin/skein-server/main.rs:172"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:203"]
+["src/bin/skein-server/main.rs:185"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:273"]
+["src/bin/skein-server/main.rs:255"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:595"]
+["src/bin/skein-server/main.rs:577"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:605"]
+["src/bin/skein-server/main.rs:587"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:696"]
+["src/bin/skein-server/main.rs:678"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:702"]
+["src/bin/skein-server/main.rs:684"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -378,6 +378,11 @@ cited_by = ["docs/recovery-survey.md"]
 line = "pub(super) async fn login_terminal("
 cited_by = ["docs/recovery-survey.md"]
 
+["src/bin/skein-server/terminal.rs:623"]
+line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
+window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
+cited_by = ["docs/recovery-survey.md"]
+
 ["src/bin/skein-server/terminal.rs:626"]
 line = "return (StatusCode::BAD_REQUEST, \"unsupported runtime\").into_response();"
 cited_by = ["docs/recovery-survey.md"]
@@ -388,11 +393,6 @@ cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server/terminal.rs:656"]
 line = "terminal and press log in again.\\r\\n\""
-cited_by = ["docs/recovery-survey.md"]
-
-["src/bin/skein-server/terminal.rs:623"]
-line = "return (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();"
-window = "if !origin_ok(&headers) {\u000breturn (StatusCode::FORBIDDEN, \"cross-origin terminal blocked\").into_response();\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/bin/skein-server/terminal.rs:695"]
@@ -852,11 +852,11 @@ cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model
 line = "pub fn skein_home() -> PathBuf {"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["src/config.rs:538"]
+["src/config.rs:518"]
 line = "if cfg.fleet_sandbox.trim().is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/config.rs:619"]
+["src/config.rs:599"]
 line = "let mut current = read_config()"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1368,7 +1368,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1768"]
+["src/fleet/start.rs:1766"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1626,7 +1626,7 @@ cited_by = ["docs/architecture.md", "docs/parity.md"]
 line = "\"{source} is a path, and skein registers repos by remote. skein runs inside the fleet \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/add.rs:250"]
+["src/repos/add.rs:249"]
 line = "pub fn pull_repo(id: &str) -> Result<String, String> {"
 cited_by = ["docs/architecture.md"]
 
@@ -1642,7 +1642,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/repos/list.rs:275"]
+["src/repos/list.rs:273"]
 line = "return Err(format!("
 window = "Err(why) => {\u000breturn Err(format!(\u000b\"{id}'s per-pull-request triggers could not be read ({why}), so this would \\"
 cited_by = ["docs/recovery-survey.md"]
@@ -1781,46 +1781,46 @@ line = "fn drop(&mut self) {"
 window = "impl Drop for EnvPins {\u000bfn drop(&mut self) {\u000b// Reverse, so the FIRST pin of a name is the last one undone and therefore the one that"
 cited_by = ["docs/env-lock.toml"]
 
-["src/tracking.rs:154"]
+["src/tracking.rs:145"]
 line = "Err(e) => return Err(format!(\"reading {}: {e}\", path.display())),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:433"]
+["src/tracking.rs:322"]
 line = "return Err(format!("
 window = "if !users.is_empty() {\u000breturn Err(format!(\u000b\"{} still {} it — point {} at another connection first\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:954"]
+["src/tracking.rs:838"]
 line = "return Err(format!("
 window = "if base.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1043"]
+["src/tracking.rs:927"]
 line = "return Err(format!("
 window = "if gateway.is_empty() {\u000breturn Err(format!(\u000b\"the {} connection has no gateway URL yet\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1049"]
+["src/tracking.rs:933"]
 line = "return Err(format!("
 window = "if connection_token(&conn.id).is_none() {\u000breturn Err(format!(\u000b\"no Plane token stored for {} — add it in Settings → Work tracking\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1055"]
+["src/tracking.rs:939"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1104"]
+["src/tracking.rs:988"]
 line = "Err(format!("
 window = "let last = report.trim().lines().last().unwrap_or(\"\").trim();\u000bErr(format!(\u000b\"token written, but registration did not confirm{} — the box can still be registered by hand against {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1177"]
+["src/tracking.rs:1061"]
 line = "return Err(format!(\"{name} is not running\"));"
 window = "if box_liveness(name) != Some(Liveness::Running) {\u000breturn Err(format!(\"{name} is not running\"));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/tracking.rs:1287"]
+["src/tracking.rs:1171"]
 line = "return Err(format!(\"the gateway could not be reached ({})\", out.status));"
 cited_by = ["docs/recovery-survey.md"]
 

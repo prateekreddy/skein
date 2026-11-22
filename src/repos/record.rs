@@ -118,10 +118,6 @@ pub struct Repo {
     /// which a box can change. Read at launch, so a change reaches a box at its next start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kinds: Option<Vec<String>>,
-    /// Superseded by [`Repo::sync_connection`]; read once by the migration, then cleared. Kept so
-    /// a `repos.json` written before connections existed still parses.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sync_gateway_url: String,
 }
 
 /// **What a registry entry with nothing but an id, a source and a store parses as** — and

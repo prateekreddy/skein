@@ -153,7 +153,6 @@ fn repo(id: &str) -> skein::repos::Repo {
         plane_project: String::new(),
         sync_connection: String::new(),
         review_queue: true,
-        sync_gateway_url: String::new(),
         ..Default::default()
     }
 }

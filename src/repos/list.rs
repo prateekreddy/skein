@@ -89,9 +89,8 @@ fn read_repos_or_why() -> Result<Vec<Repo>, String> {
 ///
 /// The refusal is not the same guarantee as [`update_repos`]'s, and the difference is the reason
 /// nothing new should call this: the caller's *read* happened outside the lock, so a whole-list
-/// save still overwrites whatever another writer put down in between. The one production caller left is
-/// `tracking::migrate_legacy_sync_config`, which snapshots the list before it writes tokens and
-/// `connections.json` and saves it back after.
+/// save still overwrites whatever another writer put down in between. No production caller is
+/// left: this is for test fixtures.
 pub fn save_repos(repos: &[Repo]) -> Result<(), String> {
     crate::util::with_lock(&repos_lock(), || {
         read_repos_or_why().map_err(unreadable_refusal)?;
@@ -254,7 +253,6 @@ pub fn set_repo_settings(
         }
         if let Some(v) = sync_connection {
             repo.sync_connection = v.trim().to_string();
-            repo.sync_gateway_url.clear(); // the selection is now the whole answer
         }
         if let Some(v) = review_queue {
             repo.review_queue = v;
@@ -299,68 +297,6 @@ fn could_be_a_branch(branch: &str) -> bool {
         && !branch
             .chars()
             .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
-}
-
-/// Copy an older `config.json`'s fleet-wide base branch into every repo that names none, then
-/// clear it there (the owner, 2026-09-27: the branch a new box starts from is per repo).
-///
-/// Repos first, config second, so an interruption between the two leaves the old value in place
-/// and the next run finishes the job: a repo that already has one is never overwritten, so running
-/// this twice changes nothing the first run did. Returns how many repos took the value.
-pub fn adopt_fleet_base_branch() -> Result<usize, String> {
-    let fleet = load_config().base_branch.trim().to_string();
-    if fleet.is_empty() {
-        return Ok(0);
-    }
-    let adopted = update_repos(|repos| {
-        let mut adopted = 0;
-        for repo in repos.iter_mut().filter(|r| r.base_branch.trim().is_empty()) {
-            repo.base_branch = fleet.clone();
-            adopted += 1;
-        }
-        Ok(adopted)
-    })?;
-    update_config(|c| {
-        c.base_branch.clear();
-        Ok(())
-    })?;
-    Ok(adopted)
-}
-
-/// Move every store off a `.claude` name and record where it went (SKEIN-1330,
-/// `docs/decisions/store-is-not-dot-claude.md`): a managed one from `store/.claude` to
-/// `store/data`, and one the person put at `<dir>/.claude` with `skein add --store` to `<dir>/data`
-/// (SKEIN-1345). Run once at server start, beside [`adopt_fleet_base_branch`].
-///
-/// The directory and its `store` value move together, inside the repo-list lock: a store renamed
-/// on disk with the record still naming the old path would leave every box of the repo with no
-/// store, and the reverse would have `ensure_store` make an empty one at the new name. A store
-/// [`crate::kit::move_store_off_dot_claude`] refuses keeps its old path and keeps working; the
-/// refusal is returned, one line per repo, for the caller to say.
-///
-/// Returns how many records changed, and the refusals. Reads first and takes the lock only while a
-/// record still names a store at the old name, so once every store has moved this touches nothing.
-pub fn move_stores_off_dot_claude() -> Result<(usize, Vec<String>), String> {
-    let old_named = |r: &Repo| crate::kit::store_has_old_name(Path::new(r.store.trim()));
-    if !read_repos_or_why()?.iter().any(old_named) {
-        return Ok((0, Vec::new()));
-    }
-    update_repos(|repos| {
-        let mut moved = 0;
-        let mut refused = Vec::new();
-        for repo in repos.iter_mut() {
-            let from = PathBuf::from(repo.store.trim());
-            match crate::kit::move_store_off_dot_claude(&from) {
-                Ok(to) if to != from => {
-                    repo.store = to.to_string_lossy().into_owned();
-                    moved += 1;
-                }
-                Ok(_) => {}
-                Err(why) => refused.push(format!("{}: {why}", repo.id)),
-            }
-        }
-        Ok((moved, refused))
-    })
 }
 
 /// Unregister a repo from `repos.json` by id. Returns the removed `Repo`. Does NOT delete the working
@@ -438,121 +374,6 @@ mod tests {
     use super::*;
     use crate::testutil::{env_lock, env_pins, tempdir};
 
-    /// **Each store moves off `.claude` and its record follows, a managed one (SKEIN-1330) and one
-    /// put elsewhere with `--store` (SKEIN-1345); a refused one keeps both.**
-    ///
-    /// What would make it fail: the record not rewritten (`moved`'s store still names `.claude`, so
-    /// every box gets a store that is no longer there), a refused move rewriting the record anyway
-    /// (`clash` would name a store with only half its files), a `--store` store at `.claude` left
-    /// where it was (`theirs`, SKEIN-1345), or a second run doing anything.
-    #[test]
-    fn stores_move_off_dot_claude_and_their_records_follow() {
-        let _g = env_lock();
-        let home = tempdir();
-        let mut env = env_pins();
-        env.set("SKEIN_HOME", &home);
-        let at = |id: &str, name: &str| home.join("repos").join(id).join("store").join(name);
-        fs::create_dir_all(at("moved", ".claude").join("memory")).unwrap();
-        fs::write(at("moved", ".claude").join("memory/m.md"), "kept").unwrap();
-        for name in [".claude", "data"] {
-            fs::create_dir_all(at("clash", name)).unwrap();
-            fs::write(at("clash", name).join("f"), name).unwrap();
-        }
-        let theirs = tempdir().join("thing-shared/.claude");
-        fs::create_dir_all(theirs.join("skein")).unwrap();
-        let theirs_now = theirs.with_file_name("data");
-        let s = |p: PathBuf| p.to_string_lossy().into_owned();
-        fs::write(
-            home.join("repos.json"),
-            serde_json::json!([
-                { "id": "moved", "source": "https://example.com/m.git", "store": s(at("moved", ".claude")) },
-                { "id": "clash", "source": "https://example.com/c.git", "store": s(at("clash", ".claude")) },
-                { "id": "theirs", "source": "https://example.com/t.git", "store": s(theirs.clone()) },
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        let stores = || {
-            load_repos()
-                .into_iter()
-                .map(|r| (r.id, r.store))
-                .collect::<Vec<_>>()
-        };
-
-        let (moved, refused) = move_stores_off_dot_claude().unwrap();
-        assert_eq!(moved, 2, "{refused:?}");
-        assert_eq!(refused.len(), 1, "{refused:?}");
-        assert!(refused[0].starts_with("clash: "), "{refused:?}");
-        let after = stores();
-        assert_eq!(
-            after,
-            vec![
-                ("moved".to_string(), s(at("moved", "data"))),
-                ("clash".to_string(), s(at("clash", ".claude"))),
-                ("theirs".to_string(), s(theirs_now.clone())),
-            ]
-        );
-        assert_eq!(
-            fs::read_to_string(at("moved", "data").join("memory/m.md")).unwrap(),
-            "kept"
-        );
-        assert!(theirs_now.join("skein").is_dir() && !theirs.exists());
-
-        // Once the clash is resolved, the next start finishes it, and the one after does nothing.
-        fs::remove_file(at("clash", ".claude").join("f")).unwrap();
-        assert_eq!(move_stores_off_dot_claude().unwrap(), (1, Vec::new()));
-        assert_eq!(move_stores_off_dot_claude().unwrap(), (0, Vec::new()));
-        assert_eq!(stores()[1].1, s(at("clash", "data")));
-    }
-
-    /// **An older config's fleet-wide base branch becomes each repo's own, once, and never over a
-    /// repo that already names one** (the owner, 2026-09-27).
-    ///
-    /// What would make it fail: the copy overwriting a repo's own value (`trunk` would become
-    /// `develop`); the config value left in place, so Settings and the repo card both claim it
-    /// (`the fleet-wide value is gone`); or a second run doing anything (`twice is once`).
-    #[test]
-    fn the_fleet_base_branch_moves_onto_each_repo_that_has_none() {
-        let _g = env_lock();
-        let home = tempdir();
-        let mut env = env_pins();
-        env.set("SKEIN_HOME", &home);
-        fs::write(home.join("config.json"), r#"{"base_branch":"develop"}"#).unwrap();
-        fs::write(
-            home.join("repos.json"),
-            serde_json::json!([
-                { "id": "plain", "source": "https://example.com/plain.git", "store": "/s", "agent": "claude" },
-                { "id": "own", "source": "https://example.com/own.git", "store": "/s", "base_branch": "trunk" },
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        let bases = || {
-            load_repos()
-                .into_iter()
-                .map(|r| (r.id, r.base_branch))
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(adopt_fleet_base_branch(), Ok(1));
-        assert_eq!(
-            bases(),
-            [
-                ("plain".into(), "develop".into()),
-                ("own".into(), "trunk".into())
-            ],
-            "each repo with none takes it, and one with its own keeps it"
-        );
-        let config = fs::read_to_string(home.join("config.json")).unwrap();
-        assert!(
-            !config.contains("base_branch"),
-            "the fleet-wide value is gone: {config}"
-        );
-
-        assert_eq!(adopt_fleet_base_branch(), Ok(0), "twice is once");
-        assert_eq!(bases()[0].1, "develop");
-    }
-
     /// **The card's field takes a branch, clears to the remote's default, and refuses what cannot
     /// be a branch** before writing anything.
     ///
@@ -621,7 +442,6 @@ mod tests {
                                 plane_project: String::new(),
                                 sync_connection: String::new(),
                                 review_queue: true,
-                                sync_gateway_url: String::new(),
                                 ..Default::default()
                             });
                             Ok(())
@@ -716,7 +536,6 @@ mod tests {
             plane_project: String::new(),
             sync_connection: String::new(),
             review_queue: true,
-            sync_gateway_url: String::new(),
             ..Default::default()
         }])
         .unwrap();
@@ -844,9 +663,8 @@ mod tests {
     /// `save_repos` refuses too, because a whole-list save reaches the same file.
     ///
     /// `update_repos` is the locked path and the one `add_repo` takes; this is the unlocked shape
-    /// beside it — read the list somewhere, change a field, `save_repos(&repos)`.
-    /// `tracking::migrate_legacy_sync_config` still has it, and could otherwise write a default over
-    /// a file it could not read.
+    /// beside it — read the list somewhere, change a field, `save_repos(&repos)`. A whole-list save
+    /// must still not write a default over a file it could not read.
     #[test]
     fn saving_a_whole_repo_list_refuses_over_one_skein_cannot_read() {
         let _g = env_lock();
