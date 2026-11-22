@@ -215,8 +215,10 @@ test('/skein clean lists what can go now, largest first, and counts the rest', a
   )
 })
 
-// What would make it fail: `/skein clean PATH` building its own sentence, or running anything but
-// the command line `tests/plugin_tools.rs` holds to the MCP tool's answer.
+// What would make it fail: `/skein clean PATH` building its own sentence, running anything but the
+// command line `tests/plugin_tools.rs` holds to the MCP tool's answer, or leaving skein-mcp's
+// `skein: ` on a line the engine already heads with it, which a live session drew as
+// `skein: skein: removed…`. Watched: with `unheaded` returning its argument, this failed.
 test('/skein clean PATH says what skein-mcp clean said, case by case', async ($, on) => {
   const w = world()
   await started(on, w, $)
@@ -227,7 +229,8 @@ test('/skein clean PATH says what skein-mcp clean said, case by case', async ($,
     const ran = await $.command.run(TYPED(`clean ${c.paths[0]}`))
 
     expect(w.ran[before]?.slice(2)).toEqual(['clean', c.paths[0]])
-    expect(ran.text).toBe(c.said)
+    expect(c.said.startsWith('skein: ')).toBe(true)
+    expect(ran.text).toBe(c.said.slice('skein: '.length))
   }
 })
 

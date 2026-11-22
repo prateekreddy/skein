@@ -151,8 +151,8 @@ async function readRequests($: Engine): Promise<Record<string, unknown>[]> {
 /** `/skein clean`: what can go now, largest first, and how to remove one. */
 async function cleanList($: Engine): Promise<string> {
   const ran = await skeinMcp($, ['clean'], 30_000)
-  if (ran.result === null) return 'skein could not list this box: skein-mcp did not answer.'
-  if (!Array.isArray(ran.result.items)) return ran.said || `skein could not list this box: ${String(ran.result.error ?? 'no list')}.`
+  if (ran.result === null) return 'could not list this box: skein-mcp did not answer.'
+  if (!Array.isArray(ran.result.items)) return unheaded(ran.said) || `could not list this box: ${String(ran.result.error ?? 'no list')}.`
   const rows = ran.result.items.filter(isRecord)
   const now = rows.filter(r => r.safe_now === true).sort((a, b) => bytes(b) - bytes(a))
   const later = rows.length - now.length
@@ -171,11 +171,15 @@ async function cleanList($: Engine): Promise<string> {
 async function cleanPath($: Engine, path: string): Promise<string> {
   const ran = await skeinMcp($, ['clean', path], CLEAN_TIMEOUT_MS)
   void look($).catch(() => {})
-  if (ran.said !== '') return ran.said
+  if (ran.said !== '') return unheaded(ran.said)
   const error = ran.result !== null && typeof ran.result.error === 'string' ? ran.result.error : 'skein-mcp did not answer'
 
-  return `skein could not clean: ${error}.`
+  return `could not clean: ${error}.`
 }
+
+// The engine heads a plugin command's output with `skein:`, and `skein-mcp` says its sentences to
+// an agent with the same word first: one of them goes.
+const unheaded = (said: string) => said.replace(/^skein: /, '')
 
 type Answer = { result: Record<string, unknown> | null; said: string }
 
