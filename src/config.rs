@@ -174,7 +174,7 @@ pub struct Config {
     /// replaced.
     ///
     /// `$SKEIN_REVIEW_AI=off` holds it off ([`env_holds_off`]). Off is not a broken state — every PR simply reads
-    /// "not summarised" and stays at full attention. See [`crate::review`].
+    /// "not summarised" and stays at full attention.
     #[serde(default = "default_true")]
     pub review_summaries: bool,
     /// Which model reads and reviews pull requests — summaries, questions, drafted comments, and
@@ -193,34 +193,7 @@ pub struct Config {
     /// with. `$SKEIN_BOX_PLUGIN=off` holds it off ([`env_holds_off`]).
     #[serde(default = "default_true")]
     pub box_plugin: bool,
-    /// How many pull requests the review queue may ANALYSE per UTC day, across every repo — one
-    /// fleet-wide budget, counted in [`crate::review`] at the moment a model call is actually
-    /// made. One unit is one `(number, head_sha)` analysed, whether the visit produced a
-    /// one-liner, a brief, or a brief plus a drafted review; a summary served from the disk cache
-    /// costs nothing and counts nothing. The day rolls over at midnight UTC.
-    ///
-    /// **Default 100** — the ceiling as it was asked for, verbatim: "the allowance can be very
-    /// high. Say for example not more than 100 PRs a day (cache misses, actual analysis)". Not a
-    /// per-repo number and not a throttle: it exists to put a roof over the runaway case (the old
-    /// client-side allowance had none — every button press refilled it, measured at up to 180
-    /// calls/day) while never starving an ordinary day's queue. Zero means zero: no unasked or
-    /// asked reads at all today, which is a supported state, not a broken one.
-    #[serde(default = "default_review_reads_per_day")]
-    pub review_reads_per_day: u32,
 
-    /// May skein act on pull requests on its own — labels, updates, merges, deleted branches?
-    ///
-    /// **Off by default, and the only default in skein that leans this way.** Everything else
-    /// defaults toward showing you more; what this one gates is not a reading but a merge, and a
-    /// fleet that starts merging because a config file was absent is not one anybody would trust
-    /// twice.
-    ///
-    /// `$SKEIN_PR_WORKFLOWS=off` holds it off — so a fleet doing something you want stopped can be
-    /// stopped from the command line that starts the server, without the cockpit and without
-    /// finding the file. It cannot hold it ON against the pause ([`env_holds_off`]). See
-    /// [`crate::prwork`].
-    #[serde(default)]
-    pub pr_workflows: bool,
     /// The one sbx sandbox that hosts every box. **Naming it is the only supported shape.**
     ///
     /// Empty used to mean skein's original model — one microVM per box — and that is gone. It does not
@@ -533,8 +506,7 @@ pub fn env_holds_off(name: &str) -> bool {
 }
 
 /// The switches an environment variable can hold off, by the `Config` field each one holds.
-pub const ENV_SWITCHES: [(&str, &str); 4] = [
-    ("pr_workflows", "SKEIN_PR_WORKFLOWS"),
+pub const ENV_SWITCHES: [(&str, &str); 3] = [
     ("ai_enrichment", "SKEIN_AI"),
     ("review_summaries", "SKEIN_REVIEW_AI"),
     ("box_plugin", "SKEIN_BOX_PLUGIN"),
@@ -705,10 +677,6 @@ fn default_fleet_memory() -> String {
     "26g".to_string()
 }
 
-fn default_review_reads_per_day() -> u32 {
-    100
-}
-
 fn default_review_identity() -> String {
     "me".to_string()
 }
@@ -735,7 +703,6 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             seed_gh_secret: false,
-            pr_workflows: false,
             review_model: String::new(),
             default_agent: default_agent(),
             base_branch: String::new(),
@@ -747,7 +714,6 @@ impl Default for Config {
             ai_enrichment: false,
             review_summaries: default_true(),
             box_plugin: default_true(),
-            review_reads_per_day: default_review_reads_per_day(),
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
@@ -1048,7 +1014,7 @@ mod tests {
     /// and one *other* field serde cannot deserialise.
     const ONE_BAD_FIELD: &str = r#"{
         "confirm_destroy": false,
-        "review_reads_per_day": "12",
+        "review_summaries": "12",
         "ssh_key": "~/.ssh/id_ed25519"
     }"#;
 
