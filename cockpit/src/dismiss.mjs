@@ -77,13 +77,6 @@ export function loginProblems(expired) {
   return (expired || []).map(l => `login:${l.runtime}`);
 }
 
-// The merge train's problems: one per pull request it stopped on, by repo and number. Why it
-// stopped is the changing part and is left out; "and workflows are paused" qualifies the stops
-// rather than being one.
-export function trainProblems(stops) {
-  return (stops || []).flatMap(c => (c.stopped || []).map(s => `${c.repo_id}#${s.number}`));
-}
-
 // The staleness row's one problem: THIS outage, named by the moment the server last spoke. Every
 // poll of a single outage names the same moment however many seconds the row counts, and the board
 // going live moves it — so a dismissal lasts for one outage, or the time chosen, whichever ends

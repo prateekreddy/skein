@@ -12,39 +12,22 @@ let revFlash = "";             // the key whose row flashes once this render: a 
 let revChord = "";             // "g" while a g-chord waits for its second key (the meaning lives in shortcutFor)
 let revLastActKey = "";        // the last act revHold held — what a queue-mode u takes back
 
-// What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
-// back, the page was reloaded — and both were gone, because the composer was pure page state.
-// Saved per (repo, PR, kind) on every keystroke and every draft, restored on reopen, cleared only
-// when the thing is actually posted.
+// What you typed survives a reload. Reported live on PR 577: notes were written, the page was
+// reloaded, and they were gone, because the composer was pure page state. Saved per (repo, PR,
+// kind) on every keystroke, restored on reopen, cleared only when the thing is actually posted.
 function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.kind}`; }
-/// Save one composer's words — **the composer the save is FOR, not the one on screen** (SKEIN-841).
-///
-/// `c` defaults to the open composer, which is what a keystroke means: `oninput` is the box the
-/// reader is typing in. An answer means the other thing. `revAsk` and `revDraft` capture `c` at the
-/// press, and this read the global instead, so an answer that landed after the reader had opened
-/// another composer was written onto an object nothing on the page referenced any more and saved
-/// nowhere — while the composer they had switched TO had its draft written under its own key, at a
-/// moment it had not asked for. Re-opening the ask then restored the pre-answer copy below, so a
-/// model call the reader had paid for was gone with nothing said. The deferral of the PAINT is
-/// right and is untouched (see `revComposePaint`): an answer nobody is looking at must not take a
-/// caret, and it must still be KEPT.
+/// Save the words in the composer the reader is typing in.
 function revComposeSave(c = revComposing) {
   if (!c) return;
-  // `outside` and `draftedFrom` too (SKEIN-819): the line saying an answer or a draft came from
-  // outside its box has to survive a reload exactly as the text it is about does, or a reload is a
-  // way to lose the warning and keep the words it warns about.
   try {
-    localStorage.setItem(revComposeStore(c), JSON.stringify({
-      text: c.text, answer: c.answer, outside: c.outside || "", draftedFrom: c.draftedFrom || "",
-    }));
+    localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text }));
   } catch {}
 }
 function revCompose(repo, number, kind) {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(revComposeStore({ repo, number, kind })) || "null"); } catch {}
   revComposing = {
-    repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "",
-    outside: (saved && saved.outside) || "", draftedFrom: (saved && saved.draftedFrom) || "", busy: false,
+    repo, number, kind, text: (saved && saved.text) || "", busy: false,
   };
   renderReviewNow();
   setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
@@ -54,26 +37,15 @@ function revComposeClose() { revComposing = null; renderReviewNow(); }
 function revComposeHtml(pr) {
   const c = revComposing;
   if (!c || c.number !== pr.number || c.repo !== pr.repo_id) return "";
-  const asking = c.kind === "ask";
-  const label = asking ? "Ask about this PR — the answer stays between you and skein."
-    : c.kind === "comment" ? "Comment — posted to GitHub under your name."
+  const label = c.kind === "comment" ? "Comment — posted to GitHub under your name."
     : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
-    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. It did not have its earlier reading of this change, so check every claim about the code before you post it.</b>
-      <button type="button" class="revchip" onclick="revDraftAgain(${pr.number})"${c.busy ? " disabled" : ""}>draft again</button></div>` : ""}
-    <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
-      oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
-    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.</b>
-      <button type="button" class="revchip" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>ask again</button></div>` : ""}
-    ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
+    <textarea id="rev-compose" rows="4" oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
     <div class="revacts">
-      ${asking
-        ? `<button type="button" class="revchip go" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "thinking…" : "ask"}</button>`
-        : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
-           <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
+      <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
-      <span class="dim revkeys">${glyph(asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept")}</span>
+      <span class="dim revkeys">${glyph("⌘↵ posts · Esc closes — your words are kept")}</span>
     </div>
   </div>`;
 }
@@ -82,7 +54,7 @@ function revComposeHtml(pr) {
 ///
 /// The primary button is the one drawn `.go`: **post to GitHub** for a comment or a request for
 /// changes — the same `revAct` the chip calls, so the same 8-second undo receipt, not a shortcut
-/// past it — and **ask** for an ask. Esc is **cancel**, `revComposeClose`, which takes the composer
+/// past it. Esc is **cancel**, `revComposeClose`, which takes the composer
 /// off the screen and leaves the words where every keystroke already saved them, so reopening it
 /// brings them back. That is what the hint beside the buttons promises.
 ///
@@ -105,77 +77,7 @@ function revComposeKey(ev) {
   ev.stopPropagation();
   if (c.busy) return;
   if (close) { revComposeClose(); return; }
-  if (c.kind === "ask") revAsk(c.number);
-  else revAct(c.repo, c.number, c.kind);
-}
-
-/// Ask, privately. The answer replaces nothing and is posted nowhere.
-function revAsk(number) {
-  const c = revComposing;
-  if (!c || !c.text.trim()) { toast("ask something first"); return; }
-  c.busy = true; renderReviewNow();
-  revPost(c.repo, number, "ask", c.text).then(d => {
-    c.busy = false;
-    // `c`, named — not whatever composer is open by the time this runs (SKEIN-841).
-    // `outside` is the server's reason this answer did not come from the box (SKEIN-819) — empty,
-    // and so cleared, when it did, which is what makes "ask again" able to retire the line.
-    if (d.ok) { c.answer = d.text; c.outside = d.outside || ""; revComposeSave(c); } else toast(d.error || "no answer");
-    revComposePaint(c);
-  });
-}
-
-/// Draft into the box you are about to send. It replaces the notes rather than appending, because
-/// the notes were the input to it — and you can still edit every word before it goes.
-function revDraft(number) {
-  const c = revComposing;
-  if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
-  c.busy = true; renderReviewNow();
-  // The notes this draft is made FROM, kept so "draft again" drafts from them rather than from
-  // the draft that replaced them in the box (SKEIN-819).
-  const notes = c.text;
-  revPost(c.repo, number, "draft", c.text).then(d => {
-    c.busy = false;
-    // `c`, named — the identical shape, and the identical loss (SKEIN-841).
-    if (d.ok) {
-      c.text = d.text; c.outside = d.outside || ""; c.draftedFrom = notes;
-      revComposeSave(c);
-    } else toast(d.error || "could not draft");
-    revComposePaint(c);
-  });
-}
-
-/// "draft again", on the line that says a draft was written outside its box (SKEIN-819): the same
-/// press as "draft with skein", from the notes the draft was made from. What is in the box now is
-/// the draft itself, and drafting from a draft would be a model rewording its own words about a
-/// change it did not see.
-function revDraftAgain(number) {
-  const c = revComposing;
-  if (!c || c.busy) return;
-  if (c.draftedFrom) c.text = c.draftedFrom;
-  revDraft(number);
-}
-
-/// The answer to a composer's own press, painted NOW (SKEIN-416).
-///
-/// `revAsk` and `revDraft` both waited on `renderReview`, and §6 rule 2 holds that render while the
-/// pane owns a caret or a live selection — which is the composer's ordinary state, since the box
-/// the reader typed the question into is the box they are looking at while skein thinks. Pressing
-/// "draft with skein" then did nothing anybody could see for the length of a model call and,
-/// on success, for ever: `c.text` had the drafted review in it and only a render puts it in the
-/// textarea. Worse than invisible — the next keystroke's `oninput` writes the STALE box back over
-/// `c.text`, so the draft was silently thrown away by the reader carrying on typing.
-///
-/// `revPendingPaint` and `revRepaintRow` are surgical because a receipt has one element to swap; an
-/// answer changes the composer's box, its answer panel and its chips at once, so this is the whole
-/// pane and the caret's position is what it costs. That is the same trade `renderReviewNow`'s
-/// comment above spells out, and the reader asked for it.
-///
-/// **Forced only while this composer is still the one on screen.** `c` is captured at the press: by
-/// the time the answer lands the reader may have cancelled it, or opened another PR's composer, and
-/// nothing here is drawn any more. Forcing then would take a caret out of a box for an answer
-/// nobody is waiting to see, which is the harm rule 2 exists to prevent.
-function revComposePaint(c) {
-  if (revComposing === c) renderReviewNow(); else renderReview();
+  revAct(c.repo, c.number, c.kind);
 }
 
 function revPost(repo, number, kind, body, draftedAt) {
@@ -616,20 +518,6 @@ function revKey(action) {
       if (safe && typeof window !== "undefined" && window.open) window.open(safe, "_blank", "noopener");
       return;
     }
-    case "rev-reread": {
-      // The keyboard half of the row's read control. A stack head has no reading of its own — the
-      // steps do — so it reads the step the stack would start at, which is the row the selection
-      // means when it sits on a stack.
-      const st = revSel ? revStacks.get(revSel) : null;
-      const pr = st ? (revStackNext(st) || st.steps[0]) : revKeyPr(revSel);
-      if (!pr) return;
-      revFetchSummary(pr.repo_id, pr.number, "force");
-      // The keypress is invisible otherwise — the selected row may be off screen — so the toast
-      // says WHICH pull request is being read and nothing about what it costs: see `revReadAgain`
-      // on why "never counts against the day" left every control it was on.
-      toast(`reading #${pr.number} again`);
-      return;
-    }
     case "rev-approve":
       // Deliberate refusal, out loud (§6). A verdict is a press on the row's own control, where the
       // reading it is a verdict about is printed directly above it — never a keystroke on a list.
@@ -817,11 +705,6 @@ function toggleRevStack(key) {
 }
 function toggleStackStep(key) {
   revStackStep = revStackStep === key ? null : key;
-  // A step's body is `revBody`, the same expansion a loose row draws — so it needs the same prose,
-  // which the queue payload no longer carries (SKEIN-287).
-  if (revStackStep === key) {
-    revLoadReading(key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1)));
-  }
   renderReviewNow();
 }
 
@@ -849,35 +732,6 @@ const REV_UNROOTED_WHY = "the pull requests below this stack are not in your que
 // chose over replacing it: "read step 2" and "read all 18" are different sizes of decision and the
 // button should say which you are taking.
 
-// What a read has actually COST here, most recent last. The estimate on the button is derived from
-// this and from nothing else: a hardcoded "~35s" would be a claim about a model, a fleet and a
-// network that changes without telling anyone, and it would go on being printed after it stopped
-// being true. Eight is enough to be a median and short enough to follow a real change in speed.
-let revReadMs = [];
-function revNoteReadMs(ms) {
-  if (!(ms > 0)) return;
-  revReadMs.push(ms);
-  if (revReadMs.length > 8) revReadMs.shift();
-}
-
-// The median rather than the mean: one read that hit a retry or a cold cache should not move the
-// estimate for the other seventeen.
-function revReadTypicalMs() {
-  if (!revReadMs.length) return 0;
-  const sorted = [...revReadMs].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
-}
-
-// **No measurement, no estimate.** An empty string, not a guess — a page that has read nothing yet
-// has nothing to base a number on, and a number with nothing behind it is worse than no number,
-// because it will be believed.
-function revStackEstimate(n) {
-  const typical = revReadTypicalMs();
-  if (!typical || n < 1) return "";
-  const ms = Math.ceil(n / REV_SUM_PARALLEL) * typical;
-  return ms >= 90_000 ? ` · ~${Math.round(ms / 60_000)}m` : ` · ~${Math.round(ms / 1000)}s`;
-}
-
 // **Removed: the "no review — read again" affordance** (SKEIN-660; it was SKEIN-371's).
 //
 // What stood here was `revNoReviewCameBack` — true when skein held a reading of THIS commit, no
@@ -901,187 +755,18 @@ function revStackEstimate(n) {
 // that a reading was bought and its review did not come back. Adding a client-side guess instead
 // would be this branch again, and it would be wrong the same way.
 
-// Is this step worth spending a model call on? Unread, or read against a commit that has moved, or
-// a reading that failed to be REACHED — and never one already in flight, which is somebody else's
-// purchase of the same thing. A reading whose REVIEW did not come back was a fourth answer here
-// until SKEIN-660; the note above says why it is not one any more.
-function revStepNeedsReading(p) {
-  const key = rk(p);
-  if (revInFlight.has(key)) return false;
-  const s = revSums.get(key);
-  if (!s || s === "…") return true;
-  return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha;
-}
-
-// **A run per stack** (SKEIN-353). This was one global — *"one run at a time, and only the stack
-// that is open; two of them racing is not a state worth supporting"* — and that decision was wrong
-// twice over. The owner runs several stacks, and the code did not refuse the second press: it took
-// it, overwrote the global, and dropped whatever the first run still had to read. Reported as the
-// smaller half of the damage — "the ladder stack was running read all and when I clicked the read
-// all for other stack, I can't see the read all progress in ladder stack" — because a run whose
-// queue has been orphaned looks exactly like a run that finished quietly.
-//
-// Both halves came from the same line. `revStackRunHtml` draws a run only for the stack it belongs
-// to, so the first stack fell back to its "read all N" button; `revStackPump` read the global, so
-// nothing advanced the first run's `todo` ever again. What was already right, and is what makes
-// this fix small: the `.finally` closes over its own `r`, so the reads in flight when the second
-// press landed still finished and still booked against the run that started them.
-let revStackRuns = new Map();   // stack key -> its run
-
-function revStackReadAll(key) {
-  const st = revStacks.get(key);
-  if (!st) return;
-  // A run already going on THIS stack is left alone. The press cannot be seen while one is running
-  // — the row draws progress where the button was — so arriving here means a stale render, and
-  // replacing the run would be the exact silent abandonment this is fixing, one stack in.
-  const going = revStackRuns.get(key);
-  if (going && !going.stopped && (going.todo.length || going.running.size)) return;
-  const todo = st.steps.filter(revStepNeedsReading).map(p => ({
-    repo: p.repo_id, number: p.number, no: revStepNo(st, p), key: rk(p),
-  }));
-  if (!todo.length) { toast("every step of this stack already has a reading of its current commit"); return; }
-  revStackRuns.set(key, {
-    key, todo, running: new Map(), done: 0, total: todo.length,
-    started_ms: Date.now(), stopped: false,
-  });
-  revStackPump();
-  renderReviewNow();
-}
-
-// **Stopping does not undo.** Steps already read stay read — they were paid for and the readings are
-// on disk — so this only stops STARTING more. The ones in flight finish, because cancelling them
-// would spend the money and throw the answer away.
-function revStackStop(key) {
-  const r = revStackRuns.get(key);
-  if (!r) return;
-  r.stopped = true;
-  // The other runs keep their slots and carry on — stopping one stack is not stopping reading.
-  // Their pump has to be nudged, because the width this one just gave back is shared.
-  revStackPump();
-  renderReviewNow();
-}
-
-// Several at once, which is what the owner chose over one-at-a-time for the wall clock. The width is
-// `REV_SUM_PARALLEL` and deliberately the same number as the pane's own pump: the reason for that
-// throttle is not a UI nicety, it is that these reads share a rate limit with the boxes doing the
-// real work, and a stack read is exactly the burst that would take the window away from them.
-// **A press is not held to the read-ahead width, and `REV_SUM_PARALLEL` is not this function's
-// business** (SKEIN-353). That width of three governs skein's OWN initiative — `revPumpSummaries`
-// — and nothing a person pressed. The reads not ending is its own defect (SKEIN-350); the shared
-// width of three is what turned three stuck reads into two stalled queues.
-//
-// So a run reads at `REV_ASKED_PARALLEL` — see there for why that number exists at all and why it
-// is not `REV_SUM_PARALLEL` — and runs are INDEPENDENT of each other. They do not share a pipe: a
-// second stack the reader pressed does not queue behind the first, because both are things he
-// asked for and neither is skein deciding to spend his day.
-function revStackPump() {
-  for (const r of revStackRuns.values()) {
-    while (!r.stopped && r.running.size < REV_ASKED_PARALLEL && r.todo.length) {
-      const step = r.todo.shift();
-      r.running.set(step.key, step);
-      revFetchSummary(step.repo, step.number, "force").finally(() => {
-        // `r`, not a lookup: a run the reader has since stopped, or a stack that has left the
-        // queue, must still finish its own bookkeeping against itself rather than crediting a step
-        // to whatever is running now.
-        r.running.delete(step.key);
-        r.done++;
-        revStackPump();
-        renderReviewNow();
-      });
-    }
-  }
-}
-
-// What the stack row says while a run is going, and after it ends.
-//
-// It stays on screen when the run finishes rather than vanishing: the last thing a reader wants to
-// know about eighteen model calls is that they happened and how many landed, and a progress line
-// that disappears at 18 of 18 answers that question by removing it.
-function revStackRunHtml(st) {
-  const key = revStackKey(st);
-  const unread = st.steps.filter(revStepNeedsReading).length;
-  // A shortfall count stood here — "N read but with no review", SKEIN-371's number — and went with
-  // the branch that decided it (SKEIN-660). This line can say how many steps have no reading; it
-  // cannot say how many were read and came back without a review, because no payload says so.
-  const r = revStackRuns.get(key) || null;
-  if (!r) {
-    if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
-    const all = unread === st.steps.length;
-    return `<div class="stackread">
-      <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll(${esc(JSON.stringify(key))})">${
-        all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
-      <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, ${
-        Math.min(unread, REV_ASKED_PARALLEL)} at a time</span>
-    </div>`;
-  }
-  const live = [...r.running.values()];
-  // Over when nothing is running and there is nothing left to start — and a STOPPED run has
-  // nothing left to start whatever is still in its queue, which is the case that read as "still
-  // going" for ever: `stopped` never drains `todo`, so a run ended by the reader would otherwise
-  // sit on "⟳ reading stack…" with nothing in flight and nothing coming.
-  const over = !live.length && (!r.todo.length || r.stopped);
-  const steps = live.map(x => x.no).sort((a, b) => a - b);
-  return `<div class="stackread">
-    <span class="revflight">${over ? "✓" : "⟳"} ${
-      over ? (r.stopped ? "stopped" : "read the stack")
-           : `reading stack…`} ${r.done} of ${r.total} done
-      <span class="revflight-secs" data-started="${r.started_ms}">${revElapsed(Date.now() - r.started_ms)}</span></span>
-    ${live.length ? `<span class="dim">${live.length} running · step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}</span>` : ""}
-    ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
-    ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
-    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop(${esc(JSON.stringify(key))})">stop</button>`}
-  </div>`;
-}
-
-// **What a stack's run says on its COLLAPSED row** (SKEIN-370). Empty when it has none.
-//
-// SKEIN-353 made the runs independent — two stacks read at once, each with its own queue, counter
-// and stop control — and left the progress exactly where it had always been: `revStackRunHtml`,
-// reached only from `revStackSteps`, which draws only for the stack that is OPEN. Opening is
-// exclusive (`toggleRevStack` sets `revOpen = new Set([key])` and clears `revStackOpenKey`,
-// docs/parity.md §3), so the owner's sentence was half answered — "the ladder stack was
-// running read all and when I clicked the read all for other stack, I can't see the read all
-// progress in ladder stack". The run survives now; it was simply off screen while he looked at the
-// other one, and the collapsed row said "you are at step 2 of 18 · review from the bottom" whether
-// or not eighteen model calls were in flight for it.
-//
-// **It leads the gist cell, and it is short.** That column is rationed (§4) and truncates from the
-// right, so the news has to be the part that survives. What it displaces is "review from the
-// bottom" — standing advice about where to start, not news — while "you are at step N of M" stays,
-// because a reader still has to know where they are.
-//
-// **It stays after the run ends**, the same rule the expanded line already has: the last thing
-// somebody wants to know about eighteen model calls is that they happened and how many landed, and
-// a progress line that vanishes at 18 of 18 answers that question by removing it.
-//
-// A stack with no run renders exactly what it rendered before — the empty string is the whole of
-// that promise, and `tests/ui/stackread.mjs` holds it.
-function revStackRunGist(st) {
-  const r = revStackRuns.get(revStackKey(st));
-  if (!r) return "";
-  // Over when nothing is running and there is nothing left to start — and a STOPPED run has
-  // nothing left to start whatever is still in its queue. Same test as `revStackRunHtml`, because
-  // two surfaces disagreeing about whether a run is going is worse than either being wrong.
-  const over = !r.running.size && (!r.todo.length || r.stopped);
-  return `<span class="revflight">${over ? "✓" : "⟳"} ${
-    over ? (r.stopped ? "stopped at" : "read") : "reading"} ${r.done} of ${r.total}</span> · `;
-}
-
 function revStackRow(st) {
   const key = revStackKey(st);
   const open = revStackOpenKey === key;
   const next = revStackNext(st);
-  // Drawn once and asked twice: the marker's presence is also what takes "review from the bottom"
-  // off the line, and computing it in two places is how the two come to disagree.
-  const running = revStackRunGist(st);
   const line = `<div class="revline" onclick="toggleRevStack(${esc(JSON.stringify(key))})">
       <span class="mv ${next ? "yours" : "done"}" title="${next ? "your move" : "every step is decided"}"></span>
       <span class="stackmark" title="${esc(st.repo_id)}">stack</span>
       <span class="tcell"><span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change${
         st.forks.size ? `, branching` : ""}</span></span>
-      <span class="gist"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>${running}${next
+      <span class="gist"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>${next
         ? `you are at step ${revStepNo(st, next)} of ${st.steps.length}${
-            st.rooted ? "" : " skein can see"}${running ? "" : " · review from the bottom"}`
+            st.rooted ? "" : " skein can see"} · review from the bottom`
         : `every step is decided`}</span>
       ${revRail(next || st.steps[0])}
     </div>`;
@@ -1131,18 +816,11 @@ function revStackSteps(st) {
         <span class="revnum" title="${esc(p.repo_id || "")}">#${p.number}</span>
         <span class="tcell"><span class="st">${esc(p.title || "")}</span>${from
           ? `<span class="revtag" title="two pull requests are based on step ${from}, so the stack branches there — each branch is still reviewed bottom-up">branches from step ${from}${st.rooted ? "" : "+"}</span>`
-          : ""}${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : ""}${
-          // **The retry, on the step itself** (SKEIN-371). A step whose review did not come back
-          // has to be buyable from where it is read, not by leaving the stack — and the same
-          // control covers the two states it always covered, which a step row never drew at all.
-          // `revReadAgain`, not a second control written here: one rule for when a read is offered.
-          revReadAgain(p, revStackStep === rk(p))}</span>
-        ${revGist(revSums.get(rk(p)), rk(p), revStackStep === rk(p))}
+          : ""}${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : ""}</span>
         ${revRail(p)}
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
   }).join("");
   return `<div class="steps">
-      ${revStackRunHtml(st)}
       <div class="stackhint">bottom-up: each diff is expressed against the one below it. The order here is the branch graph (base_ref), not the numbers in the titles.${
         st.rooted ? "" : " The steps below this stack are not in your queue, so the numbers say \u201cat least\u201d."}</div>
       ${rows}</div>`;
@@ -1159,9 +837,6 @@ function toggleRevRow(key) {
     renderReviewNow();
     return;
   }
-  // Looking at it IS the acknowledgement (SKEIN-333). Cleared here rather than on a timer, so the
-  // mark survives however long the reader is away and goes the moment they arrive.
-  revUpdated.delete(key);
   // Exclusive (docs/parity.md §3): opening a row closes every other row and any open stack.
   revOpen = new Set([key]);
   revStackOpenKey = null;
@@ -1173,9 +848,6 @@ function toggleRevRow(key) {
   renderReviewNow();
   // §6 focus rule 4: the expansion lands at ~25% of the viewport, actions visible.
   if (revpane && revpane.querySelector) revKeyShow(revpane.querySelector(`.revrow${revRkQuery(key)}`));
-  // The prose the row shape left behind — off disk, no model call.
-  const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
-  if (((revQueue && revQueue.prs) || []).some(p => rk(p) === key)) revLoadReading(repo, number);
 }
 
 // Set aside until the head moves (SKEIN-144) — the other instrument beside the archive: an

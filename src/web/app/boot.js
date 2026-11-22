@@ -390,8 +390,8 @@ function pickAttachment(folder) {
 
 // ---------- a warning at the top, hidden for a while (SKEIN-1244) ----------
 // The owner's ask: "the warning that come at the top should be dismissable, they can come back after
-// some time but there should be a way to dismiss them temporarily". All four rows take part —
-// #healthban, #loginban, #trainban and #staleban — and each one, once drawn, hands its row and the
+// some time but there should be a way to dismiss them temporarily". All three rows take part —
+// #healthban, #loginban and #staleban — and each one, once drawn, hands its row and the
 // problems it is showing to `banDismissable`, which gives it a ✕ and decides whether it is hidden.
 // What counts as the same problem, and for how long, is `cockpit/src/dismiss.mjs`; this is only the
 // storing and the drawing.
@@ -613,16 +613,6 @@ function connect() {
   // "Still here", and nothing else — no render, because nothing about the fleet changed. This is the
   // whole reason the staleness banner can mean "the server is gone" rather than "nothing happened".
   es.addEventListener("alive", () => { lastTickAt = Date.now(); });
-  // **A reading, on the connection the page already holds** (SKEIN-366). Not a fleet tick and not
-  // counted as one: `lastTickAt` is deliberately untouched, because a reading says nothing about
-  // whether the fleet producer is still turning, and letting it feed the staleness banner would
-  // make a busy review pane hide a dead board.
-  //
-  // This is the whole point of the change. A reading is a model call taking tens of seconds; on its
-  // own request it held one of the browser's six connections for that long, and ten at once
-  // (`REV_ASKED_PARALLEL`) starved everything else the cockpit does. Here, N readings cost nothing
-  // beyond this one stream.
-  es.addEventListener("reading", e => { try { revReadArrived(JSON.parse(e.data)); } catch {} });
   // Told rather than silently skipped: this tab stopped reading long enough to fall behind the
   // producer, so what it holds may be wrong in ways a delta cannot repair. Ask for the whole thing.
   es.addEventListener("behind", e => {
@@ -766,7 +756,7 @@ function loadHealth() {
 // There should be an easy way to do it. I just click something, a session opens I login there and
 // then it closes and everything else starts working."
 //
-// The "popup" is a ROW (the #healthban/#trainban rule: a banner pushes the app down, never covers
+// The "popup" is a ROW (the #healthban rule: a banner pushes the app down, never covers
 // it), and the "something to click" opens a one-shot terminal onto GET /api/login/:runtime/terminal
 // — a WebSocket the server bridges to a PTY running the interactive login. The terminal lives in
 // the modal stack (the #mbx pattern), NOT the dock: dock sessions belong to boxes, persist into

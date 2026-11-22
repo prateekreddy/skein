@@ -59,19 +59,8 @@
   #banmenu button { border:0; background:none; color:var(--text); font:13px/1.3 var(--ui);
                     text-align:left; padding:7px 10px; border-radius:5px; cursor:pointer; }
   #banmenu button:hover, #banmenu button:focus-visible { background:var(--accent-bg); outline:none; }
-  /* The merge train's stops: the same kind of ROW as #healthban, but a different message — not
-     "a box is stale" (amber, environment) but "a machine needs your decision" (attn-red, work).
-     Each repo is its own click target, straight into that repo's review queue. */
-  #trainban { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:14px; row-gap:2px;
-              width:100%; flex:none; background:var(--attn); color:#08090b;
-              font:600 12px/1.35 sans-serif; padding:6px 14px; }
-  #trainban .trainlead { flex:none; }
-  #trainban .trainrepo { border:0; background:none; color:inherit; font:inherit; cursor:pointer;
-                         padding:0; text-align:left; max-width:100%; white-space:nowrap;
-                         overflow:hidden; text-overflow:ellipsis;
-                         text-decoration:underline dotted; text-underline-offset:2px; }
   /* The third kind of ROW: the fleet lost a credential. Not the amber "environment" (#healthban),
-     not the attn-red "a machine needs a decision" (#trainban) — the --error hot amber the palette
+     not an attn-red decision — the --error hot amber the palette
      reserves for API failure, because that is what this is: every model call is being declined. */
   #loginban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
               width:100%; flex:none; background:var(--error); color:#08090b;
@@ -566,6 +555,8 @@
   .revrow.held > .revline { opacity:.55; }
   .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
              align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
+  /* A row with no gist cell gives its title the gist's column too. */
+  .revline > .tcell:nth-last-child(2), .step > .tcell:nth-last-child(2) { grid-column:span 2; }
   .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
   .revnum { font:11px var(--mono); color:var(--faint); text-align:right; }
   /* `overflow:hidden` is load-bearing, not tidiness. The chips are `flex:none`, so on a crowded row
@@ -603,20 +594,6 @@
      is one run of text and truncates as one, and making them all flex would change all of them. */
   .gist.reading { color:var(--faint); font-style:italic;
                   display:flex; align-items:baseline; }
-  /* A READING IN FLIGHT (SKEIN-333). Promoted out of `.gist.reading`'s faint italic, which was
-     written for a placeholder that lasted a moment: this one lasts most of a minute and is the
-     answer to "is anything happening at all", so it carries `--accent` — the page's one meaning
-     for "your move" — and stays upright. `flex:none` so a running counter can never be the thing
-     that wraps a row onto a second line. */
-  .revflight { color:var(--accent-2); font-style:normal; white-space:nowrap; flex:none; }
-  /* Tabular figures: the counter is rewritten in place once a second and proportional digits make
-     the text beside it twitch on every tick. */
-  .revflight-secs { font-variant-numeric:tabular-nums; }
-  .revflight-who { color:var(--faint); margin-left:6px; font-size:11px; }
-  /* The reading being REPLACED, kept visible and plainly subordinate — a reader scanning the list
-     keeps their place, and nobody mistakes it for what skein thinks now. */
-  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; flex:1 1 auto;
-                    min-width:0; overflow:hidden; text-overflow:ellipsis; }
   /* Landed while you were elsewhere, and not yet looked at. Filled, unlike `.revwhy`'s bare words:
      this is a fact about the ROW's freshness rather than a sentence about the pull request, and it
      has to survive being scanned past at speed. */
@@ -652,13 +629,6 @@
   .revtag.refused { background:color-mix(in srgb,var(--attn) 18%,transparent); color:var(--attn); }
   .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
   .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
-  /* "read it" / "re-read" on the collapsed line (SKEIN-228). Outlined rather than filled, because
-     it is the one ACTION among the row's facts and the difference has to be legible without
-     reading it; sized to the chips so it cannot change a row's height. */
-  .revread { font:10px var(--mono); background:none; border:1px solid var(--border-3);
-             border-radius:3px; padding:0 5px; flex:none; color:var(--faint); cursor:pointer;
-             line-height:15px; }
-  .revread:hover { color:var(--accent-2); border-color:var(--accent); }
   /* CI, said once at the top when it is most of the queue: 25 red rows is one broken pipeline,
      not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
   .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
@@ -675,89 +645,8 @@
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
   .revmeta a { color:var(--accent-2); }
-  /* No summary is a *state*, not an absence: skein's rule is that AI may only add scrutiny, so a
-     PR it could not summarise stays at full attention and says so plainly. */
-  .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
-              color:var(--text-2); font-size:12.5px; }
-  /* The day's automatic budget, spent. Amber rather than orange: nothing failed and nothing is
-     wrong — skein stopped spending on its own initiative, and the button beside it is not
-     budgeted at all. Solid, because unlike the other absences this one has a move in it. */
-  .revnosum.budget { border:1px solid var(--border-2); border-left:2px solid var(--waiting); }
-  .revnosum.budget b { color:var(--waiting); font-weight:600; }
   .revtag.flow { background:var(--accent-bg); color:var(--accent-2); }
   .revtag.stopped { background:color-mix(in srgb,var(--attn) 14%,transparent); color:var(--attn); }
-  .revflow { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
-    margin-top:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-direction:column; gap:6px; }
-  .revflow-head { display:flex; align-items:center; gap:8px; }
-  .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
-  .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-  /* HELD, which is neither of the two states beside it (SKEIN-279/326). Not `.revflow-stop`'s red:
-     nothing failed and there is nothing to clear. Not amber either — amber on this page is "true,
-     you should know", and it is spoken for by conditions somebody has to act on. A held workflow is
-     one doing exactly what it was configured to do, so it is promoted out of `.dim` (which read as
-     "nothing here") and no further: the sentence is the whole of the treatment. */
-  .revflow-holding { color:var(--text-2); border-left:2px solid var(--border-3);
-                     padding:1px 0 1px 9px; line-height:1.55; }
-  .revflow-off { color:var(--waiting); }
-  /* The merge-train panel, at the top of the workflows pane: the switch, the front, the line. */
-  .revtrain { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
-    margin:0 0 8px; display:flex; flex-direction:column; gap:8px; font-size:12.5px; color:var(--text-2); }
-  .revtrain-state { display:flex; align-items:center; gap:10px; font-weight:600; color:var(--text); }
-  .revtrain-off { color:var(--attn); font-weight:400; }
-  /* Paused is unmistakable: the body dims as one block, and the state line says so in words. */
-  .revtrain.off .revtrain-body { opacity:.45; }
-  .revtrain-body { display:flex; flex-direction:column; gap:8px; }
-  .revtrain-repo h5 { margin:0 0 4px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
-    color:var(--faint); font-weight:600; }
-  .revtrain-flow { font-weight:600; margin:2px 0; }
-  .revtrain-now { margin:0 0 2px; }
-  .revtrain-car { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:2px 0 2px 8px;
-    border-left:2px solid transparent; }
-  .revtrain-car.front { border-left-color:var(--accent); }
-  .revtrain-car.stopped .revtrain-doing { color:var(--attn); }
-  .revtrain-pos { flex:0 0 34px; text-align:right; color:var(--faint); font-variant-numeric:tabular-nums; }
-  .revtrain .trainnum { border:0; background:none; color:var(--accent-2); font:inherit; cursor:pointer;
-    text-decoration:underline; padding:0; }
-  .revtrain-doing { color:var(--dim); }
-  .revtrain-log { margin:2px 0 6px 44px; display:flex; flex-direction:column; gap:2px; font:11.5px var(--mono); }
-  .revtrain-log .when { color:var(--faint); display:inline-block; min-width:44px; }
-  .revtrain-log .kind { color:var(--dim); display:inline-block; min-width:110px; }
-  .revtrain-log .stopped .kind { color:var(--attn); }
-  .revtrain-log .cleared .kind { color:var(--done); }
-  /* The editor. Steps are numbered and stacked because their ORDER is their meaning — the first one
-     that applies is the one that happens — so it has to look like a sequence, not like a set. */
-  .revflow-edit { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
-    margin:8px 0; display:flex; flex-direction:column; gap:8px; }
-  .revflow-edit-head { display:flex; align-items:center; gap:8px; }
-  .revflow-edit-head input { flex:0 1 220px; font-weight:600; }
-  .revflow-edit-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
-  .revstep { display:flex; align-items:flex-start; gap:8px; border-top:1px solid var(--border-2);
-    padding-top:8px; }
-  .revstep-n { flex:0 0 20px; text-align:center; color:var(--faint); font-variant-numeric:tabular-nums;
-    line-height:26px; }
-  .revstep-body { flex:1 1 auto; display:flex; flex-direction:column; gap:5px; }
-  .revstep-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
-  .revstep-lbl { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint);
-    flex:0 0 46px; }
-  .revstep-atom { display:inline-flex; align-items:center; gap:3px; }
-  .revstep-move { display:flex; gap:2px; }
-  .revx { background:none; border:1px solid transparent; color:var(--faint); cursor:pointer;
-    border-radius:var(--radius-sm); padding:1px 5px; font-size:12px; }
-  .revx:hover { color:var(--text-1); border-color:var(--border-3); }
-  .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
-    margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
-    align-items:center; gap:6px; }
-  .revstale code { color:var(--text-1); }
-  /* A reading built from a remembered queue is a WEAKER claim than a stale one — it says
-     skein cannot tell, not that it knows. Same block, quieter border, so the two are read as
-     the same kind of caution at different strengths rather than as one alarm. */
-  .revstale.blind { border-color:var(--border-3); }
-  /* And a reading that lost its box is the STRONGEST of the three: stale says "this describes an
-     older commit", blind says "skein cannot tell", and this says the reading may not have been of
-     the change at all — it ran with no checkout of it. Amber rather than the blue caution, and
-     never red: the reading did happen and is worth reading, which is why it is drawn beside the
-     brief rather than in place of it. */
-  .revstale.outsidebox { border-color:var(--waiting); }
   /* SKEIN-162: the pressed control becomes the receipt — success is green where the eye already
      is, a refusal is red and STAYS until acted on. No toast carries either. */
   .revreceipt { display:inline-flex; align-items:center; gap:7px; color:var(--done);
@@ -770,13 +659,6 @@
   .revrow.done .revtitle { text-decoration:line-through; text-decoration-color:var(--border-3);
     color:var(--faint); }
   .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
-  .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
-                border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
-                font:11.5px var(--mono); color:var(--text-2); }
-  .revsignals b { display:block; font-weight:600; color:var(--faint); text-transform:uppercase;
-                  letter-spacing:.06em; font-size:10px; margin-bottom:5px; }
-  .revsignals > div { margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
-  .revsignals .dim { color:var(--faint); }
   /* WHO STILL OWES AN APPROVAL (SKEIN-306). One line, in the expanded row and nowhere else: an
      author goes looking for this, and a chip on the collapsed line would be a nag about something
      that is deliberately not their move. */
@@ -806,11 +688,6 @@
      the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
      scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
   .revconv-caret { color:var(--faint); width:9px; flex:none; }
-  /* The stack's own read control and its progress (SKEIN-337). It sits above the steps, inside the
-     expansion, because reading eighteen pull requests is a decision about the STACK and not about
-     whichever step the selection happens to be on. */
-  .stackread { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
-               padding:6px 10px 7px; border-bottom:1px solid var(--line); font-size:12px; }
   /* One line, and only one: `nowrap` with an ellipsis is what makes a collapsed list a LIST rather
      than a shorter wall. A comment whose first line is a 2,000-character paragraph — which is the
      measured case, not a hypothetical — must still occupy exactly one row. */
@@ -819,14 +696,6 @@
   .revcomment-body { font-size:12.5px; line-height:1.55; color:var(--text);
                      white-space:pre-wrap; overflow-wrap:anywhere;
                      max-height:260px; overflow-y:auto; }
-  .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
-  .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
-  .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
-  .revbrief h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);
-                 margin:14px 0 5px; font-weight:600; }
-  .revbrief > :first-child { margin-top:0; }
-  .revbrief p { margin:0 0 9px; }
-  .revbrief code { font:12px var(--mono); background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
   /* A CLEARED QUEUE is the best moment this product has, so it is drawn like one and then says the
      honest next thing — usually that another repo has ten (SKEIN-154, §8.5). Quiet: no colour but
@@ -879,8 +748,6 @@
   .revcompose textarea { width:100%; background:var(--panel); color:var(--text); resize:vertical;
                          border:1px solid var(--border-2); border-radius:var(--radius-sm);
                          padding:8px 10px; font:13px var(--ui); line-height:1.5; }
-  .revanswer { margin-top:10px; padding:9px 11px; background:var(--panel); border-radius:var(--radius-sm);
-               border-left:2px solid var(--accent); font-size:13px; line-height:1.6; }
   .revfold { cursor:pointer; user-select:none; }
   .revfold:hover .dim { color:var(--text); }
   /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
@@ -927,7 +794,6 @@
                     background:color-mix(in srgb,var(--waiting) 14%,transparent);
                     border-radius:3px; padding:0 5px; }
   .stackhint { font:11px var(--mono); color:var(--faint); padding:4px 10px 6px 44px; }
-  .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   /* The record's name and the search row are one pinned block: the conversation scrolls under it. */
   .txtop { position:sticky; top:-14px; z-index:2; margin:-14px -18px 10px; background:var(--inset);
@@ -1261,13 +1127,6 @@
   .set-txt { display:flex; flex-direction:column; gap:3px; min-width:0; }
   .set-title { font-size:13px; color:var(--text); }
   .set-row .desc, .set-field .desc { color:var(--faint); font-size:11.5px; line-height:1.45; }
-  /* The one place a settings description raises its voice: the composition in docs/pr-review.md
-     §13, which a person builds by choosing "approve" and would otherwise never be told about.
-     `--waiting` rather than `--attn`: nothing is broken, and a red line here would read as a fault
-     to be cleared rather than as a consequence that was chosen. */
-  .set-field .desc.warnline { color:var(--text-2); border-left:2px solid var(--waiting);
-      padding:6px 0 6px 9px; background:color-mix(in srgb,var(--waiting) 7%,transparent); }
-  .set-field .desc.warnline b { color:var(--text); }
   .set-field { display:flex; flex-direction:column; gap:7px; padding:14px 0; cursor:default;
                border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); }
   .set-field input, .set-field select { width:100%; }
@@ -1707,6 +1566,7 @@
     .revline { grid-template-columns:14px minmax(0,1fr) auto; row-gap:2px; padding:6px 8px; }
     .revline > .revnum { display:none; }
     .revline > .gist { grid-column:2 / -1; grid-row:2; }
+    .revline > .tcell:nth-last-child(2) { grid-column:auto; }
     .rail { grid-template-columns:auto; }
     .rail .size, .rail .who { display:none; }
   }
@@ -1725,8 +1585,8 @@
     .gauges.on { flex-direction:row; flex-wrap:nowrap; gap:12px; overflow:hidden; margin:-6px 0 10px; }
     .ga { grid-template-columns:auto auto; gap:4px; flex:none; }
     .ga .gbar { display:none; }
-    #loginban, #trainban { flex-wrap:nowrap; }
-    #loginban .banbody > span, #trainban .trainlead { min-width:0; overflow:hidden; text-overflow:ellipsis;
+    #loginban { flex-wrap:nowrap; }
+    #loginban .banbody > span { min-width:0; overflow:hidden; text-overflow:ellipsis;
                                                       white-space:nowrap; flex:0 1 auto; }
     header { gap:10px; row-gap:8px; margin-bottom:12px; }
     .wrap { padding:14px 12px 40px; }

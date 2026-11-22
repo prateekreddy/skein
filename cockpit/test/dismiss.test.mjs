@@ -2,7 +2,6 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   DISMISS_CHOICES, dismissUntil, healthProblems, loginProblems, staleProblems, stillDismissed,
-  trainProblems,
 } from "../src/dismiss.mjs";
 
 const HOUR = 60 * 60 * 1000;
@@ -76,15 +75,11 @@ test("the environment row names its counted failures and its boxes, never their 
   assert.deepEqual(healthProblems(null), []);
 });
 
-test("the login and train rows name what is stopped, not when or why", () => {
+test("the login row names what is stopped, not when or why", () => {
   assert.deepEqual(
     loginProblems([{ runtime: "claude", witness: "refusal", expired_at: "09:00", said: "401" },
                    { runtime: "codex", witness: "file", expired_at: "yesterday" }]),
     ["login:claude", "login:codex"]);
-  assert.deepEqual(
-    trainProblems([{ repo_id: "alpha", stopped: [{ number: 7, why: "CI failed" }, { number: 9, why: "conflict" }] },
-                   { repo_id: "beta" }]),
-    ["alpha#7", "alpha#9"]);
 });
 
 test("one outage is one problem, and the next outage is another", () => {
