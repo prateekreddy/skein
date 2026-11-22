@@ -363,7 +363,7 @@ impl Warden {
         // put to a person as new. The line saying so is written here, at the moment it is decided,
         // because the record it explains is about to stop existing.
         let superseding = std::cell::RefCell::new(Vec::new());
-        let holds = |finished_at: &str| -> Result<bool, String> {
+        let holds = |left: &str| -> Result<bool, String> {
             match doer::undone(&op, which) {
                 Ok(None) => Ok(true),
                 Ok(Some(found)) => {
@@ -371,7 +371,7 @@ impl Warden {
                         &op.operation,
                         "superseded",
                         &format!(
-                            "the record of this id finished at {finished_at}, and {found} — so it \
+                            "the record of this id {left}, and {found} — so it \
                              does not answer this request, which is asked as new"
                         ),
                     ));
@@ -380,7 +380,7 @@ impl Warden {
                 // Neither answer is taken on a guess. Nothing ran on this request and nothing is
                 // replayed; it leaves as site 5 below, with the reason.
                 Err(why) => Err(format!(
-                    "{} has a record that finished at {finished_at}, and it was neither answered \
+                    "{} has a record that {left}, and it was neither answered \
                      from that record nor run again, because whether the record still describes \
                      this host could not be checked: {why}",
                     op.operation
@@ -437,7 +437,19 @@ impl Warden {
                     self.log
                         .record(&op.operation, "settled", &describe(&outcome)),
                 );
-                unrecorded.onto(answer(&outcome))
+                let reply = match &outcome {
+                    Outcome::Undecided { started_at } => Response::json(
+                        409,
+                        serde_json::json!({
+                            "state": "undecided",
+                            "started_at": started_at,
+                            "recovery": recovery(&op, &self.store),
+                        })
+                        .to_string(),
+                    ),
+                    _ => answer(&outcome),
+                };
+                unrecorded.onto(reply)
             }
             // Site 5, the store could not answer. Nothing ran on this request.
             Err(why) => {
@@ -729,6 +741,27 @@ fn vetted(asked: Asked, which: capability::Capability) -> Result<doer::Request, 
     Ok(op)
 }
 
+/// What a person can do about an operation that never settled (SKEIN-1497).
+///
+/// The commands are spelled out because the record is on the host, where skein cannot reach it.
+fn recovery(op: &doer::Request, store: &Store) -> String {
+    let minutes = crate::outcome::DOER_DEADLINE.as_secs() / 60;
+    let sandbox = &op.sandbox;
+    let by_hand = match store.record_path(&op.operation) {
+        Ok(path) => format!(
+            "To settle it sooner, on the host: make sure no `sbx` command for {sandbox} is still \
+             running, check `sbx ls`, then run `rm '{}'` and ask again, which puts it to a person.",
+            path.display().to_string().replace('\'', r"'\''")
+        ),
+        Err(why) => format!("Its record could not be named: {why}"),
+    };
+    format!(
+        "It is not run again while that is open. Once {minutes} minutes have passed since the \
+         command started and no warden is still running it, the warden compares the host with \
+         what this act would leave, and asks a person again if they differ. {by_hand}"
+    )
+}
+
 fn describe(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Ran(Ok(said)) => format!("ran: {said}"),
@@ -800,8 +833,10 @@ fn answer(outcome: &Outcome) -> Response {
             body(
                 "unknown",
                 serde_json::json!({
-                    "error": "this operation is older than the warden's retention window; its \
-                              outcome is not recoverable and it will not be run again"
+                    "error": "this operation is older than the warden's retention window, so its \
+                              outcome is not recoverable. It was not run on this request, because \
+                              the host still looks the way it would leave it; if that changes, \
+                              the same request is put to a person as new"
                 }),
             ),
         ),
@@ -1057,6 +1092,40 @@ esac
             "the refused callers spent the doorway, so a flood wins by refusal what it could not \
              win by approval: {}",
             said.body
+        );
+    }
+
+    /// **An undecided answer carries the exact way out** (SKEIN-1497). The counterfactual is the
+    /// reply going back to `answer`, which has no `recovery`; the `rm` target is then not named.
+    #[cfg(feature = "destroy")]
+    #[test]
+    fn an_undecided_operation_is_answered_with_its_recovery() {
+        let dir = scratch("undecided-recovery");
+        let warden = warden(&dir);
+        let outcomes = dir.join("outcomes");
+        std::fs::create_dir_all(&outcomes).unwrap();
+        let record = outcomes.join("op-stuck.json");
+        std::fs::write(
+            &record,
+            format!(
+                r#"{{"started_at":"{}","finished_at":"","outcome":null,"forgotten":false,"stage":"running"}}"#,
+                chrono::Utc::now().to_rfc3339()
+            ),
+        )
+        .unwrap();
+        let said = ask(
+            &warden,
+            "POST",
+            "/v1/destroy",
+            r#"{"operation":"op-stuck","sandbox":"skein-fleet"}"#,
+        );
+        assert_eq!(said.code, 409, "{}", said.body);
+        let body: serde_json::Value = serde_json::from_str(&said.body).unwrap();
+        assert_eq!(body["state"], "undecided");
+        let recovery = body["recovery"].as_str().unwrap_or_default();
+        assert!(
+            recovery.contains(&format!("rm '{}'", record.display())),
+            "the way out does not name the record: {recovery}"
         );
     }
 

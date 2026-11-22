@@ -119,6 +119,38 @@ fn every_fix_line_names_a_command_the_cli_has() {
 ///
 /// What would make it fail: `skein doctor`'s line in `src/bin/skein.rs`, or either line in
 /// `src/health/sandbox.rs`, saying "per-repo token" again.
+/// **`skein resize` always refuses, so nothing skein prints may promise that it rebuilds**
+/// (SKEIN-1501). `cmd_resize` returns the refusal on every path, and `help` and two `doctor` fix
+/// lines said it carried every box across, which sends a person to a command that does not do it.
+///
+/// Comments are dropped and string continuations joined, so a promise split across two source lines
+/// is still one sentence. **What would make this fail**: putting either old wording back.
+#[test]
+fn nothing_skein_prints_promises_that_resize_rebuilds() {
+    for file in ["src/bin/skein.rs", "src/health/report.rs"] {
+        let body = std::fs::read_to_string(root().join(file)).expect("read the source");
+        let printed = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .map(|line| match line.strip_suffix('\\') {
+                Some(joined) => joined.trim_start().to_string(),
+                None => format!("{}\n", line.trim_start()),
+            })
+            .collect::<String>();
+        for promise in [
+            "carrying every box",
+            "carries every box",
+            "rebuilds it with the create line",
+            "rebuilds the sandbox and carries",
+        ] {
+            assert!(
+                !printed.contains(promise),
+                "{file} tells a person `skein resize` does what it refuses to do: {promise:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn no_line_skein_prints_calls_a_write_token_a_per_repo_token() {
     fn walk(dir: &Path, out: &mut Vec<String>, scanned: &mut usize) {

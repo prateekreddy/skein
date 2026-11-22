@@ -416,6 +416,9 @@ struct Said {
     error: String,
     #[serde(default)]
     started_at: String,
+    /// What a person can do about an operation that never settled, in the warden's words.
+    #[serde(default)]
+    recovery: String,
     /// Audit lines the warden could not write for this operation — see [`Reply`].
     #[serde(default)]
     unrecorded: Vec<String>,
@@ -743,6 +746,7 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
         said: String::new(),
         error: said.to_string(),
         started_at: String::new(),
+        recovery: String::new(),
         unrecorded: Vec::new(),
     });
     let detail = match parsed.error.trim().is_empty() {
@@ -759,13 +763,16 @@ fn read_answer(code: u16, said: &str, operation: &str) -> Result<Answered, Strin
         (200, "already") => Ok(Answered::Already(reply(detail))),
         (200, _) => Ok(Answered::Ran(reply(detail))),
         (_, "undecided") => Ok(Answered::Undecided(reply(format!(
-            "{operation} was accepted at {} and never settled — it may have happened. Ask the \
-             warden about it before doing anything that assumes it did not.",
-            parsed.started_at
+            "{operation} was accepted at {} and never settled — it may have happened. {}",
+            parsed.started_at,
+            match parsed.recovery.trim() {
+                "" => "Check the host with `sbx ls` before doing anything that assumes it did not.",
+                recovery => recovery,
+            }
         )))),
         (410, _) | (_, "unknown") => Ok(Answered::Unknown(reply(format!(
             "{operation} is older than the warden's retention window, so what happened to it is \
-             not recoverable — and it will not be run again. {detail}"
+             not recoverable. It was not run on this request. {detail}"
         )))),
         // A 404 on a doer is §8.3: it is not in that warden's binary. Reported as a failure with the
         // reason, never as "it did not work" — the two send a person to different places.
@@ -1298,7 +1305,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unknown.happened(), None, "unknown must not read as a no");
-        assert!(unknown.detail().contains("will not be run again"));
+        assert!(unknown.detail().contains("not run on this request"));
+        assert!(
+            !unknown.detail().contains("will not be run again"),
+            "a record the host contradicts is retired and asked as new, so `never` is untrue"
+        );
+
+        // The warden's way out reaches the person, in place of the generic line.
+        let stuck = read_answer(
+            409,
+            r#"{"state":"undecided","started_at":"t","recovery":"run `rm x` on the host"}"#,
+            "op-1",
+        )
+        .unwrap();
+        assert!(stuck.detail().contains("run `rm x` on the host"));
 
         // A doer that is not in that warden's binary is a failure with a reason, not a mystery.
         let absent = read_answer(404, r#"{"error":"built without `destroy`"}"#, "op-1").unwrap();

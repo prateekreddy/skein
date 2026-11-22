@@ -622,7 +622,7 @@ fn a_warden_killed_while_an_approval_is_on_the_screen_can_be_asked_the_same_thin
     }
 }
 
-/// **And a destroy killed after it reached `sbx` is never run again** (SKEIN-533).
+/// **And a destroy killed after it reached `sbx` is not run again inside its deadline** (SKEIN-533).
 ///
 /// The other half, and the half that makes the first one safe to have. `sbx rm` may have destroyed
 /// the fleet before the warden died, so "we do not know" is the only honest answer and the only

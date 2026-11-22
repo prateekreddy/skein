@@ -687,9 +687,9 @@ The property is therefore **one approval, one execution**, and it does not depen
 remembering which attempt it is on — which skein could not do across a destroy, because the destroy
 ends it. A caller that crashed after sending a destroy and retries once the fleet has been recreated
 does not get the old "destroyed", and does not get a second destroy either: it gets the approval
-prompt, and the person at the host decides. An operation still in flight is the one case the host is
-not asked about: a warden killed inside `sbx` leaves the command running, and a host half way
-through a destroy reads like one nobody has touched, so that stays "undecided".
+prompt, and the person at the host decides. An operation still in flight is not judged from the
+host: a warden killed inside `sbx` leaves the command running, so it stays "undecided" until
+`DOER_DEADLINE`, and only then can a host that contradicts it send it back to a person.
 
 ### 8.3 Capabilities are compiled
 

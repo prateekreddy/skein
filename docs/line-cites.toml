@@ -1885,27 +1885,27 @@ line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/warden_client.rs:1063"]
+["src/warden_client.rs:1070"]
 line = "pub struct Prompt {"
 cited_by = ["docs/decisions/install-is-one-sandbox-command.md", "docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1109"]
+["src/warden_client.rs:1116"]
 line = "/// **The rule**: for each privileged act, a warden that has that capability performs it; otherwise"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1118"]
+["src/warden_client.rs:1125"]
 line = "/// **Selection is detection, not configuration.** There is no setting and no first-run question: a"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1140"]
+["src/warden_client.rs:1147"]
 line = "pub fn perform(act: &Act) -> Performed {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/warden_client.rs:1222"]
+["src/warden_client.rs:1229"]
 line = "&[(\"DOCKER_SANDBOXES_ROOT_SIZE\".into(), \"200g\".into())]"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/warden_client.rs:1756"]
+["src/warden_client.rs:1776"]
 line = "fn every_prompt_says_the_command_why_it_is_wanted_and_what_declining_costs() {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
@@ -2309,15 +2309,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"none\" => eprintln!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:352"]
+["warden/src/outcome.rs:372"]
 line = "Err(e) => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:369"]
+["warden/src/outcome.rs:389"]
 line = "self.put(&path, &finished).map_err(|e| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/outcome.rs:477"]
+["warden/src/outcome.rs:508"]
 line = "format!("
 cited_by = ["docs/recovery-survey.md"]
 
@@ -2352,37 +2352,37 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"this warden has no `approved` field, and adding one to the request would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:643"]
+["warden/src/serve.rs:655"]
 line = "return Err(format!("
 window = "if !named {\u000breturn Err(format!(\u000b\"{name:?} is not a sandbox name — letters, digits, `.`, `_` and `-`, up to 128 of them, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:650"]
+["warden/src/serve.rs:662"]
 line = "return Err(format!("
 window = "if asked.args.len() > MOST_ARGS {\u000breturn Err(format!(\u000b\"the {} for {name} carries {} arguments, and more than {MOST_ARGS} is more than an \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:659"]
+["warden/src/serve.rs:671"]
 line = "return Err(format!("
 window = "if arg.len() > LONGEST_VALUE || !readable(arg) {\u000breturn Err(format!(\u000b\"an argument of the {} for {name} cannot be shown as what it is, so it cannot be \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:674"]
+["warden/src/serve.rs:686"]
 line = "return Err(format!("
 window = "if asked.env[..at].iter().any(|(seen, _)| seen == key) {\u000breturn Err(format!(\u000b\"`{key}` is given twice, and `sbx` would take the last one — so what ran would not \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:680"]
+["warden/src/serve.rs:692"]
 line = "return Err(format!("
 window = "if !allowed.contains(&key.as_str()) {\u000breturn Err(format!(\u000b\"this warden does not pass `{key}` to a {}. The environment decides what a relative \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:691"]
+["warden/src/serve.rs:703"]
 line = "return Err(format!("
 window = "if value.len() > LONGEST_VALUE || !readable(value) {\u000breturn Err(format!(\u000b\"the value of `{key}` cannot be shown as what it is, so it cannot be approved: \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["warden/src/serve.rs:716"]
+["warden/src/serve.rs:728"]
 line = "return Err(format!("
 window = "if shown.len() > LONGEST_APPROVAL {\u000breturn Err(format!(\u000b\"the approval for this {} would be {} bytes of text, and more than \\"
 cited_by = ["docs/recovery-survey.md"]
