@@ -584,9 +584,9 @@ fn a_file_a_box_holds_open_marks_the_version_open_in_its_repos_area_only() {
     );
 }
 
-/// **Every agent in a box runs `skein-lock` by name, Codex's too, and no box can change it**
-/// (SKEIN-1436). Claude Code puts its plugin's `bin` on its own PATH; a Codex session has only the
-/// box's PATH, which is all this probe runs on.
+/// **Every agent in a box runs `skein-lock` by name, and no box can change it**
+/// (SKEIN-1436). Claude Code puts its plugin's `bin` on its own PATH; this probe runs on the box's
+/// PATH alone, so it holds without that.
 ///
 /// What would make it fail: the `~/.skein-bin` bind dropped (not found), it left off `box_path`
 /// (not found), the turn-state variant installed without the command (not found), or the bind

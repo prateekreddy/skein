@@ -35,7 +35,7 @@ pub enum Liveness {
 #[derive(Clone, Debug)]
 pub struct SbxBox {
     pub name: String,
-    /// "claude" | "codex" | … — the per-runtime seam for the (later) turn-state adapter.
+    /// The runtime's id (`claude`) — the per-runtime seam for the (later) turn-state adapter.
     pub agent: String,
     /// Run state; `None` if sbx reports an unrecognised status (caller falls back to lastSeen).
     pub live: Option<Liveness>,
@@ -453,8 +453,7 @@ mod tests {
     use crate::board::load_views;
     use crate::config::{load_config, save_config, Config};
     use crate::place::{forget_place, record_place, PlaceRecord};
-    use crate::repos::{Repo, REPOS_CACHE};
-    use crate::takeover::replacement_name;
+    use crate::repos::REPOS_CACHE;
     use crate::testutil::*;
     use std::env;
     use std::fs;
@@ -771,7 +770,7 @@ mod tests {
     fn transient_fleet_failure_reuses_last_good_and_empty_success_replaces_it() {
         let box_ = SbxBox {
             name: "live-box".into(),
-            agent: "codex".into(),
+            agent: "claude".into(),
             live: Some(Liveness::Running),
             dir: "/work".into(),
         };
@@ -812,7 +811,7 @@ mod tests {
     // able to edit the host's own checkout, which the read-only bind used to guarantee for free.
     // Three resolutions that all asked `sbx ls` who a box is. A box in the fleet is not a sandbox
     // and never appears there, so each one quietly failed for the whole fleet: its workspace was
-    // unknown, a takeover of it refused, and a replacement could be handed the name of a live box.
+    // unknown.
     #[test]
     fn a_box_in_the_fleet_can_still_be_found_by_name() {
         let _g = env_lock();
@@ -847,38 +846,6 @@ mod tests {
             Some("/boxes/web-main/tree"),
             "a placed box knows its own checkout even when sbx has never heard of it"
         );
-        // And a name already taken by a fleet box must not be handed out again.
-        let repo = Repo {
-            id: "web".into(),
-            source: String::new(),
-            store: String::new(),
-            plane_project: String::new(),
-            sync_connection: String::new(),
-            review_queue: true,
-            sync_gateway_url: String::new(),
-            ..Default::default()
-        };
-        record_place(
-            "web-main-codex",
-            &PlaceRecord {
-                sandbox: "skein-fleet".into(),
-                ns_pid: 2,
-                home: "/boxes/web-main-codex/home".into(),
-                tree: "/boxes/web-main-codex/tree".into(),
-                sock: "/boxes/web-main-codex/session.sock".into(),
-                generation: "test-boot".into(),
-                ns_start: 1,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let picked = replacement_name(&repo, "web-main", "main", "codex");
-        assert_ne!(
-            picked, "web-main-codex",
-            "that name is a live box in the fleet; `start_box` would refuse its existing tree"
-        );
-        forget_place("web-main-codex");
-
         env::remove_var("SKEIN_LS_CMD");
         env::remove_var("SKEIN_REGISTRY");
         forget_place("web-main");

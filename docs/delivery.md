@@ -118,7 +118,7 @@ not a serde attribute and should be scoped deliberately.
 **2 — Extract `state`, `source`, `signal` and `operation` as modules in the current binary.**
 `signals.rs` is already most of the way there, `util.rs` already implements the gate contract, and
 the `ensure_*` functions already exist — sixteen when this step was planned, and **twenty `pub` plus
-the private `ensure_source_takeover_tools`** (itself a sandbox-root apt install) on 2026-09-06. The
+the private takeover's source-tools installer (removed, SKEIN-1511)** (itself a sandbox-root apt install) on 2026-09-06. The
 Operation primitive names something the codebase does, and it has kept naming more of it. Reproduce
 with `grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u`; `inventory.md` §8 lists
 them by privilege domain. `doctor` becomes "every check, reported" with no UI change.
@@ -446,7 +446,7 @@ breaks, and none of it was in the first draft.
 - **Unpushed work in every box.** Checkouts are VM-local, held nowhere on the host.
 - **Every box's conversation**, keyed by a cwd-derived slug — so *any* change to box root layout
   orphans all of it. There is already one repair in the codebase for exactly this.
-- **Every box's HOME**: `.claude.json`, `.codex`, `.gitconfig`, per-box MCP registration.
+- **Every box's HOME**: `.claude.json`, `.gitconfig`, per-box MCP registration.
 - **Secrets with no second copy**: `tokens/`, `github-pats/`, the read token, the App key, the API
   token, and `fleet-home/` — the agent logins copied out of the sandbox.
 - **Grants and approvals as facts**: git-write grants and the approved-package manifest exist

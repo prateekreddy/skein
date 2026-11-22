@@ -116,11 +116,9 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
 - **Session digest** — "what happened here": blocked-on, last message, journal, commits, diff
   summary, assembled from free signals with no model tokens. Distinct from `narrate`, which is the
   paid version.
-- **Takeover is a runtime migration**, not an attach: it snapshots the box, creates a *replacement*
-  box on the other runtime with a generated handoff brief, and keeps the original as rollback.
 - **Update rules / refresh docs** — re-apply work-tracking documents that are older than the store's,
   rewriting only documents the box has not edited; shift-click widens it.
-- Transcript reader, with search — your words, Claude's or both, in the session or all of a box's sessions, and a result opens the record at that message (SKEIN-1323, `search_transcript`); statusline; runtime selection; `skein attach --handoff` / `--agent`.
+- Transcript reader, with search — your words, Claude's or both, in the session or all of a box's sessions, and a result opens the record at that message (SKEIN-1323, `search_transcript`); statusline; runtime selection; `skein attach --agent`.
 
 ## 3. Review
 
@@ -378,9 +376,7 @@ to recover it.
 
 **A repository no longer picks a runtime, and the Add-repository overlay's agent picker is gone**
 (the owner, 2026-09-27, SKEIN-1207). A runtime is one fleet default (Settings → Boxes → Default
-agent) plus a pick per box in the New box dialog. The cost: a person who wanted every box of one repo
-on Codex and every other repo on Claude now picks Codex for each of that repo's boxes, or makes Codex
-the default and picks Claude for the rest. What it removes is a third place the same choice could be
+agent) plus a pick per box in the New box dialog. What it removes is a third place the same choice could be
 made. `skein add --agent` is refused with where the
 choice lives now, and an old `repos.json` naming a runtime still loads.
 

@@ -23,7 +23,7 @@ const KIT_SPEC_YAML: &str = include_str!("kit/spec.yaml");
 /// It has two callers that must not drift: sbx runs it as this kit's startup hook in a `--clone`
 /// sandbox, and [`crate::fleet::provision_script`] runs the same bytes inside a box's namespace in
 /// the shared sandbox. Provisioning is a dozen steps — the store link, the settings merge, the
-/// branch checkout, the handoff restore, shared-home, the agent guide, the Codex hooks, the skills,
+/// branch checkout, the handoff restore, shared-home, the agent guide, the skills,
 /// the boot report, the sync install — and a second implementation of them for the fleet path would
 /// be a second set of ways for a box to come up looking healthy with no hooks wired.
 pub(crate) const KIT_STARTUP_SH: &str = include_str!("kit/skein-startup.sh");
@@ -158,7 +158,7 @@ fn store_freshly_created(store: &Path) -> Result<bool, String> {
         "tasks",
         "journals",
         "telemetry",
-        // durable Claude <-> Codex takeover briefs plus one-shot per-runtime pending copies
+        // one-shot briefs left by the removed takeover (SKEIN-1511), for a box yet to start
         "handoffs",
         // narrative signal per box (box-session.sh): the headline / fork-detector / digest source
         "sessions",
@@ -735,13 +735,10 @@ mod tests {
             "skein/bin/box-status.sh",
             "skein/bin/box-journal.sh",
             "skein/bin/box-token-usage.sh",
-            "skein/bin/box-codex-task.sh",
-            "skein/bin/box-codex-telemetry.sh",
             "skein/bin/box-handoff.sh",
             "skein/bin/sandbox-bootstrap.sh",
             "skein/bin/shared-home.sh",
             "skein/bin/agent-guide.sh",
-            "skein/bin/install-codex-hooks.sh",
             "skein/SHARED-HOME.md",
             "skein/bin/mailbox.sh",
             "skein/bin/statusline-command.sh",
@@ -757,12 +754,6 @@ mod tests {
             assert!(store.join(f).is_file(), "missing {f}");
         }
         assert!(store.join("settings.json").is_file());
-        // Codex's generated hooks ship in skein's read-only plugin beside their installer, not
-        // here, where any box of the repo could rewrite them for its siblings (SKEIN-1149).
-        assert!(
-            !store.join("skein/codex-hooks.json").exists(),
-            "the store was given Codex's hook wiring, which every box of the repo can rewrite"
-        );
         assert!(store.join("skein/probe-revision").is_file());
         assert!(store.join("skein/runtimes.tsv").is_file());
         // layout is documented for the user to (optionally) fill
@@ -1486,10 +1477,10 @@ mod tests {
         let work_tmp = tempdir();
         let work = work_tmp.join("work");
         ensure_store(&store).unwrap();
-        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(&work).unwrap();
         symlink(&store, work.join(".claude")).unwrap();
-        fs::write(home.join(".codex/AGENTS.md"), "# My existing guidance\n").unwrap();
+        fs::write(home.join(".claude/CLAUDE.md"), "# My existing guidance\n").unwrap();
         let helper = store.join("skein/bin/agent-guide.sh");
         let run = |normal: &str, override_: &str| {
             box_shell(&work_tmp)
@@ -1502,28 +1493,29 @@ mod tests {
                 .unwrap()
         };
 
-        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+        assert!(run(".claude/CLAUDE.md", ".claude/CLAUDE.override.md")
             .status
             .success());
-        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+        assert!(run(".claude/CLAUDE.md", ".claude/CLAUDE.override.md")
             .status
             .success());
-        let agents = fs::read_to_string(home.join(".codex/AGENTS.md")).unwrap();
+        let agents = fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap();
         assert!(agents.contains("My existing guidance"));
         assert_eq!(agents.matches("skein:shared-home:start").count(), 1);
 
         fs::write(
-            home.join(".codex/AGENTS.override.md"),
+            home.join(".claude/CLAUDE.override.md"),
             "# My temporary override\n",
         )
         .unwrap();
-        assert!(run(".codex/AGENTS.md", ".codex/AGENTS.override.md")
+        assert!(run(".claude/CLAUDE.md", ".claude/CLAUDE.override.md")
             .status
             .success());
-        let override_ = fs::read_to_string(home.join(".codex/AGENTS.override.md")).unwrap();
+        let override_ = fs::read_to_string(home.join(".claude/CLAUDE.override.md")).unwrap();
         assert!(override_.contains("My temporary override"));
         assert_eq!(override_.matches("skein:shared-home:start").count(), 1);
 
+        fs::remove_file(home.join(".claude/CLAUDE.override.md")).unwrap();
         assert!(run(".claude/CLAUDE.md", "").status.success());
         assert!(fs::read_to_string(home.join(".claude/CLAUDE.md"))
             .unwrap()
@@ -1532,7 +1524,7 @@ mod tests {
         // Without a real takeover, the turn-scoped handoff hook must emit no context at all.
         let handoff = box_shell(&work_tmp)
             .arg(store.join("skein/bin/box-handoff.sh"))
-            .arg("codex")
+            .arg("claude")
             .env("CLAUDE_PROJECT_DIR", &work)
             .env("SANDBOX_VM_ID", "box-a")
             .output()
@@ -2058,7 +2050,7 @@ mod tests {
         Command::new("jq").arg("--version").output().is_ok()
     }
 
-    /// A takeover's snapshot, written the way `takeover::prepare_replacement` writes one: a bundle
+    /// A takeover's snapshot, written the way the removed takeover wrote one: a bundle
     /// of the clone's HEAD, its manifest, and `untracked.tgz` built from `untracked` (relative
     /// path, contents). `unproduced` builds an `agent-state.tgz` beside them, which nothing has
     /// written since SKEIN-1289 and the kit must leave alone (SKEIN-1314). Built in `stage`, a
@@ -2299,7 +2291,7 @@ mod tests {
     }
 
     /// **A snapshot's bundle is restored from its HEAD, the commit its manifest records**
-    /// (SKEIN-1321). The one producer, `takeover::prepare_replacement`, bundles HEAD alone; the kit
+    /// (SKEIN-1321). The one producer, the removed takeover, bundled HEAD alone; the kit
     /// used to prefer `refs/heads/<branch>` from the bundle, for a fleet resize's `--all` bundle
     /// that nothing has written since SKEIN-1289.
     ///
@@ -3183,94 +3175,8 @@ mod tests {
         }
     }
 
-    /// **A Codex box may write the shared home and the mailbox: both are `writable_roots` in its
-    /// `config.toml`, in a line skein owns, and never over the person's own** (SKEIN-1330).
-    ///
-    /// What would make it fail: the kit not writing the line (nothing writable), writing the link
-    /// `$HOME/shared` rather than where it leads (Codex checks the real path), a second line on the
-    /// second start (a key twice is a file Codex will not load — checked by parsing it), dropping a
-    /// key of the person's in the same table, or writing beside a `writable_roots` of theirs.
-    #[test]
-    fn codex_may_write_the_shared_home_and_the_mailbox() {
-        if !have_jq() {
-            return skip("no jq here, and the kit's merge is jq");
-        }
-        let parse = |p: &Path| -> Option<serde_json::Value> {
-            let out = Command::new("python3")
-                .args(["-I", "-c", "import json,sys,tomllib; print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))"])
-                .arg(p)
-                .output()
-                .ok()?;
-            assert!(out.status.success(), "not TOML Codex can load: {out:?}");
-            serde_json::from_slice(&out.stdout).ok()
-        };
-        let _lock = env_lock();
-        let skein_home = tempdir();
-        let mut env = env_pins();
-        env.set("SKEIN_HOME", &*skein_home);
-        env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
-        let kit = KitBox::new("codex", None);
-        let cfg = kit.home.join(".codex/config.toml");
-        let want = serde_json::json!([
-            kit.store.with_file_name("shared-home"),
-            kit.store.join("mailbox"),
-        ]);
-
-        // No config at all, then the same start again. Twice before the comparison: the kit trusts
-        // the checkout in `config.toml` only once the file is there, which the first start makes.
-        kit.start();
-        kit.start();
-        let first = fs::read_to_string(&cfg).unwrap();
-        kit.start();
-        assert_eq!(
-            fs::read_to_string(&cfg).unwrap(),
-            first,
-            "the third start changed it"
-        );
-        if let Some(v) = parse(&cfg) {
-            assert_eq!(
-                v["sandbox_workspace_write"]["writable_roots"], want,
-                "{first}"
-            );
-        }
-        assert_eq!(kit.boot()["codex_roots"], "set");
-
-        // The person's own table: the line goes in it, and their key stays.
-        fs::write(
-            &cfg,
-            "[sandbox_workspace_write]\nnetwork_access = true\n\n[tui]\nx = 1\n",
-        )
-        .unwrap();
-        kit.start();
-        kit.start();
-        let text = fs::read_to_string(&cfg).unwrap();
-        if let Some(v) = parse(&cfg) {
-            assert_eq!(
-                v["sandbox_workspace_write"]["writable_roots"], want,
-                "{text}"
-            );
-            assert_eq!(
-                v["sandbox_workspace_write"]["network_access"], true,
-                "{text}"
-            );
-            assert_eq!(v["tui"]["x"], 1, "{text}");
-        }
-
-        // Their own list: left exactly as it was, and said.
-        // With the checkout's trust already in it, so the only thing that could change is skein's.
-        let theirs = format!(
-            "[sandbox_workspace_write]\nwritable_roots = [\"/theirs\"]\n\n[projects.\"{}\"]\n\
-             trust_level = \"trusted\"\n",
-            kit.tree.display()
-        );
-        fs::write(&cfg, &theirs).unwrap();
-        kit.start();
-        assert_eq!(fs::read_to_string(&cfg).unwrap(), theirs);
-        assert_eq!(kit.boot()["codex_roots"], "theirs");
-    }
-
     /// **Every `.claude` or `$HOME` path the guide skein writes into a box names is there, in both
-    /// layouts and for both runtimes** (SKEIN-1050).
+    /// layouts** (SKEIN-1050).
     ///
     /// The guide is the kit's own output, read back from the runtime's instruction file after the
     /// kit ran. A path is every backticked token starting `.claude`, `$HOME/` or the fleet root
@@ -3296,10 +3202,7 @@ mod tests {
         let mut env = env_pins();
         env.set("SKEIN_HOME", &*skein_home);
         env.set("SKEIN_FLEET_ROOT", skein_home.join("fleet"));
-        for (agent, file) in [
-            ("claude", ".claude/CLAUDE.md"),
-            ("codex", ".codex/AGENTS.md"),
-        ] {
+        for (agent, file) in [("claude", ".claude/CLAUDE.md")] {
             for ships in [None, Some("{}\n")] {
                 let kit = KitBox::new(agent, ships);
                 kit.start();

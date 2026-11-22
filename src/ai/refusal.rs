@@ -79,7 +79,7 @@ impl Standing {
 /// not appearing, which is where this started.
 fn says_the_credential_is_dead(said: &str) -> bool {
     let lower = said.to_lowercase();
-    // Every shape seen from `claude` and `codex`.
+    // Every shape seen from `claude`.
     [
         "oauth session expired",
         "could not be refreshed",
@@ -163,7 +163,7 @@ fn now_ms() -> i64 {
 /// anywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthRefusal {
-    /// `claude` or `codex` — whichever binary was refused.
+    /// `claude`, the binary that was refused.
     pub runtime: &'static str,
     /// When skein was told, in epoch milliseconds. Not when the credential died, which nothing here
     /// can know: the honest stamp is the moment it was found out.
@@ -220,7 +220,6 @@ pub(crate) fn plant_refusal_saying(said: &str) {
             code: "1".into(),
             said: said.into(),
         },
-        "claude",
     );
 }
 
@@ -246,7 +245,7 @@ pub(super) fn standing_refusal() -> Option<Unread> {
     refusal_still_standing().map(|standing| standing.why)
 }
 
-pub(super) fn remember_refusal(why: &Unread, bin: &str) {
+pub(super) fn remember_refusal(why: &Unread) {
     // A setup problem, not a bad moment. See the type above.
     if !matches!(
         why,
@@ -261,16 +260,10 @@ pub(super) fn remember_refusal(why: &Unread, bin: &str) {
         *held = Some(Standing {
             why: why.clone(),
             at_ms: now_ms(),
-            // Which credential was in play. `codex` names itself in the binary; everything else
-            // skein asks is `claude`, including a `$SKEIN_CLAUDE_BIN` pointed at a stub.
-            runtime: match bin.contains("codex") {
-                true => "codex",
-                false => "claude",
-            },
-            credential: crate::fleet::login_fingerprint(match bin.contains("codex") {
-                true => "codex",
-                false => "claude",
-            }),
+            // Which credential was in play: skein asks `claude`, including through a
+            // `$SKEIN_CLAUDE_BIN` pointed at a stub.
+            runtime: "claude",
+            credential: crate::fleet::login_fingerprint("claude"),
         });
     }
 }

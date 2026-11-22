@@ -325,9 +325,6 @@ vars = ["SKEIN_HOME"]
 [leaks."src/probes::boxes_sharing_one_sandbox_each_report_under_their_own_name"]
 vars = ["SKEIN_HOME"]
 
-[leaks."src/probes::codex_hook_installer_preserves_user_hooks_and_is_idempotent"]
-vars = ["SKEIN_HOME"]
-
 [leaks."src/probes::no_probe_files_a_signal_under_the_sandboxs_name"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
@@ -365,9 +362,6 @@ vars = ["SKEIN_HOME"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
 
 [leaks."src/sandbox::box_write_argv_creates_the_dir_and_avoids_a_pty"]
-vars = ["SKEIN_HOME"]
-
-[leaks."src/sandbox::codex_launch_records_runtime_and_bypasses_generated_hook_review"]
 vars = ["SKEIN_HOME"]
 
 [leaks."src/sandbox::delist_box_removes_records_and_guards"]
@@ -438,12 +432,6 @@ vars = ["SKEIN_FLEET_ROOT"]
 
 [leaks."src/substrate::the_packages_approved_are_the_ones_that_were_on_screen"]
 vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME"]
-
-[leaks."src/takeover::a_takeover_refuses_over_settings_it_cannot_read"]
-vars = ["SKEIN_HOME"]
-
-[leaks."src/takeover::preparing_a_takeover_asks_the_source_box_itself"]
-vars = ["SKEIN_FLEET_ROOT", "SKEIN_HOME", "SKEIN_LS_CMD"]
 
 [leaks."src/transcript::a_stopped_boxs_conversation_is_still_readable"]
 vars = ["SKEIN_HOME"]

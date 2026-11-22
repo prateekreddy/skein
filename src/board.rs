@@ -174,9 +174,8 @@ pub fn load_views() -> Vec<BoxView> {
             let task = current_task(&name).or_else(|| {
                 let obs = pane.as_ref()?;
                 // Busy *and* a title this observer watched change recently: the text is a live tool
-                // description only under both conditions (see PaneObs::title_age). Claude only —
-                // Codex's title is the working directory (`⠧ skein`), which names no activity, so
-                // reading it as one would put the box's own folder name in the task column.
+                // description only under both conditions (see PaneObs::title_age). Claude only:
+                // another runtime's title need not name an activity at all.
                 //
                 // `title_is_fresh` rather than the bound spelled out here: the glyph half of the
                 // title is gated on the same predicate (`title_is_spinning`), and two spellings of
@@ -341,7 +340,7 @@ pub struct BoxView {
     /// Lets the cockpit group rows by repo once more than one is managed.
     #[serde(default)]
     pub repo: String,
-    /// Runtime configured for this sandbox (`claude` or `codex`). The cockpit uses this as the
+    /// Runtime configured for this sandbox (`claude`). The cockpit uses this as the
     /// default agent and offers the other runtime as a replacement-box takeover target.
     #[serde(default = "default_agent")]
     pub agent: String,

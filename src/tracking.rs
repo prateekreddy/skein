@@ -1088,7 +1088,7 @@ pub fn sync_provision_box(name: &str) -> Result<String, String> {
     record_minted(name, &conn.id)?;
 
     // Registration itself is the store installer's job, not a second copy of that logic here: it is
-    // the thing that knows both runtimes, and it is the same script the kit runs at startup, so a
+    // the thing that knows the runtime, and it is the same script the kit runs at startup, so a
     // box wired up by hand and one wired up on creation cannot end up differently configured. FORCE
     // is exactly the "a new token has arrived" case it exists for. See [`SYNC_INSTALL_IN_BOX`].
     let report = located(name)
@@ -2075,7 +2075,7 @@ mod tests {
         ensure_store(&store).unwrap();
 
         // An ESTABLISHED box: a CLAUDE.md the team has evolved, memories they curated with their
-        // own index, a skills dir, and a Codex config with hand-written entries. Wiring up work
+        // own index, and a skills dir. Wiring up work
         // tracking must add to all of it and replace none of it.
         let project = home.join("proj");
         fs::create_dir_all(&project).unwrap();
@@ -2105,12 +2105,7 @@ mod tests {
         fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
 
         let boxhome = home.join("boxhome");
-        fs::create_dir_all(boxhome.join(".codex")).unwrap();
-        fs::write(
-            boxhome.join(".codex").join("config.toml"),
-            "[mcp_servers.something_else]\nurl = \"https://theirs.test\"\n",
-        )
-        .unwrap();
+        fs::create_dir_all(&boxhome).unwrap();
         let run = || {
             box_shell(&home)
                 .arg(store.join("skein").join("bin").join("sync-install.sh"))
@@ -2149,16 +2144,6 @@ mod tests {
         .unwrap();
         assert_eq!(settings["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
 
-        // Codex keeps the token route: plugins are a Claude Code feature, so for Codex this is not
-        // a fallback, it is the only way it ever gets these tools.
-        let codex = fs::read_to_string(boxhome.join(".codex/config.toml")).unwrap();
-        assert!(codex.contains("[mcp_servers.sync]"), "{codex}");
-        assert!(codex.contains("Bearer skein-test-sync-agent"), "{codex}");
-        assert!(
-            codex.contains("https://theirs.test"),
-            "it appends, never rewrites: {codex}"
-        );
-
         // The rules land only after registration, and they land in the STORE — this repo's
         // `.claude` — so every box of the repo sees them, not just the one that was wired up.
         let claude_md = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
@@ -2168,14 +2153,6 @@ mod tests {
             "it appends, never replaces"
         );
         assert!(store.join("memory/work-tracking.md").is_file());
-        // Still shipped here because this box has Codex, which cannot install a Claude Code plugin
-        // and would otherwise be left with the tools and no playbook for them. The sibling test
-        // covers the other half: with the plugin and no Codex, this copy is skipped.
-        assert!(store.join("skills/work-tracking/SKILL.md").is_file());
-        assert!(store.join("skills/work-tracking/organising.md").is_file());
-        assert!(store
-            .join("skills/work-tracking/troubleshooting.md")
-            .is_file());
         let index = fs::read_to_string(store.join("memory/MEMORY.md")).unwrap();
         assert!(index.contains("(work-tracking.md)"));
 
@@ -2193,20 +2170,10 @@ mod tests {
             fs::read_to_string(store.join("skills/ours/SKILL.md")).unwrap(),
             "ours\n"
         );
-        let codex = fs::read_to_string(boxhome.join(".codex/config.toml")).unwrap();
-        assert!(
-            codex.contains("[mcp_servers.something_else]") && codex.contains("https://theirs.test"),
-            "a hand-written Codex entry was lost: {codex}"
-        );
-        assert_eq!(
-            codex.matches("[mcp_servers.sync]").count(),
-            1,
-            "the Codex block was written more than once: {codex}"
-        );
 
         // Once, then hands off: the box may delete what it does not want, and a later start must
         // not restore it. Re-running is also how a box start behaves, so this is the common path.
-        fs::remove_file(store.join("skills/work-tracking/SKILL.md")).unwrap();
+        fs::remove_file(store.join("memory/work-tracking.md")).unwrap();
         assert!(run().status.success());
         assert_eq!(
             fs::read_to_string(project.join("CLAUDE.md"))
@@ -2217,8 +2184,8 @@ mod tests {
             "a second run appended the section again"
         );
         assert!(
-            !store.join("skills/work-tracking/SKILL.md").exists(),
-            "a deleted skill came back — the box cannot make its own edits stick"
+            !store.join("memory/work-tracking.md").exists(),
+            "a deleted memory came back — the box cannot make its own edits stick"
         );
     }
 
@@ -2240,7 +2207,7 @@ mod tests {
         fs::write(project.join("CLAUDE.md"), "# proj\n").unwrap();
 
         // A `claude` that refuses — a bad URL, an unreachable gateway, a rejected token all land
-        // here. No codex either, so nothing registers.
+        // here, so nothing registers.
         let bin = home.join("fakebin");
         fs::create_dir_all(&bin).unwrap();
         fs::write(bin.join("claude"), "#!/bin/sh\nexit 1\n").unwrap();
@@ -2338,7 +2305,7 @@ mod tests {
     /// not be pointed at a tracker without one being minted per box, which is the per-box work this
     /// change exists to remove.
     #[test]
-    fn the_url_alone_wires_a_box_up_and_the_token_is_only_codexs() {
+    fn the_url_alone_wires_a_box_up() {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_lock();
         let home = tempdir();
@@ -2393,9 +2360,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(settings["env"]["SYNC_MCP_URL"], "https://gw.test/mcp");
-        // And Codex gets nothing rather than a `Bearer ` that 401s on first use — a registration
-        // that looks complete is a worse place to find out than here.
-        assert!(!boxhome.join(".codex/config.toml").exists());
     }
 
     /// A box wired up before the plugin existed still gets it.
@@ -2673,7 +2637,7 @@ mod tests {
         );
     }
 
-    /// With the plugin installed and no Codex on the box, skein must NOT also write its own copy of
+    /// With the plugin installed, skein must NOT also write its own copy of
     /// the skill.
     ///
     /// Two copies of one skill is a fork, not a redundancy. The vendored copy is pinned to whatever
@@ -2699,8 +2663,6 @@ mod tests {
         fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
 
-        // No `.codex/config.toml` and no `codex` on PATH — a Claude-only box, where the plugin is
-        // the whole story.
         let boxhome = home.join("boxhome");
         fs::create_dir_all(&boxhome).unwrap();
         let out = box_shell(&home)

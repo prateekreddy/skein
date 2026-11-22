@@ -15,17 +15,12 @@
 //! rather than quietly overwrite someone.
 
 use crate::kit::ensure_store;
-use crate::place::located;
 use crate::registry::all_stores;
-use crate::repos::{agent_for_box, load_repos};
-use crate::runtime::runtime_adapter;
+use crate::repos::load_repos;
 use crate::runtime::RUNTIME_ADAPTERS;
-use crate::util::sh_quote;
-use crate::util::valid_name;
 use crate::util::write_atomic;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
 
 // ---------- the turn-state probe (skein-owned, installed into the shared store) ----------
 // skein ships these hook scripts into the store and into its plugin, so a box reports
@@ -41,7 +36,7 @@ const SYNC_REFRESH_SH: &str = include_str!("store/sync-refresh.sh");
 ///
 /// The skill is three files because upstream's is, and `SKILL.md` links to the other two by name —
 /// shipping it alone would hand a box a playbook with two dead ends in it. They are only used where
-/// the sync *plugin* cannot go, which today means Codex: the plugin carries this same skill and
+/// the sync *plugin* is not installed: the plugin carries this same skill and
 /// keeps it current, so a box with the plugin gets it from there instead of from a vendored copy
 /// pinned to whatever commit skein last pulled.
 const SYNC_BLOCK_MD: &str = include_str!("store/sync/work-tracking.block.md");
@@ -69,12 +64,8 @@ const PROBE_JOURNAL_SH: &str = include_str!("probe/box-journal.sh");
 // Stop hook points at) to <store>/telemetry/<vmid>.jsonl, a durable per-turn log that outlives the
 // box, feeding the same cross-run learn-loop as journals/diffs.
 const PROBE_TOKEN_USAGE_SH: &str = include_str!("probe/box-token-usage.sh");
-// Codex runtime adapter: its UserPromptSubmit prompt is the active objective, while its rollout
-// token_count events + PostToolUse hooks provide telemetry.
-const PROBE_CODEX_TASK_SH: &str = include_str!("probe/box-codex-task.sh");
-const PROBE_CODEX_TELEMETRY_SH: &str = include_str!("probe/box-codex-telemetry.sh");
-const PROBE_CODEX_HOOK_SH: &str = include_str!("probe/box-codex-hook.sh");
-// Provider-neutral one-shot context bridge used when Claude takes over Codex work or vice versa.
+// Delivers a one-shot brief left for this box, by the takeover skein no longer has (SKEIN-1511), to
+// a replacement box that has not started yet.
 const PROBE_HANDOFF_SH: &str = include_str!("probe/box-handoff.sh");
 // box-session.sh writes the narrative signal (<store>/sessions/<vmid>.json) that session_signal()
 // reads — the last assistant message at Stop, the blocking prompt at Notification. Without it the
@@ -90,7 +81,6 @@ const BOOTSTRAP_SH: &str = include_str!("store/sandbox-bootstrap.sh");
 const SHARED_HOME_SH: &str = include_str!("store/shared-home.sh");
 const SHARED_HOME_GUIDE: &str = include_str!("store/SHARED-HOME.md");
 const AGENT_GUIDE_SH: &str = include_str!("store/agent-guide.sh");
-const INSTALL_CODEX_HOOKS_SH: &str = include_str!("store/install-codex-hooks.sh");
 const MAILBOX_SH: &str = include_str!("store/mailbox.sh");
 const STATUSLINE_SH: &str = include_str!("store/statusline-command.sh");
 /// Which box this is and where its store is, the one answer to each (SKEIN-1174). Sourced by every
@@ -135,8 +125,7 @@ const PLUGIN_PROBE: &str = "${CLAUDE_PLUGIN_ROOT}/probe/";
 const PLUGIN_PROBE_DIR: &str = "probe";
 
 /// The turn-state variant's [`PLUGIN_PROBE_DIR`] as a box names it from anything that is not a
-/// Claude plugin hook, and so has no `${CLAUDE_PLUGIN_ROOT}`: Codex's hooks, the attach shell, the
-/// status line, the tracker's installer. By the fleet root the launcher passes every box, under the
+/// Claude plugin hook, and so has no `${CLAUDE_PLUGIN_ROOT}`: the attach shell, the status line, the tracker's installer. By the fleet root the launcher passes every box, under the
 /// `.skein` it binds read-only there. That variant, and not the full one, because it is installed
 /// whatever the fleet's switch says.
 pub(crate) fn box_probe_dir() -> String {
@@ -155,13 +144,11 @@ fn statusline_cmd() -> String {
 /// What a box runs from skein when it starts rather than from a hook (SKEIN-1149): the helpers the
 /// kit runs (`shared-home.sh` and `agent-guide.sh`, which [`plugin_probe_scripts`] already carries,
 /// and these), the ones the attach shell and the tracker run, and the status line. Installed into
-/// the turn-state variant's [`PLUGIN_PROBE_DIR`] beside [`CODEX_HOOKS_JSON`], the wiring
-/// `install-codex-hooks.sh` reads from its own directory. A helper left in the store is one a
+/// the turn-state variant's [`PLUGIN_PROBE_DIR`]. A helper left in the store is one a
 /// sibling box can rewrite and this box then runs as it starts.
 /// `every_start_helper_runs_from_the_read_only_plugin` holds every caller to this list.
-fn start_helpers() -> [(&'static str, &'static str); 5] {
+fn start_helpers() -> [(&'static str, &'static str); 4] {
     [
-        ("install-codex-hooks.sh", INSTALL_CODEX_HOOKS_SH),
         ("sync-install.sh", SYNC_INSTALL_SH),
         ("sync-refresh.sh", SYNC_REFRESH_SH),
         ("statusline-command.sh", STATUSLINE_SH),
@@ -175,12 +162,11 @@ fn start_helpers() -> [(&'static str, &'static str); 5] {
 /// `every_start_helper_runs_from_the_read_only_plugin` and the isolation test that runs them in a
 /// box are reading what a box is given rather than a copy.
 pub fn start_invocations() -> Vec<(&'static str, String)> {
-    let codex = crate::runtime::resolve_runtime("codex");
+    let claude = crate::runtime::resolve_runtime("claude");
     vec![
-        ("Codex's setup", codex.interactive_setup.to_string()),
         (
             "the attach shell's guide refresh",
-            crate::runtime::agent_instruction_setup(codex),
+            crate::runtime::agent_instruction_setup(claude),
         ),
         (
             "the attach shell's screen observer",
@@ -198,10 +184,6 @@ pub fn start_invocations() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// Codex's generated hooks, which `install-codex-hooks.sh` merges into a box's `~/.codex/hooks.json`.
-/// Beside the installer in the read-only plugin (SKEIN-1149); it used to be the store's
-/// `skein/codex-hooks.json`, which a sibling box could rewrite.
-const CODEX_HOOKS_JSON: &str = "codex-hooks.json";
 /// The settings the kit writes into a box's own `.claude/settings.local.json` when the repo ships a
 /// `.claude/` of its own (SKEIN-1048), beside the kit's other helpers in the read-only plugin. See
 /// [`settings_defaults`].
@@ -235,12 +217,11 @@ pub(crate) const TRACKER_READ_TOOLS: [&str; 2] =
     ["mcp__plugin_sync_sync__held", "mcp__plugin_sync_sync__why"];
 
 /// The scripts installed into each plugin variant's [`PLUGIN_PROBE_DIR`]: every script a turn-state
-/// hook runs, Claude's or Codex's, and every script one of those runs in turn. A script left out of
+/// hook runs, and every script one of those runs in turn. A script left out of
 /// this list and run by one that is in it is a script a sibling box can still rewrite, which is why
 /// the siblings are here: `sandbox-bootstrap.sh` runs `shared-home.sh`, `agent-guide.sh` and
-/// `mailbox.sh` from its own directory, `box-codex-hook.sh` runs the probe it is named from its
-/// own directory, and every one of them sources `box-self.sh` from its own directory (SKEIN-1174). `plugin_probe_scripts_are_every_script_a_hook_runs` holds the list to that.
-fn plugin_probe_scripts() -> [(&'static str, &'static str); 15] {
+/// `mailbox.sh` from its own directory, and every one of them sources `box-self.sh` from its own directory (SKEIN-1174). `plugin_probe_scripts_are_every_script_a_hook_runs` holds the list to that.
+fn plugin_probe_scripts() -> [(&'static str, &'static str); 12] {
     [
         ("box-self.sh", BOX_SELF_SH),
         ("box-status.sh", PROBE_STATUS_SH),
@@ -254,23 +235,19 @@ fn plugin_probe_scripts() -> [(&'static str, &'static str); 15] {
         ("shared-home.sh", SHARED_HOME_SH),
         ("agent-guide.sh", AGENT_GUIDE_SH),
         ("mailbox.sh", MAILBOX_SH),
-        ("box-codex-hook.sh", PROBE_CODEX_HOOK_SH),
-        ("box-codex-task.sh", PROBE_CODEX_TASK_SH),
-        ("box-codex-telemetry.sh", PROBE_CODEX_TELEMETRY_SH),
     ]
 }
 
 /// Content-derived revision for lifecycle *wiring* loaded when an agent starts. Probe scripts live
 /// on the shared mount and update in place, so hashing their bodies made harmless docs/implementation
-/// edits demand agent restarts. Only generated Claude/Codex hook configuration belongs here — the
-/// store's settings, the plugin's turn-state hooks and Codex's, since a box loads each of them only
-/// when its agent starts.
+/// edits demand agent restarts. Only generated hook configuration belongs here — the store's
+/// settings and the plugin's turn-state hooks, since a box loads each of them only when its agent
+/// starts.
 fn probe_revision() -> String {
     let mut hash = 0xcbf29ce484222325u64;
     let claude = serde_json::to_vec(&store_settings(&serde_json::json!({}))).unwrap_or_default();
     let plugin = serde_json::to_vec(&turn_state_hooks()).unwrap_or_default();
-    let codex = serde_json::to_vec(&codex_hooks_with_probe()).unwrap_or_default();
-    for body in [&claude, &plugin, &codex] {
+    for body in [&claude, &plugin] {
         for byte in body {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -321,15 +298,11 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         ("box-diff.sh", PROBE_DIFF_SH),
         ("box-journal.sh", PROBE_JOURNAL_SH),
         ("box-token-usage.sh", PROBE_TOKEN_USAGE_SH),
-        ("box-codex-task.sh", PROBE_CODEX_TASK_SH),
-        ("box-codex-telemetry.sh", PROBE_CODEX_TELEMETRY_SH),
-        ("box-codex-hook.sh", PROBE_CODEX_HOOK_SH),
         ("box-handoff.sh", PROBE_HANDOFF_SH),
         ("box-session.sh", PROBE_SESSION_SH),
         ("sandbox-bootstrap.sh", BOOTSTRAP_SH),
         ("shared-home.sh", SHARED_HOME_SH),
         ("agent-guide.sh", AGENT_GUIDE_SH),
-        ("install-codex-hooks.sh", INSTALL_CODEX_HOOKS_SH),
         ("mailbox.sh", MAILBOX_SH),
         ("statusline-command.sh", STATUSLINE_SH),
         ("sync-install.sh", SYNC_INSTALL_SH),
@@ -410,11 +383,6 @@ pub fn ensure_probe_in(store: &Path) -> Result<(), String> {
         runtime_manifest.as_bytes(),
     )?;
 
-    // Codex's generated hooks are NOT written here any more (SKEIN-1149): a store's copy is one a
-    // sibling box can rewrite, and the installer merged whatever it found into this box's
-    // `~/.codex/hooks.json`. They ship in skein's read-only plugin instead ([`plugin_install`]),
-    // beside the installer that reads them. A store written before still holds a copy; nothing
-    // reads it.
     Ok(())
 }
 
@@ -510,8 +478,7 @@ fn store_era_entries() -> [(&'static str, String, Option<&'static str>); 24] {
         // Turn-boundary mailbox delivery (start of turn): surfaces unread mail as additional
         // context, so it's never gated behind a human asking "did you get that?".
         ("UserPromptSubmit", MAILBOX_INBOX_CMD.to_string(), None),
-        // If Codex handed this box to Claude, inject the pending provider-neutral brief as context
-        // on the next prompt (SessionStart below catches a newly-created Claude session sooner).
+        // A brief left for this box by the removed takeover is injected as context on the next prompt (SessionStart below catches a newly-created Claude session sooner).
         (
             "UserPromptSubmit",
             format!("{PROBE_HANDOFF_CMD} claude"),
@@ -665,9 +632,9 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
     }
     out.push((format!("{narrow}/hooks/hooks.json"), pretty(&turn_state)));
     // The repo's install lock, for every agent and not only Claude's (SKEIN-1436). Claude Code puts
-    // a plugin's `bin` on its PATH, so a Claude session has the full variant's copy; Codex loads no
-    // plugin, so the launcher binds this variant's `bin`, which is installed whatever the switch
-    // says, read-only at `~/.skein-bin` on every box's PATH (`box-session.sh`, `place::box_path`).
+    // a plugin's `bin` on its PATH, so a Claude session has the full variant's copy; for everything
+    // else in the box the launcher binds this variant's `bin`, installed whatever the switch says,
+    // read-only at `~/.skein-bin` on every box's PATH (`box-session.sh`, `place::box_path`).
     for (rel, body) in crate::runtime::PLUGIN_FILES {
         if *rel == "bin/skein-lock" {
             out.push((format!("{narrow}/{rel}"), body.to_string()));
@@ -678,7 +645,7 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
             out.push((format!("{dir}/{PLUGIN_PROBE_DIR}/{file}"), body.to_string()));
         }
     }
-    // What a box runs as it starts, and the Codex wiring (SKEIN-1149): the turn-state variant only,
+    // What a box runs as it starts (SKEIN-1149): the turn-state variant only,
     // because that is the one [`box_probe_dir`] names.
     for (file, body) in start_helpers() {
         out.push((
@@ -686,10 +653,6 @@ pub fn plugin_install_under(fleet_root: &str) -> Vec<(String, String)> {
             body.to_string(),
         ));
     }
-    out.push((
-        format!("{narrow}/{PLUGIN_PROBE_DIR}/{CODEX_HOOKS_JSON}"),
-        pretty(&codex_hooks_with_probe()),
-    ));
     out.push((
         format!("{narrow}/{PLUGIN_PROBE_DIR}/{SETTINGS_DEFAULTS_JSON}"),
         pretty(&settings_defaults()),
@@ -834,163 +797,6 @@ fn store_settings(existing: &serde_json::Value) -> serde_json::Value {
     out
 }
 
-/// Codex's native lifecycle adapter. Current Codex exposes the same turn-boundary vocabulary Skein
-/// needs, but not Claude's Notification/TodoWrite events: PermissionRequest is the needs-input
-/// signal, UserPromptSubmit carries the active objective, and PostToolUse supplies tool telemetry.
-///
-/// The kit installs this generated value as a user-level `~/.codex/hooks.json` inside the sandbox.
-/// User-level placement avoids project-trust suppressing the adapter in a fresh clone; Codex is
-/// launched with `--dangerously-bypass-hook-trust` because these exact commands are generated and
-/// vetted by Skein itself.
-fn codex_hooks_with_probe() -> serde_json::Value {
-    use serde_json::{json, Map, Value};
-
-    let command = |event: &str, file: &str, args: &str| {
-        let suffix = if args.is_empty() {
-            String::new()
-        } else {
-            format!(" {args}")
-        };
-        // The plugin's read-only copy (SKEIN-1144), not the store's, which every box of the repo
-        // can write. By its path inside the box, because Codex has no `${CLAUDE_PLUGIN_ROOT}`: the
-        // fleet root the launcher passes every box, and the directory it binds read-only there.
-        // `box-codex-hook.sh` runs `{file}` from its own directory, so the probe is the plugin's too.
-        format!(
-            "bash \"{dir}/box-codex-hook.sh\" {event} {file}{suffix}",
-            dir = box_probe_dir(),
-        )
-    };
-    let mut hooks = Map::<String, Value>::new();
-    let mut add = |event: &str, matcher: Option<&str>, cmd: String| {
-        let mut entry = json!({
-            "hooks": [{ "type": "command", "command": cmd, "timeout": 30 }]
-        });
-        if let Some(m) = matcher {
-            entry
-                .as_object_mut()
-                .expect("hook entry is an object")
-                .insert("matcher".into(), Value::String(m.into()));
-        }
-        hooks
-            .entry(event)
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .expect("hook event is an array")
-            .push(entry);
-    };
-
-    add(
-        "SessionStart",
-        Some("startup|resume|clear|compact"),
-        command("SessionStart", "sandbox-bootstrap.sh", ""),
-    );
-    add(
-        "SessionStart",
-        Some("startup|resume|clear|compact"),
-        command("SessionStart", "box-handoff.sh", "codex"),
-    );
-    // Same reason as the Claude table: SessionEnd records `ended`, and without this nothing ever
-    // unrecords it — a restarted box reads "ended" while its new session waits at the prompt. The
-    // script itself only clears that one state, so the `compact` source stays truthful.
-    add(
-        "SessionStart",
-        Some("startup|resume|clear|compact"),
-        command("SessionStart", "box-status.sh", "started"),
-    );
-    add(
-        "UserPromptSubmit",
-        None,
-        command("UserPromptSubmit", "box-status.sh", "working"),
-    );
-    add(
-        "UserPromptSubmit",
-        None,
-        command("UserPromptSubmit", "box-codex-task.sh", ""),
-    );
-    add(
-        "UserPromptSubmit",
-        None,
-        command("UserPromptSubmit", "mailbox.sh", "inbox"),
-    );
-    add(
-        "UserPromptSubmit",
-        None,
-        command("UserPromptSubmit", "box-handoff.sh", "codex"),
-    );
-    add(
-        "PermissionRequest",
-        None,
-        command("PermissionRequest", "box-status.sh", "notify-blocked"),
-    );
-    // Clear a permission-blocked state once the approved tool actually completes, without resetting
-    // the turn timer/subagent count as a fresh UserPromptSubmit would.
-    add(
-        "PostToolUse",
-        Some("*"),
-        command("PostToolUse", "box-status.sh", "working-tool"),
-    );
-    add(
-        "PostToolUse",
-        Some("*"),
-        command("PostToolUse", "box-codex-telemetry.sh", "tool"),
-    );
-    add(
-        "SubagentStart",
-        None,
-        command("SubagentStart", "box-status.sh", "agent-start"),
-    );
-    add(
-        "SubagentStop",
-        None,
-        command("SubagentStop", "box-status.sh", "agent-stop"),
-    );
-    add(
-        "PreCompact",
-        Some("manual|auto"),
-        command("PreCompact", "box-status.sh", "compacting"),
-    );
-    add(
-        "PostCompact",
-        Some("manual|auto"),
-        command("PostCompact", "box-status.sh", "compacted"),
-    );
-    for (file, args) in [
-        ("box-status.sh", "waiting"),
-        ("box-session.sh", "stop"),
-        ("box-diff.sh", ""),
-        ("box-journal.sh", ""),
-        ("box-codex-telemetry.sh", "stop"),
-        ("mailbox.sh", "stop-check"),
-    ] {
-        add("Stop", None, command("Stop", file, args));
-    }
-    json!({ "hooks": hooks })
-}
-
-/// Render the provider-neutral one-line footer for a box whose runtime needs an adapter. Claude
-/// invokes the same renderer natively with its status-line stdin, so it returns `None` here. Codex
-/// maps its latest token_count event into that schema and is polled by the cockpit every 30 seconds.
-/// The renderer is embedded in the guest command rather than addressed through the shared store:
-/// direct-workspace and older boxes may not mount that store, but every managed box has Bash + jq.
-pub fn agent_statusline(name: &str) -> Result<Option<String>, String> {
-    if !valid_name(name) {
-        return Err("invalid box name".into());
-    }
-    let runtime_id = agent_for_box(name);
-    let runtime = runtime_adapter(&runtime_id).ok_or("runtime adapter unavailable")?;
-    let Some(input) = runtime.statusline_input else {
-        return Ok(None);
-    };
-    let renderer = sh_quote(STATUSLINE_SH);
-    let setup = runtime.interactive_setup;
-    let shell = format!(
-        r#"set -o pipefail; {setup}; payload="$({input})"; [ -n "$payload" ] || exit 0; printf '%s\n' "$payload" | bash -c {renderer}"#
-    );
-    let rendered = located(name)?.exec(&shell, Duration::from_secs(30))?;
-    let rendered = rendered.trim_end_matches(['\r', '\n']).to_string();
-    Ok((!rendered.is_empty()).then_some(rendered))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,9 +810,6 @@ mod tests {
         let dir = tempdir();
 
         let render = |input: &str| {
-            // Exercise the same shell-quoted embedded form used by the Codex browser adapter.
-            // Direct-workspace boxes do not necessarily mount the shared store, so a file-backed
-            // test would miss the failure this path is designed to prevent.
             let mut child = box_shell(&dir)
                 .arg("-c")
                 .arg(format!("bash -c {}", sh_quote(STATUSLINE_SH)))
@@ -1383,94 +1186,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_hooks_cover_attention_session_telemetry_and_handoff() {
-        let h = codex_hooks_with_probe();
-        let hooks = h["hooks"].as_object().unwrap();
-        for event in [
-            "SessionStart",
-            "UserPromptSubmit",
-            "PermissionRequest",
-            "PostToolUse",
-            "SubagentStart",
-            "SubagentStop",
-            "PreCompact",
-            "PostCompact",
-            "Stop",
-        ] {
-            assert!(
-                hooks
-                    .get(event)
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|a| !a.is_empty()),
-                "missing Codex {event}"
-            );
-        }
-        let commands = |event: &str| -> Vec<&str> {
-            hooks[event]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|e| e["hooks"][0]["command"].as_str())
-                .collect()
-        };
-        assert!(commands("PermissionRequest")
-            .iter()
-            .any(|c| c.contains("notify-blocked")));
-        assert!(commands("UserPromptSubmit")
-            .iter()
-            .any(|c| c.contains("box-codex-task.sh")));
-        assert!(commands("Stop")
-            .iter()
-            .any(|c| c.contains("box-session.sh")));
-        assert!(commands("Stop")
-            .iter()
-            .any(|c| c.contains("box-codex-telemetry.sh")));
-        assert!(commands("SessionStart")
-            .iter()
-            .any(|c| c.contains("box-handoff.sh")));
-        assert!(commands("SessionStart")
-            .iter()
-            .all(|c| c.contains("box-codex-hook.sh") && c.contains("SessionStart")));
-    }
-
-    #[test]
-    fn codex_hook_adapter_wraps_context_and_silent_probes() {
-        let dir = tempdir();
-        let wrapper = dir.join("box-codex-hook.sh");
-        fs::write(&wrapper, PROBE_CODEX_HOOK_SH).unwrap();
-        fs::write(
-            dir.join("emit.sh"),
-            "#!/bin/sh\nprintf 'handoff context\\n'\n",
-        )
-        .unwrap();
-        fs::write(dir.join("silent.sh"), "#!/bin/sh\nexit 0\n").unwrap();
-
-        let contextual = box_shell(&dir)
-            .args([wrapper.to_str().unwrap(), "SessionStart", "emit.sh"])
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(contextual.status.success());
-        let value: serde_json::Value = serde_json::from_slice(&contextual.stdout).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        assert_eq!(
-            value["hookSpecificOutput"]["additionalContext"],
-            "handoff context"
-        );
-
-        let silent = box_shell(&dir)
-            .args([wrapper.to_str().unwrap(), "UserPromptSubmit", "silent.sh"])
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(silent.status.success());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&silent.stdout).unwrap(),
-            serde_json::json!({})
-        );
-    }
-
-    #[test]
     fn store_settings_retires_bare_path_commands() {
         // A store provisioned before the exec-bit hardening carries bare-path commands. They are
         // skein's own, and the plugin now runs the `bash "<script>" <args>` form of each, so a bare
@@ -1839,177 +1554,6 @@ mod tests {
             !alone.contains("SKEIN_TMUX_SOCK"),
             "a legacy box's tmux is the only one there: {alone}"
         );
-    }
-
-    /// Linux only: runs Codex's `interactive_setup`, which uses `sed -i` with no argument. That is
-    /// GNU's spelling and it is the right one — the script runs inside the box, never on the host
-    /// — but BSD `sed` reads the FILENAME as the script and fails with `invalid command code`.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_status_line_setup_defaults_without_overriding_user_choice() {
-        let home = tempdir();
-        let codex = home.join(".codex");
-        let setup = runtime_adapter("codex").unwrap().interactive_setup;
-        let run = || {
-            Command::new("bash")
-                .arg("-c")
-                .arg(setup)
-                .env("HOME", &home)
-                // The setup ends by running Codex's hook installer from the fleet root's `.skein`;
-                // pinned to an empty one, so this never runs the live fleet's copy.
-                .env("SKEIN_FLEET_ROOT", &home)
-                .status()
-                .unwrap()
-        };
-
-        assert!(run().success());
-        let config = codex.join("config.toml");
-        let generated = fs::read_to_string(&config).unwrap();
-        assert!(generated.contains("[tui]"));
-        assert!(generated.contains("status_line = [] # skein custom statusline"));
-
-        fs::write(&config, "[tui]\nanimations = false\n").unwrap();
-        assert!(run().success());
-        let extended = fs::read_to_string(&config).unwrap();
-        assert!(extended.contains("animations = false"));
-        assert!(extended.contains("status_line = [] # skein custom statusline"));
-
-        fs::write(
-            &config,
-            "[tui]\nstatus_line = [\"context-used\", \"five-hour-limit\", \"weekly-limit\", \"used-tokens\", \"git-branch\", \"model-with-reasoning\"]\n",
-        )
-        .unwrap();
-        assert!(run().success());
-        assert!(fs::read_to_string(&config)
-            .unwrap()
-            .contains("status_line = [] # skein custom statusline"));
-
-        fs::write(
-            &config,
-            "[tui]\nstatus_line = null # skein custom statusline\n",
-        )
-        .unwrap();
-        assert!(run().success());
-        assert!(fs::read_to_string(&config)
-            .unwrap()
-            .contains("status_line = [] # skein custom statusline"));
-
-        let chosen = "[tui]\nstatus_line = [\"model\"]\n";
-        fs::write(&config, chosen).unwrap();
-        assert!(run().success());
-        assert_eq!(fs::read_to_string(config).unwrap(), chosen);
-    }
-
-    /// Linux only, for the reason above: it reads the config the same `sed -i` writes.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn codex_statusline_uses_default_quota_when_named_pool_arrives_last() {
-        let home = tempdir();
-        let sessions = home.join(".codex/sessions/2026/07/14");
-        fs::create_dir_all(&sessions).unwrap();
-        fs::write(
-            home.join(".codex/config.toml"),
-            "[tui]\nstatus_line = [] # skein custom statusline\n",
-        )
-        .unwrap();
-        fs::write(
-            sessions.join("rollout.jsonl"),
-            concat!(
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":100},"model_context_window":1000},"rate_limits":{"limit_id":"default-pool","limit_name":null,"primary":{"used_percent":18,"window_minutes":10080,"resets_at":2000000000},"secondary":null,"individual_limit":null}}}"#,
-                "\n",
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":200},"model_context_window":1000},"rate_limits":{"limit_id":"named-pool","limit_name":"Future Model Pool","primary":{"used_percent":0,"window_minutes":10080,"resets_at":2100000000},"secondary":null,"individual_limit":null}}}"#,
-                "\n",
-                r#"{"type":"turn_context","payload":{"model":"future-model","effort":"medium"}}"#,
-                "\n"
-            ),
-        )
-        .unwrap();
-
-        let command = runtime_adapter("codex").unwrap().statusline_input.unwrap();
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .env("HOME", &home)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
-        assert_eq!(payload["rate_limits"]["seven_day"]["used_percentage"], 18);
-        assert_eq!(
-            payload["rate_limits"]["seven_day"]["resets_at"],
-            2000000000_i64
-        );
-        // Context remains tied to the newest token event, independent of quota-pool selection.
-        assert_eq!(payload["context_window"]["total_input_tokens"], 200);
-    }
-
-    #[test]
-    fn codex_hook_installer_preserves_user_hooks_and_is_idempotent() {
-        // `ensure_store` publishes the sync gateway, which reads `repos.json` — so it resolves
-        // `config::skein_home`, refused rather than answered in a test since SKEIN-626. Unpinned it
-        // read the owner's live `~/.skein/repos.json`; it only passed because a neighbour in this
-        // process had left `$SKEIN_HOME` set (SKEIN-646). The sibling above pins it the same way.
-        let _g = env_lock();
-        let skein_home = tempdir();
-        std::env::set_var("SKEIN_HOME", &skein_home);
-        let store_tmp = tempdir();
-        let store = store_tmp.join("store/.claude");
-        let home_tmp = tempdir();
-        let home = home_tmp.join("home");
-        ensure_store(&store).unwrap();
-        fs::create_dir_all(home.join(".codex")).unwrap();
-        // The person's own hook, and one a store-era skein wrote, which ran the store's copy of
-        // the adapter (SKEIN-1144): the first stays and the second goes.
-        let store_era = r#"bash \"$(git rev-parse --show-toplevel)/.claude/skein/bin/box-codex-hook.sh\" Stop box-status.sh waiting"#;
-        fs::write(
-            home.join(".codex/hooks.json"),
-            format!(
-                r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":"hooks/user.sh"}}]}},{{"hooks":[{{"type":"command","command":"{store_era}"}}]}}]}}}}"#
-            ),
-        )
-        .unwrap();
-        // The copy skein runs, from its read-only plugin, which reads the hooks from beside itself
-        // (SKEIN-1149) — installed into a fixture fleet as `fleet::install_launcher` installs it.
-        let fleet = tempdir();
-        let fleet_root = fleet.to_string_lossy().into_owned();
-        for (path, body) in plugin_install_under(&fleet_root) {
-            let path = Path::new(&path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, body).unwrap();
-        }
-        let installer = format!(
-            "{}/{PLUGIN_PROBE_DIR}/install-codex-hooks.sh",
-            crate::runtime::turn_state_plugin_dir_under(&fleet_root)
-        );
-        let run = || {
-            box_shell(&home_tmp)
-                .arg(&installer)
-                .env("HOME", &home)
-                .status()
-                .unwrap()
-        };
-        assert!(run().success());
-        let once: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
-                .unwrap();
-        assert!(run().success());
-        let twice: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
-                .unwrap();
-        assert_eq!(once, twice);
-        let text = twice.to_string();
-        assert!(text.contains("hooks/user.sh"));
-        assert!(text.contains("box-status.sh"));
-        assert!(
-            !text.contains(".claude/skein/bin/"),
-            "a store-era hook survived: {text}"
-        );
-        std::env::remove_var("SKEIN_HOME");
     }
 
     /// A checkout the way the kit leaves one whose repo tracks `.claude/`: a `.claude` directory of
@@ -2393,18 +1937,8 @@ mod tests {
                 &[],
                 r#"{"tool_input":{"todos":[{"status":"in_progress","activeForm":"Reading the store"}]}}"#,
             ),
-            (
-                "box-codex-task.sh",
-                &[],
-                r#"{"prompt":"look at the store"}"#,
-            ),
             ("box-token-usage.sh", &[], &transcript_arg),
-            (
-                "box-codex-telemetry.sh",
-                &["tool"],
-                r#"{"tool_name":"Bash"}"#,
-            ),
-            ("box-handoff.sh", &["codex"], "{}"),
+            ("box-handoff.sh", &["claude"], "{}"),
             (
                 "mailbox.sh",
                 &["send", "--to", "somebody", "--body", "a note"],
@@ -2432,9 +1966,8 @@ mod tests {
 
         // Every file under the store, with its CONTENT. Compared before and after a run, because
         // "wrote nothing" is the assertion for the middle world and there is no other way to state
-        // it — and by content rather than by path, because two probes write the same file
-        // (`tasks/<box>.json`, from TodoWrite and from Codex's prompt) and a path-set comparison
-        // would call the second one's write "nothing happened".
+        // it — and by content rather than by path, because a probe can rewrite a file that
+        // is already there, and a path-set comparison would call that write "nothing happened".
         fn files(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
             let mut out = std::collections::BTreeMap::new();
             let Ok(entries) = fs::read_dir(dir) else {
@@ -2504,7 +2037,7 @@ mod tests {
         let seeded: Vec<std::path::PathBuf> = ["alpha", "skein-fleet", "old-style-box", &host]
             .iter()
             .filter(|who| !who.is_empty())
-            .map(|who| handoffs.join(format!("{who}.codex.pending.md")))
+            .map(|who| handoffs.join(format!("{who}.claude.pending.md")))
             .collect();
 
         let no_sandbox_named = |after: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
@@ -2605,7 +2138,7 @@ mod tests {
         // would mean a box read handoff context addressed to a name that is not its own — the same
         // fault as a misfiled write, in the one probe whose signal travels the other way.
         assert!(
-            handoffs.join("skein-fleet.codex.pending.md").exists(),
+            handoffs.join("skein-fleet.claude.pending.md").exists(),
             "box-handoff.sh consumed the brief filed under the SANDBOX's name"
         );
 
@@ -2951,8 +2484,7 @@ mod tests {
     /// What would make it fail: the store scaffold writing skein's hooks again (the first
     /// assertion); a variant losing its turn-state hooks (no command is found); a command the
     /// plugin carries that no longer reaches a script the plugin installs, or a plugin copy that
-    /// no longer finds the store from the project (no state is written); the same for Codex's
-    /// commands, which name the turn-state variant by the fleet root.
+    /// no longer finds the store from the project (no state is written).
     #[test]
     fn a_fresh_store_has_no_skein_hooks_and_the_plugin_still_reports_turn_state() {
         let _g = env_lock();
@@ -3026,31 +2558,6 @@ mod tests {
             run("Stop", r#"box-status.sh" waiting"#);
             assert_eq!(status(), "waiting", "through {path}");
             fs::remove_file(store.join("status/example.json")).unwrap();
-        }
-
-        // And Codex's, which reach the same plugin copy by the fleet root rather than by
-        // `${CLAUDE_PLUGIN_ROOT}`, from the box's working directory rather than a project variable.
-        let codex = codex_hooks_with_probe();
-        for (event, mode) in [("UserPromptSubmit", "working"), ("Stop", "waiting")] {
-            let (_, command) = commands(&codex)
-                .into_iter()
-                .find(|(e, c)| e == event && c.contains(&format!("box-status.sh {mode}")))
-                .unwrap_or_else(|| panic!("Codex has no {event} hook for box-status.sh"));
-            let out = box_shell(&root)
-                .arg("-c")
-                .arg(&command)
-                .current_dir(&tree)
-                .env_remove("CLAUDE_PROJECT_DIR")
-                .env("SKEIN_FLEET_ROOT", &fleet_root)
-                .env("SKEIN_BOX", "example")
-                .stdin(Stdio::null())
-                .output()
-                .expect("bash");
-            assert!(out.status.success(), "{command}: {out:?}");
-            let text = fs::read_to_string(store.join("status/example.json"))
-                .unwrap_or_else(|e| panic!("Codex's {event} hook wrote no state: {e}"));
-            let v: serde_json::Value = serde_json::from_str(&text).expect(&text);
-            assert_eq!(v["status"], mode, "through Codex's {event}");
         }
     }
 
@@ -3210,19 +2717,17 @@ mod tests {
         script.to_string()
     }
 
-    /// **Every turn-state hook, Claude's and Codex's, runs a script skein's plugin installs under
+    /// **Every turn-state hook runs a script skein's plugin installs under
     /// the fleet root's `.skein`** — the directory the launcher binds read-only into every box —
     /// **and none runs anything out of the store**, which every box of the repo can write
     /// (SKEIN-1144).
     ///
     /// Resolved the way the box resolves it: `${CLAUDE_PLUGIN_ROOT}` is the variant that loaded,
     /// `${SKEIN_FLEET_ROOT:-/boxes}` the fleet root, and the resolved path has to be one
-    /// [`plugin_install_under`] actually writes. Codex's hooks run `box-codex-hook.sh`, which runs
-    /// the probe it is named from its own directory, so that probe has to be installed beside it.
+    /// [`plugin_install_under`] actually writes.
     ///
     /// What would make it fail: a command put back on `$CLAUDE_PROJECT_DIR/.claude/skein/bin/`
-    /// (it does not start with `${CLAUDE_PLUGIN_ROOT}/`); Codex's command put back on
-    /// `$(git rev-parse --show-toplevel)/.claude/…`; or a script a hook names dropped from
+    /// (it does not start with `${CLAUDE_PLUGIN_ROOT}/`); or a script a hook names dropped from
     /// [`plugin_probe_scripts`] (the resolved path is not installed).
     #[test]
     fn every_turn_state_hook_runs_a_script_the_read_only_plugin_installs() {
@@ -3266,26 +2771,6 @@ mod tests {
         }
         // 24 in the turn-state variant, 24 and the plugin's own 3 in the full one.
         assert_eq!(seen, 24 + 24 + 3, "the hooks read are not the whole set");
-
-        let codex = codex_hooks_with_probe();
-        let mut codex_seen = 0;
-        for (event, command) in commands(&codex) {
-            let script = script_of(&command);
-            let rel = script
-                .strip_prefix("${SKEIN_FLEET_ROOT:-/boxes}/")
-                .unwrap_or_else(|| panic!("Codex {event} runs {script}, not the fleet's"));
-            let adapter = format!("{root}/{rel}");
-            resolves(&adapter, &format!("Codex {event}"));
-            // `bash "<adapter>" <Event> <probe> …`: the probe runs from the adapter's directory.
-            let probe = command
-                .split_whitespace()
-                .nth(3)
-                .unwrap_or_else(|| panic!("Codex {event} names no probe: {command}"));
-            let dir = adapter.rsplit_once('/').unwrap().0;
-            resolves(&format!("{dir}/{probe}"), &format!("Codex {event}"));
-            codex_seen += 1;
-        }
-        assert!(codex_seen > 0, "Codex has no hooks to check");
     }
 
     /// **A script the plugin installs runs nothing out of the store**, and every sibling it runs
@@ -3342,7 +2827,7 @@ mod tests {
     /// read-only plugin installs under `.skein`**, and nothing runs one out of the store, which
     /// every box of the repo can write (SKEIN-1149).
     ///
-    /// Every caller, read as the shell it is: the kit's provisioning script, Codex's setup, the
+    /// Every caller, read as the shell it is: the kit's provisioning script, the
     /// attach shell's guide refresh and screen observer, the tracker's install and refresh, and the
     /// status line skein sets — fresh, and moved from the store-era default. Each path a caller
     /// names for one of these helpers is resolved the way the box resolves it
@@ -3367,10 +2852,6 @@ mod tests {
             .into_iter()
             .map(|(path, _)| path)
             .collect();
-        let probe_dir = format!(
-            "{}/{PLUGIN_PROBE_DIR}",
-            crate::runtime::turn_state_plugin_dir_under(root)
-        );
 
         // The kit finds its helpers from where it runs, and the fleet runs it from `.skein`.
         let kit_probe =
@@ -3474,15 +2955,6 @@ mod tests {
             );
         }
 
-        // Codex's wiring, which its installer reads from its own directory rather than the store.
-        assert!(
-            installed.contains(&format!("{probe_dir}/{CODEX_HOOKS_JSON}")),
-            "the plugin does not carry Codex's hooks beside their installer"
-        );
-        assert!(
-            INSTALL_CODEX_HOOKS_SH.contains(r#"source_hooks="$here/codex-hooks.json""#),
-            "the Codex installer reads its hooks from somewhere other than beside itself"
-        );
         // And no helper runs anything out of the store in turn.
         for (name, body) in start_helpers() {
             for line in body.lines().filter(|l| !l.trim_start().starts_with('#')) {

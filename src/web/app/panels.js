@@ -1309,7 +1309,7 @@ function fillRuntimeSelects() {
 }
 function loadRuntimes() {
   if (DEMO) {
-    runtimes = [{id:"claude",label:"Claude",adapted_statusline:false},{id:"codex",label:"Codex",adapted_statusline:true}];
+    runtimes = [{id:"claude",label:"Claude"}];
     fillRuntimeSelects();
     return Promise.resolve(runtimes);
   }

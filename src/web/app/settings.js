@@ -1363,15 +1363,6 @@ function openBoxSettings(name) {
           : `mint this box its own token at ${conn} and register the sync server inside it`;
       wire.onclick = () => { trackWork(name); closeBoxSettings(); };
 
-      // Runtime: the other one, or nothing to offer when there is no other.
-      const take = document.getElementById("bs-take");
-      const other = nextRuntime(cur.agent || agentOf(name));
-      take.style.display = other ? "" : "none";
-      if (other) {
-        take.textContent = `↔ Replace with ${other.label}`;
-        take.title = `snapshot this box and create a ${other.label} replacement; this one stays intact as rollback`;
-        take.onclick = () => { closeBoxSettings(); takeOver(name, other.id); };
-      }
       document.getElementById("bs-note").textContent =
         "Blank inherits the fleet default; `none` means unlimited. Disk is measured, not enforced — one filesystem serves every box.";
     })

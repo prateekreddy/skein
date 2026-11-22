@@ -63,11 +63,6 @@ setInterval(tickAges, 1000);
 let runtimes = [];
 const runtimeInfo = id => runtimes.find(runtime => runtime.id === id) || runtimes[0] || { id:id || "", label:id || "Agent" };
 const runtimeLabel = id => runtimeInfo(id).label;
-const nextRuntime = id => {
-  if (runtimes.length < 2) return null;
-  const index = Math.max(0, runtimes.findIndex(runtime => runtime.id === id));
-  return runtimes[(index + 1) % runtimes.length];
-};
 const stateOf = name => boxes.find(b => b.name === name)?.state || "unknown";
 const agentOf = name => boxes.find(b => b.name === name)?.agent
   || repos.find(r => r.id === boxes.find(b => b.name === name)?.repo)?.agent
@@ -860,41 +855,26 @@ const termarea = document.getElementById("termarea"), diffpane = document.getEle
       tabsEl = document.getElementById("tabs"), dockbar = document.getElementById("dockbar");
 
 function openTerminal(name, runtime) { showBox(name, "term", "agent", runtime || agentOf(name)); }
-function takeOver(name, runtime) {
-  if (!confirm(`Create a ${runtime} replacement for ${name}?\n\nSkein will snapshot commits, staged/unstaged edits, untracked files, and bounded conversation context. The source box remains intact as rollback.`)) return;
-  toast(`snapshotting ${name} and creating its ${runtime} replacement…`);
-  fetch(`/api/boxes/${encodeURIComponent(name)}/takeover`, {
-    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({target:runtime})
-  }).then(async r => {
-    const text = await r.text();
-    if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
-    return JSON.parse(text);
-  }).then(replacement => {
-    toast(`replacement ready: ${replacement.target}`);
-    showBox(replacement.target, "term", "agent", runtime);
-  }).catch(error => notice(`takeover failed: ${failText(error)}`));
-}
 function openShell(name) { showBox(name, "term", "shell"); }
 function openDiff(name) { showBox(name, "diff"); }
 function openSession(name) { showBox(name, "session"); }
 function openFiles(name) { showBox(name, "files"); }
 function openTranscript(name) { showBox(name, "tx"); }
-function showBox(name, mode, kind = "agent", runtime, handoff = false) {
+function showBox(name, mode, kind = "agent", runtime) {
   document.body.classList.remove("show-fleet");   // tapping a box leaves the mobile fleet view
   select(name);
   view = { box: name, mode, kind };
   if (mode === "term") {
     const id = sidOf(name, kind);
     let s = sessions.get(id);
-    const previousRuntime = s?.runtime || agentOf(name);
     const want = kind === "agent" ? (runtime || s?.runtime || agentOf(name)) : "shell";
     // One visible agent tab per box, while each provider's process survives in its own tmux session.
     // Replacing the websocket/terminal here does not kill that provider's tmux server-side session.
     if (s && kind === "agent" && s.runtime !== want) {
-      clearTimeout(s.timer); clearInterval(s.statusTimer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
+      clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
       s.host.remove(); sessions.delete(id); s = null;
     }
-    if (!s) createSession(name, kind, null, want, handoff, previousRuntime);
+    if (!s) createSession(name, kind, null, want);
     else if (s.dead) reconnectSession(name, kind);   // clicking a disconnected tab reconnects it
   }
   applyView();
@@ -990,7 +970,7 @@ function retryStrip(s) {
   return ["skein could not open this terminal",
           `It tried ${RETRY_BACKOFF_MS.length} times over 4 minutes. Press Try again once the cause above is fixed.`, true];
 }
-function createSession(box, kind, launchBranch, runtime, handoff = false, fromRuntime = null) {
+function createSession(box, kind, launchBranch, runtime) {
   runtime = kind === "agent" ? (runtime || agentOf(box)) : "shell";
   if (DEMO) return createDemoSession(box, kind, runtime);   // no server in demo — show a placeholder pane
   const id = sidOf(box, kind);
@@ -1004,10 +984,6 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   // `ws.onclose` reads a reason for it. It is a sibling of the terminal rather than a layer over it
   // (see `.recovering` in the stylesheet).
   const recover = document.createElement("div"); recover.className = "recover"; host.append(recover);
-  const adaptedStatus = kind === "agent" && !!runtimeInfo(runtime)?.adapted_statusline;
-  const statusEl = document.createElement("div"); statusEl.className = "agent-statusline";
-  statusEl.setAttribute("aria-label", "agent usage status"); host.append(statusEl);
-  if (adaptedStatus) host.classList.add("adapted-status");
   // cursorBlink is OFF on purpose: a blinking cursor doesn't reset its on/off phase on keypress, so
   // a character that rendered instantly can sit next to a cursor that's mid-blink-off for up to
   // ~300ms, reading as "my typing lagged" even though nothing did. A solid cursor removes that.
@@ -1043,31 +1019,17 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   if (launchBranch) params.set("launch", launchBranch);
   if (kind === "shell") params.set("shell", "1");
   if (kind === "agent") params.set("agent", runtime);
-  if (handoff) { params.set("handoff", "1"); if (fromRuntime) params.set("from", fromRuntime); }
   const qs = params.toString() ? `?${params}` : "";
   const ws = new WebSocket(`${proto}://${location.host}/api/boxes/${encodeURIComponent(box)}/terminal${qs}`);
   ws.binaryType = "arraybuffer";
-  const s = { term, fit, ws, host, statusEl, recover, box, kind, runtime, sid: id,
-    streaming:false, timer:0, statusTimer:0, adaptedStatus, waitFor:"" };
+  const s = { term, fit, ws, host, recover, box, kind, runtime, sid: id,
+    streaming:false, timer:0, waitFor:"" };
   sessions.set(id, s);
   const isActive = () => view.mode === "term" && activeSid() === id;
   ws.onopen = () => {
     if (isActive()) sendResize(id);
-    if (s.adaptedStatus) {
-      setTimeout(() => refreshAgentStatusline(s), 500);
-      s.statusTimer = setInterval(() => refreshAgentStatusline(s), 30000);
-    }
     if (s.pending) { ws.send(s.pending); s.pending = null; }
     flushAttach(id);   // a drop made while this terminal was down, delivered now that it is up
-    if (handoff && kind === "agent") {
-      // Existing provider tmux session: SessionStart may not fire, so submit a real prompt. The
-      // UserPromptSubmit handoff hook injects the pending brief before the model sees this request.
-      setTimeout(() => {
-        if (ws.readyState !== 1) return;
-        const p = "Take over this Skein box from the previous agent. Read the injected handoff and current working tree, then continue from the existing state without redoing completed work.";
-        ws.send(new TextEncoder().encode("\x1b[200~" + p + "\x1b[201~\r"));
-      }, 1200);
-    }
   };
   ws.onmessage = e => {
     // PTY bytes arrive binary and a refusal's sentence as text, so the first binary frame is the
@@ -1125,39 +1087,6 @@ function createSession(box, kind, launchBranch, runtime, handoff = false, fromRu
   });
   term.onResize(() => { if (isActive()) sendResize(id); });
 }
-function statuslineHtml(line) {
-  const classes = new Set(); let out = "", at = 0;
-  const colour = code => { for (const c of ["sl-red","sl-yellow","sl-green"]) classes.delete(c); if (code) classes.add(code); };
-  // Keep layout-significant spaces as content, not whitespace-only DOM nodes. Flexbox discards
-  // bare whitespace nodes, and an older cached stylesheet can otherwise collapse the whole line.
-  const append = text => { if (!text) return; const value = esc(text).replace(/ /g,"&nbsp;"); out += classes.size ? `<span class="${[...classes].join(" ")}">${value}</span>` : value; };
-  const sgr = /\x1b\[([0-9;]*)m/g; let match;
-  while ((match = sgr.exec(line))) {
-    append(line.slice(at, match.index)); at = sgr.lastIndex;
-    const codes = (match[1] || "0").split(";").map(Number);
-    for (const code of codes) {
-      if (code === 0) classes.clear();
-      else if (code === 1) classes.add("sl-bold");
-      else if (code === 2) classes.add("sl-dim");
-      else if (code === 22) { classes.delete("sl-bold"); classes.delete("sl-dim"); }
-      else if (code === 31) colour("sl-red");
-      else if (code === 32) colour("sl-green");
-      else if (code === 33) colour("sl-yellow");
-      else if (code === 39) colour(null);
-    }
-  }
-  append(line.slice(at)); return out;
-}
-function refreshAgentStatusline(s) {
-  fetch(`/api/boxes/${encodeURIComponent(s.box)}/statusline`).then(r => r.ok ? r.json() : null).then(data => {
-    const line = data?.line || "", active = !!line;
-    s.statusEl.innerHTML = active ? statuslineHtml(line) : "";
-    if (s.host.classList.contains("adapted-status") !== active) {
-      s.host.classList.toggle("adapted-status", active);
-      requestAnimationFrame(() => { s.fit.fit(); if (activeSid() === s.sid) sendResize(s.sid); });
-    }
-  }).catch(() => {});
-}
 function markStreaming(id) {
   const s = sessions.get(id); if (!s) return;
   // DOM work only on the false→true transition: this runs on EVERY websocket frame, potentially
@@ -1170,7 +1099,7 @@ function sendResize(id) { const s = sessions.get(id); if (s && s.ws.readyState =
 function closeSession(id) {
   const s = sessions.get(id); if (!s) return;
   const box = s.box;
-  clearTimeout(s.timer); clearInterval(s.statusTimer); // no callbacks on a disposed session
+  clearTimeout(s.timer); // no callbacks on a disposed session
   try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {}
   const wasAt = orderedSids().indexOf(id);
   s.host.remove(); sessions.delete(id);
@@ -1286,7 +1215,7 @@ function reconnectSession(box, kind, bring = true) {
   const s = sessions.get(id);
   const runtime = s?.runtime;
   const carried = s ? carryOverBuffer(s) : "";
-  if (s) { clearTimeout(s.timer); clearInterval(s.statusTimer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
+  if (s) { clearTimeout(s.timer); try { s.ws.close(); } catch {} try { s.term.dispose(); } catch {} s.host.remove(); sessions.delete(id); }
   createSession(box, kind, null, runtime);
   if (carried) {
     const next = sessions.get(sidOf(box, kind));

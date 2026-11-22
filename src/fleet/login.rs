@@ -176,7 +176,7 @@ def place(source_path, dest_path, times=None):
 "#;
 
 /// The files that make a login a login, relative to a HOME.
-pub(super) const LOGIN_FILES: [&str; 2] = [".claude/.credentials.json", ".codex/auth.json"];
+pub(super) const LOGIN_FILES: [&str; 1] = [".claude/.credentials.json"];
 
 /// The token keys that mean "signed in", across both runtimes' shapes.
 pub(super) const LOGIN_KEYS: [&str; 5] = [
@@ -826,7 +826,7 @@ mod tests {
                 // The held directories the launcher reaches the box's home through (SKEIN-1287);
                 // the plain paths stand in for them here.
                 "set -uo pipefail\nhome={home}\nhome_at=\"$home\"\nclaude_at=\"$home/.claude\"\n\
-                 codex_at=''\nexport HOME={sandbox}\n{block}\n",
+                 export HOME={sandbox}\n{block}\n",
                 home = home.display(),
                 sandbox = sandbox.display(),
             ))

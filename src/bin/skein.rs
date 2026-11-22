@@ -142,10 +142,7 @@ fn main() {
         }
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
-            None => Err(
-                "usage: skein attach <box> [--agent <runtime>] [--handoff] [--uncovered]"
-                    .to_string(),
-            ),
+            None => Err("usage: skein attach <box> [--agent <runtime>] [--uncovered]".to_string()),
         },
         "cockpit-stop" => cmd_cockpit_stop(&skein::place::fleet_sandbox()),
         "version" | "--version" | "-v" => {
@@ -191,7 +188,7 @@ skein save [<box>…]   copy every box's work out of the sandbox onto the host, 
                       each one went (nothing is stopped or destroyed; name boxes for just those)\n  \
 skein resize <mem>    rebuild the shared sandbox at a new size, carrying every box's work\n  \
                       (--disk <size> for the shared 20G filesystem; sbx fixes it at creation)\n  \
-skein attach <box>    reconnect; optional: --agent <runtime> --handoff\n  \
+skein attach <box>    reconnect; optional: --agent <runtime>\n  \
 skein cockpit-stop    stop the cockpit; its port stays held and every box keeps running\n  \
 skein shared import <box> [--include <name> ...] [--apply]\n  \
                        inspect/import durable files from a box's private home\n  \
@@ -1745,8 +1742,7 @@ fn cmd_login(runtime: Option<&str>) -> Result<(), String> {
 
 fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // Reconnect to the box's existing agent session (same command the web cockpit uses).
-    let configured = skein::repos::agent_for_box(name);
-    let agent = flag(opts, "--agent").unwrap_or(configured.clone());
+    let agent = flag(opts, "--agent").unwrap_or_else(|| skein::repos::agent_for_box(name));
     if !skein::runtime::valid_runtime(&agent) {
         let available = skein::runtime::supported_runtimes()
             .iter()
@@ -1757,24 +1753,6 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
             "unsupported runtime {agent:?}; available: {available}"
         ));
     }
-    let handoff = opts.iter().any(|o| o == "--handoff");
-    let attach_name = if handoff && configured != agent {
-        eprintln!(
-            "{DIM}skein:{RESET} snapshotting {name} and creating a lightweight {agent} replacement…"
-        );
-        let replacement = skein::takeover::replace_box(name, &agent)?;
-        eprintln!(
-            "{DIM}skein:{RESET} source preserved; replacement is {}",
-            replacement.target
-        );
-        replacement.target
-    } else {
-        if handoff {
-            let path = skein::handoff::prepare_handoff(name, None, &agent)?;
-            eprintln!("{DIM}skein:{RESET} handoff prepared at {}", path.display());
-        }
-        name.to_string()
-    };
     // A fleet box loses its tmux server whenever its sandbox cycles; the tree, the private HOME and
     // the cgroup survive. Restart the session before addressing its namespace, or the first thing
     // the user sees is `nsenter: cannot open /proc/<pid>/ns/user`.
@@ -1782,11 +1760,11 @@ fn cmd_attach(name: &str, opts: &[String]) -> Result<(), String> {
     // is the wall's likeliest meeting place, because this is the path a box whose repository was
     // unregistered since it came up comes back through.
     if opts.iter().any(|o| o == "--uncovered") {
-        skein::fleet::allow_uncovered(&attach_name, true)?;
+        skein::fleet::allow_uncovered(name, true)?;
     }
-    skein::fleet::ensure_box_session(&attach_name)?;
-    let dir = skein::sbx::lookup_dir(&attach_name).unwrap_or_default();
-    run_attach(&skein::sandbox::attach_argv_as(&attach_name, &dir, &agent))
+    skein::fleet::ensure_box_session(name)?;
+    let dir = skein::sbx::lookup_dir(name).unwrap_or_default();
+    run_attach(&skein::sandbox::attach_argv_as(name, &dir, &agent))
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ const BOX_PATH_HEAD: &str = "/usr/local/share/npm-global/bin";
 /// agent CLIs are skein's, not the repo's: a `claude` an agent installs into the area must not
 /// shadow the fleet's for every box of the repo. The fourth is the box's `~/.cargo/bin`, where the
 /// launcher binds the fleet's shared Rust toolchain read-only (SKEIN-1337). The fifth is
-/// `~/.skein-bin`, where it binds skein's own commands read-only for every agent, Codex's too
+/// `~/.skein-bin`, where it binds skein's own commands read-only for every agent
 /// (SKEIN-1436). All spelled from `home` like the first, so this stays a function of the placement
 /// record alone.
 pub fn box_path(home: &str) -> String {
@@ -768,7 +768,6 @@ mod tests {
             [
                 "ANTHROPIC_API_KEY",
                 "GH_TOKEN",
-                "OPENAI_API_KEY",
                 // SKEIN-1373: the repo's kinds, consumed by the launcher and held by no box.
                 "SKEIN_BOX_KINDS",
                 "SKEIN_BOX_STORE",

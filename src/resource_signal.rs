@@ -337,7 +337,7 @@ impl From<crate::diskask::Ask> for DiskAskView {
 /// One version a restart would move this box onto.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Update {
-    /// `claude`, `codex`, `rust`, or `rust-repo` for the toolchain the box's repo names.
+    /// `claude`, `rust`, or `rust-repo` for the toolchain the box's repo names.
     pub component: String,
     /// What the box runs: a depot entry, or empty for the sandbox's own copy.
     pub have: String,

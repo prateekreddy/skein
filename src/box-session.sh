@@ -126,7 +126,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # prefix because the agent CLIs are skein's, not the repo's: an `npm i -g` of claude into the area
 # must not shadow the fleet's for every box of the repo. The fourth is `~/.cargo/bin`, where the
 # fleet's shared Rust toolchain is bound read-only (SKEIN-1337). The fifth is `~/.skein-bin`, skein's
-# own commands for every agent, Codex's too, bound read-only below (SKEIN-1436). Ahead of the fixed
+# own commands for every agent, bound read-only below (SKEIN-1436). Ahead of the fixed
 # six, which end it.
 box_path="$HOME/.local/bin:/usr/local/share/npm-global/bin:$HOME/.repo-tools/tools/bin:$HOME/.cargo/bin:$HOME/.skein-bin:$PATH"
 # --- Why every one of those twelve is `sudo -n` ---------------------------------------------------
@@ -1106,8 +1106,7 @@ open_new "$tmp_at" skein-start-id && printf '%s\n' "$start_id" >&"$new_fd" && la
 # left: bwrap makes the upper layer as a tmpfs INSIDE the namespace, which makes it private to the
 # box by construction and gives it exactly the box's lifetime.)
 #
-# Seeded into the box on first start and diverging from there: the Codex home and the person's shell
-# and git setup. Claude Code's two are not on the list, and the next two paragraphs say what reaches
+# Seeded into the box on first start and diverging from there: the person's shell and git setup. Claude Code's two are not on the list, and the next two paragraphs say what reaches
 # a new box from them instead.
 #
 # **`.claude` and `.claude.json` used to be copied whole, and they were removed on purpose**
@@ -1149,7 +1148,7 @@ open_new "$tmp_at" skein-start-id && printf '%s\n' "$start_id" >&"$new_fd" && la
 # at that stamp before writing its gateway URL or its CLAUDE.md block. SKEIN-1233 was the same leak
 # through the plugin marker. So a new box's `~/.local/state` now starts empty and holds only what
 # that box writes. Existing boxes keep what they have.
-seed_paths=(".codex" ".gitconfig" ".bashrc" ".profile")
+seed_paths=(".gitconfig" ".bashrc" ".profile")
 # **Nothing from the sandbox's home is bound read-write into a box any more** (SKEIN-1350). A list
 # called `share_paths` did that, and every entry it ever had was a way for one box to decide what
 # another runs. `.local` went first (SKEIN-963): `~/.local/bin` is first on every box's PATH, so a
@@ -1232,15 +1231,11 @@ done
 # A new box's Claude Code home starts empty and private, rather than as the sandbox's (SKEIN-1235,
 # beside `seed_paths`). The credential loop below fills in the login.
 [ -e "$home_at/.claude" ] || [ -L "$home_at/.claude" ] || mkdir -m 700 -- "$home_at/.claude" || exit 1
-# The two agent homes are where the login is merged and the agent's settings are written, each
-# through a temporary file made in the directory itself, so the directory has to be the box's
-# (SKEIN-1255), and is held open from here on like the others (SKEIN-1287). `.codex` passes when
-# absent; the credential loop below makes and holds it only if it has a login to put there.
+# The agent home is where the login is merged and the agent's settings are written, each through a
+# temporary file made in the directory itself, so the directory has to be the box's (SKEIN-1255),
+# and is held open from here on like the others (SKEIN-1287).
 own_dir "$home_at/.claude"
-own_dir "$home_at/.codex"
 pin_dir claude_at "$home_at/.claude"
-codex_at=''
-[ -e "$home_at/.codex" ] || [ -L "$home_at/.codex" ] && pin_dir codex_at "$home_at/.codex"
 
 # ...and a new box's `~/.claude.json` starts with the one key of the sandbox's that belongs to the
 # login: `oauthAccount`, the account the credential was issued to. First start only, like the seed
@@ -1482,21 +1477,10 @@ command -v python3 >/dev/null 2>&1 \
 # What this costs, stated rather than discovered: a token refreshed inside a box no longer improves
 # the fleet's copy, so the canonical login ages until somebody runs `skein login`. That is a
 # recoverable inconvenience, announced below. A poisoned fleet-wide credential is neither.
-for rel in ".claude/.credentials.json" ".codex/auth.json"; do
+for rel in ".claude/.credentials.json"; do
   canon="$HOME/$rel"
-  # The box's copy is reached through its held directory (SKEIN-1287). A box with no `.codex` gets
-  # one only when the fleet has a codex login to give it, and it is held like the rest before the
-  # merge writes into it.
-  case "$rel" in
-    .claude/*) mine="$claude_at/${rel#*/}" ;;
-    *)
-      if [ -z "$codex_at" ] && login_life "$canon" >/dev/null 2>&1; then
-        mkdir -- "$home_at/.codex" 2>/dev/null
-        pin_dir codex_at "$home_at/.codex"
-      fi
-      mine="${codex_at:-/nonexistent}/${rel#*/}"
-      ;;
-  esac
+  # The box's copy is reached through its held directory (SKEIN-1287).
+  mine="$claude_at/${rel#*/}"
   mine_life="$(login_life "$mine")" || mine_life=""
   canon_life="$(login_life "$canon")" || canon_life=""
   if [ -n "$canon_life" ] && [ -n "$mine_life" ]; then
@@ -1962,7 +1946,7 @@ binds+=(--bind-fd "${state_at##*/}" "$HOME/.local/state")
 # The cost is honest: these paths are virtiofs (~5× slower to write, ~14× to read than VM-local), and
 # a resume reads the whole file. Appends per turn are small; a slower resume is worth a conversation
 # that cannot be lost.
-for pair in ".claude/projects:claude-projects" ".codex/sessions:codex-sessions"; do
+for pair in ".claude/projects:claude-projects"; do
   rel="${pair%%:*}"; host="$state/${pair##*:}"
   mkdir -p "$host" || exit 1
   chmod 700 "$host" 2>/dev/null || true
@@ -2216,7 +2200,6 @@ printf "SKEIN_LIMITS %s\n" "$limits_state"
 # Conditional on the credential existing, so a fleet that genuinely runs on API keys is untouched:
 # no login, no unset, and the proxy path works exactly as before.
 [ -s "$claude_at/.credentials.json" ] && unset ANTHROPIC_API_KEY
-[ -n "$codex_at" ] && [ -s "$codex_at/auth.json" ] && unset OPENAI_API_KEY
 
 # --- Every box's drop-boxes, the workshop box's too (SKEIN-1463) -------------------------------
 #
@@ -2413,10 +2396,9 @@ SKEIN_ANCESTOR_MOUNTS
   # READ-ONLY, and the box loses nothing by it. Architecture §5 divides a box's durable state by who
   # writes it, and this directory holds two kinds:
   #
-  #   * **recorded** — `claude-projects/` and `codex-sessions/`, the box's own conversation. Bound
-  #     read-WRITE a hundred lines above, at `$HOME/.claude/projects` and `$HOME/.codex/sessions`,
-  #     which is where the agent actually writes them. Separate mounts of the same directories, so
-  #     read-only here costs nothing there.
+  #   * **recorded** — `claude-projects/`, the box's own conversation. Bound read-WRITE a hundred
+  #     lines above, at `$HOME/.claude/projects`, which is where the agent actually writes it. A
+  #     separate mount of the same directory, so read-only here costs nothing there.
   #   * **artifact** — `git-tokens/`, which the HOST mints and places and this box only ever reads.
   #     A box that could write it could write itself a token for a repository it was not given.
   #
@@ -2698,7 +2680,7 @@ unset kind kinds_in SKEIN_BOX_KINDS
 # --- skein's own commands, for every agent in the box (SKEIN-1436) --------------------------------
 #
 # `skein-lock`, the repo's install lock above, is a command an agent runs by name. Claude Code puts
-# the plugin's `bin` on its own PATH, and Codex loads no plugin, so a Codex session had none. The
+# the plugin's `bin` on its own PATH; a shell in the box has no such thing. The
 # turn-state variant of the plugin is installed under the read-only `.skein` whatever the fleet's
 # switch says (`probes::plugin_install`), and its `bin` holds what every agent needs; it is bound
 # read-only at `~/.skein-bin`, which `box_path` names. Read-only, so no box can change what another
@@ -2954,7 +2936,7 @@ unset uncovered
 #
 # `fleet::versions` keeps each CLI version as its own immutable npm prefix in the depot,
 # `.skein/depot/agent-cli/<runtime>@<version>`, and skein names the rolled-out one for this box in
-# `SKEIN_BOX_VERSIONS` (`claude=claude@2.1.314 codex=codex@0.170.0`). When it names any, a
+# `SKEIN_BOX_VERSIONS` (`claude=claude@2.1.314`). When it names any, a
 # read-only tmpfs is mounted over the prefix bound above, holding everything of the sandbox's
 # own prefix read-only as before, except that each named CLI's package directory is bound from its
 # depot entry and its command is the link npm made in that entry. So a box runs exactly the version
@@ -2997,7 +2979,7 @@ box_version() {
 }
 # The CLIs skein manages, `<runtime> <package> <command>`: `fleet::versions::CLIS`, which a test
 # holds to this table.
-skein_clis=("claude @anthropic-ai/claude-code claude" "codex @openai/codex codex")
+skein_clis=("claude @anthropic-ai/claude-code claude")
 cli_rows=()
 for row in "${skein_clis[@]}"; do
   read -r rt pkg cmd <<<"$row"
@@ -4038,7 +4020,7 @@ fi
 
 # The directories held open only for the launcher's own writes are closed rather than inherited by
 # the box; the ones bound by descriptor bwrap closes itself once it has bound them.
-for held in "$bin_at" "$claude_at" "$codex_at"; do
+for held in "$bin_at" "$claude_at"; do
   [ -n "$held" ] || continue
   held="${held##*/}"
   exec {held}<&-

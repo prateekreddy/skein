@@ -67,7 +67,7 @@ fn tracked_checkout(fleet: &Fleet) -> PathBuf {
     fs::write(tree.join(".skein/journal.md"), "did x / next y\n").unwrap();
     let handoffs = fleet.store().join("handoffs");
     fs::create_dir_all(&handoffs).unwrap();
-    fs::write(handoffs.join("web-main.codex.pending.md"), "a brief\n").unwrap();
+    fs::write(handoffs.join("web-main.claude.pending.md"), "a brief\n").unwrap();
     // What the bootstrap's shared-home helper and the guide refresh read: `ensure_store` puts it in
     // every store, and without it the guide refresh fails whichever store it found.
     fs::create_dir_all(fleet.store().join("skein")).unwrap();
@@ -135,10 +135,8 @@ run box-session.sh '{"last_assistant_message":"the turn ended"}' stop
 run box-diff.sh ''
 run box-journal.sh ''
 run box-task.sh '{"tool_input":{"todos":[{"status":"in_progress","activeForm":"Reading"}]}}'
-run box-codex-task.sh '{"prompt":"look"}'
 run box-token-usage.sh "{\"transcript_path\":\"$HOME/transcript.jsonl\"}"
-run box-codex-telemetry.sh '{"tool_name":"Bash"}' tool
-run box-handoff.sh '{}' codex
+run box-handoff.sh '{}' claude
 run mailbox.sh '' send --to somebody --body 'a note'
 run sandbox-bootstrap.sh "{\"cwd\":\"$tree\"}"
 PATH="$HOME/stub:$PATH" run box-pane.sh '' skein-agent
@@ -148,15 +146,14 @@ bash -c "$import" >/dev/null 2>>"$HOME/said"; echo "import $?"
 "#;
 
 /// What each script leaves in the store it found, relative to that store.
-const PER_BOX: [&str; 12] = [
+const PER_BOX: [&str; 11] = [
     "status/web-main.json",
     "sessions/web-main.json",
     "diffs/web-main.patch",
     "journals/web-main.md",
     "tasks/web-main.json",
     "telemetry/web-main.jsonl",
-    "telemetry/.codex-turn/web-main.tools",
-    "handoffs/web-main.codex.consumed.md",
+    "handoffs/web-main.claude.consumed.md",
     "status/web-main.pane.json",
     "sandboxes.json",
     "../shared-home/imported-thing.md",
@@ -279,7 +276,7 @@ fn a_box_whose_repo_tracks_claude_never_reports_into_its_checkout() {
                 "$HOME/shared is not the store's shared home, beside its .claude:\n{said}"
             );
             assert!(
-                fleet.dir.join("home/.codex/AGENTS.md").is_file(),
+                fleet.dir.join("home/.claude/CLAUDE.md").is_file(),
                 "the guide refresh found no store:\n{said}"
             );
             assert!(
@@ -368,7 +365,7 @@ fn every_script_reports_into_the_store_the_kit_linked() {
         );
     }
     assert!(
-        fleet.dir.join("home/.codex/AGENTS.md").is_file(),
+        fleet.dir.join("home/.claude/CLAUDE.md").is_file(),
         "the guide refresh did not find the kit's store:\n{said}"
     );
     let boot: serde_json::Value =

@@ -59,15 +59,7 @@ pub(super) async fn terminal(
         .get("agent")
         .filter(|a| skein::runtime::valid_runtime(a))
         .cloned();
-    let handoff = q
-        .get("handoff")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
-    let from = q
-        .get("from")
-        .filter(|a| skein::runtime::valid_runtime(a))
-        .cloned();
-    ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell, agent, handoff, from))
+    ws.on_upgrade(move |socket| terminal_session(socket, name, launch, shell, agent))
 }
 
 /// The WS↔PTY bridge: attach to an in-box tmux session through `sbx exec`, pipe bytes both ways,
@@ -79,8 +71,6 @@ async fn terminal_session(
     launch: Option<String>,
     shell: bool,
     agent: Option<String>,
-    handoff: bool,
-    from: Option<String>,
 ) {
     // Hold a permit for the whole session; reject (rather than queue) when the cap is hit so a
     // hung browser can't silently stall new terminals. Dropped on every return → released, and the
@@ -94,33 +84,6 @@ async fn terminal_session(
         }
     };
     let target_agent = agent.unwrap_or_else(|| skein::repos::agent_for_box(&name));
-    if handoff && !shell {
-        let hn = name.clone();
-        let ht = target_agent.clone();
-        let hf = from.clone();
-        match tokio::task::spawn_blocking(move || {
-            skein::handoff::prepare_handoff(&hn, hf.as_deref(), &ht)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                let _ = socket
-                    .send(Message::Text(format!(
-                        "skein: handoff brief failed: {e}\r\n"
-                    )))
-                    .await;
-            }
-            Err(e) => {
-                let _ = socket
-                    .send(Message::Text(format!(
-                        "skein: handoff task failed: {e}\r\n"
-                    )))
-                    .await;
-            }
-        }
-    }
-
     // Build the command. Propagate env + cwd so `sbx`/`sh` resolve on PATH.
     // Default: reconnect to the box's *existing* provider-specific tmux session,
     // rooted at the dir the box registered.

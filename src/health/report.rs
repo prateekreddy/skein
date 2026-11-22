@@ -662,7 +662,6 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
             "skein/bin/mailbox.sh",
             "skein/bin/shared-home.sh",
             "skein/bin/agent-guide.sh",
-            "skein/bin/install-codex-hooks.sh",
         ] {
             if !store.join(relative).is_file() {
                 probe_errors.push(format!("{} missing {relative}", repo.id));

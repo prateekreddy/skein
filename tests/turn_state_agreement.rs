@@ -1,11 +1,10 @@
-//! **The board, the session API and the handoff brief say the same thing about a box's turn.**
+//! **The board and the session API say the same thing about a box's turn.**
 //!
 //! Turn state has two halves (`signals.rs`'s module note): the hook edge, which nothing clears when
 //! a prompt is answered, and the level observation of the box's own screen, which clears itself.
 //! `signals::fuse_status` corrects the first with the second, and until `signals::turn_state` was
 //! the one reader only the board applied it. `digest::session_digest` read the edge alone, so
-//! `/api/boxes/:name/session` (which serves that digest as it is) and the handoff brief (which
-//! copies its `state` into the brief a replacement box starts from) could say `needs-input` while
+//! `/api/boxes/:name/session` (which serves that digest as it is) could say `needs-input` while
 //! the board's row for the same box said `working`.
 //!
 //! The fixture is exactly that case: an edge that still says `needs-input` from before the prompt
@@ -26,7 +25,7 @@ const BUSY: &str = include_str!(
 );
 
 #[test]
-fn the_board_the_session_digest_and_the_handoff_agree_about_a_box_whose_prompt_was_answered() {
+fn the_board_and_the_session_digest_agree_about_a_box_whose_prompt_was_answered() {
     let root = Scratch::boxes("skein-agree");
     let status = root.join("status");
     fs::create_dir_all(&status).unwrap();
@@ -119,15 +118,5 @@ fn the_board_the_session_digest_and_the_handoff_agree_about_a_box_whose_prompt_w
         "the session API said {:?} while the board said {:?} about the same box: the digest read \
          the hook edge alone instead of the fused turn state",
         served["state"], board.state
-    );
-
-    let brief =
-        skein::handoff::prepare_handoff(NAME, Some("claude"), "codex").expect("a handoff brief");
-    let text = fs::read_to_string(&brief).unwrap();
-    let line = format!("- state: `{}`", board.state);
-    assert!(
-        text.contains(&line),
-        "the handoff brief must carry the board's state ({line:?}), and a replacement box would \
-         start from a prompt that was already answered otherwise:\n{text}"
     );
 }

@@ -7,7 +7,7 @@ impl Place {
     /// The argv that runs `script` in this place.
     ///
     /// Its own function so the wire format is testable without a sandbox — and because it is the
-    /// contract the takeover guard asserts.
+    /// contract its tests assert.
     pub fn exec_argv(&self, script: &str) -> Vec<String> {
         if let Some(refusal) = self.unreachable_from_fleet() {
             return refusal;
@@ -401,10 +401,8 @@ impl Place {
     ///
     /// **This is the far side of the hop and only the far side.** Everything in front of the hop
     /// still runs on [`FLEET_PATH`] ([`Self::enter`]), and so does [`Self::raw_argv`], which builds
-    /// no shell and so never reaches here: its one production caller is
-    /// [`crate::takeover::copy_guest_file`] running `cat` (`src/takeover.rs:128`, the only one of
-    /// ten `raw_argv` mentions outside this file's own tests), which `FLEET_PATH` resolves — and
-    /// resolving skein's own utilities from root-owned directories even inside a box is the
+    /// no shell and so never reaches here: it has no production caller since the takeover that streamed a guest file through it was
+    /// removed (SKEIN-1511), and `FLEET_PATH` resolves what it runs — and resolving skein's own utilities from root-owned directories even inside a box is the
     /// stronger answer, not the weaker one.
     pub(super) fn wrap(&self, script: &str) -> String {
         match &self.at {
@@ -550,7 +548,6 @@ impl Place {
     ///
     /// | caller | builder | how it spawns |
     /// |---|---|---|
-    /// | [`crate::takeover::copy_guest_file`] | `raw_argv` | `Command::new` with the guest file streamed to a host file |
     /// | `sandbox::resume_box` | `exec_argv` | quoted into a bigger shell string, run as `sh -c` |
     /// | `sandbox::restart_agent_session` | `exec_argv` | `util::run_capture` |
     ///

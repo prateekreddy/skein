@@ -239,40 +239,6 @@ pub(super) async fn api_boxes() -> Json<Vec<BoxView>> {
     Json(views)
 }
 
-/// Provider-neutral custom footer. Claude renders it natively from stdin; Codex maps its latest
-/// token_count event (the `/status` data source) through the same renderer for the browser terminal.
-pub(super) async fn api_statusline(Path(name): Path<String>) -> Response {
-    if !skein::util::valid_name(&name) {
-        return (StatusCode::BAD_REQUEST, "invalid box name").into_response();
-    }
-    match tokio::task::spawn_blocking(move || skein::probes::agent_statusline(&name)).await {
-        Ok(Ok(line)) => Json(serde_json::json!({ "line": line })).into_response(),
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-pub(super) struct TakeoverReq {
-    target: String,
-}
-
-pub(super) async fn api_takeover(
-    Path(name): Path<String>,
-    Json(request): Json<TakeoverReq>,
-) -> Response {
-    if !skein::util::valid_name(&name) || !skein::runtime::valid_runtime(&request.target) {
-        return (StatusCode::BAD_REQUEST, "invalid box or target runtime").into_response();
-    }
-    match tokio::task::spawn_blocking(move || skein::takeover::replace_box(&name, &request.target))
-        .await
-    {
-        Ok(Ok(replacement)) => Json(replacement).into_response(),
-        Ok(Err(error)) => (StatusCode::BAD_REQUEST, error).into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
-    }
-}
-
 /// The box's conversation as its own record has it — survives a reboot, a server restart, a page
 /// reload and the scrollback limit, none of which the rendered terminal does. `?bytes=` is how much
 /// of the tail to read; the cockpit doubles it to page backwards.

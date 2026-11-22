@@ -40,7 +40,6 @@ const SUBSTRATE_SCRIPT: &str = concat!(
          want=""; for p in $npm; do
            case "$p" in
              *claude-code) [ -n "$(skein_runtime_at claude)" ] || want="$want $p" ;;
-             *codex)       [ -n "$(skein_runtime_at codex)" ]  || want="$want $p" ;;
              *)            want="$want $p" ;;
            esac;
          done;
@@ -71,7 +70,7 @@ const SUBSTRATE_SCRIPT: &str = concat!(
 /// An agent CLI the sandbox could be running a newer version of.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeUpdate {
-    /// `claude`, `codex` — the runtime as a person names it.
+    /// `claude` — the runtime as a person names it.
     pub runtime: String,
     /// What the sandbox is running now.
     pub have: String,
@@ -281,7 +280,7 @@ fn look_for_newer_runtimes() -> Vec<RuntimeUpdate> {
 /// fleet it just installed into without going back to the environment for its name.
 fn check_runtimes(sandbox: &str) -> Vec<RuntimeUpdate> {
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
-        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code".to_string());
     let Ok(out) = own_sandbox(sandbox).exec(&versions_script(&packages), Duration::from_secs(120))
     else {
         return Vec::new();
@@ -289,15 +288,15 @@ fn check_runtimes(sandbox: &str) -> Vec<RuntimeUpdate> {
     parse_runtime_versions(&out)
 }
 
-/// **Where a box would find `claude` or `codex`, as shell** — the one definition both
+/// **Where a box would find `claude`, as shell** — the one definition both
 /// [`RUNTIME_VERSIONS_SCRIPT`] and [`RUNTIME_UPDATE_SCRIPT`] read versions through (SKEIN-1224).
 ///
 /// Both scripts run as a crossing into the sandbox itself, on the fixed `FLEET_PATH`, and both used
 /// to ask a bare `claude --version` — which on that PATH is the root-owned `/usr/local/bin/claude`.
 /// No box runs that copy: a box's PATH leads with `$HOME/.local/bin` and the npm-global prefix
 /// ([`crate::place::box_path`]), and since SKEIN-968 the update installs into that prefix. Measured
-/// on the live fleet, 2026-10-21: the npm-global copies were 2.1.306 and 0.163.0, npm's newest, and
-/// the `/usr/local/bin` ones 2.1.272 and 0.154.0. So Settings offered an update every box already
+/// on the live fleet, 2026-10-21: the npm-global copy was 2.1.306, npm's newest, and the
+/// `/usr/local/bin` one 2.1.272. So Settings offered an update every box already
 /// had, the update read 2.1.272 before and after and said "already current", and the offer never
 /// cleared.
 ///
@@ -344,7 +343,6 @@ const RUNTIME_VERSIONS_SCRIPT: &str = r#"
          for p in $SKEIN_RUNTIME_PACKAGES; do
            case "$p" in
              *claude-code) r=claude ;;
-             *codex)       r=codex  ;;
              *)            continue ;;
            esac;
            [ -n "$(skein_runtime_at "$r")" ] || continue;
@@ -393,11 +391,9 @@ fn parse_runtime_versions(out: &str) -> Vec<RuntimeUpdate> {
             // bar and are exactly what makes the comparison safe, since the only question is
             // whether npm's number is already somewhere in that answer.
             let said = rest.join(" ");
-            // **The first token that starts with a digit, not simply the first token.** The version
-            // does not always come first: `claude --version` answers `2.1.247 (Claude Code)`, but
-            // `codex --version` answers `codex-cli 0.150.1` — so taking `rest[0]` put the package's
-            // NAME in the bar, and the live fleet drew `codex codex-cli -> 0.150.1` (read from
-            // /api/health, 2026-08-27). A runtime whose answer holds no number at all is dropped:
+            // **The first token that starts with a digit, not simply the first token**, because
+            // a CLI may put its name before its version, and `rest[0]` would then show the name in
+            // the bar (seen live, 2026-08-27). A runtime whose answer holds no number is dropped:
             // the bar's whole sentence is `have -> latest`, and a row that cannot say what it has
             // cannot make it.
             let have = rest
@@ -444,7 +440,7 @@ pub fn update_runtimes(sandbox: &str) -> Result<String, String> {
     // The same seam `ensure_substrate` has, for the same reason: a harness must be able to ask for
     // no runtimes rather than npm-install an agent onto whoever is running the tests.
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
-        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code".to_string());
     let said = own_sandbox(sandbox)
         .exec(&update_script(&packages), Duration::from_secs(900))
         .map(|out| out.trim().to_string())?;
@@ -529,7 +525,7 @@ fn record_installs(said: &str, at: i64) -> Result<(), String> {
 
 /// `claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)` → `("claude", "2.1.278", "2.1.280")`,
 /// from [`RUNTIME_UPDATE_SCRIPT`]'s own report. The version is the first token that starts with a
-/// digit, for the reason [`parse_runtime_versions`] gives: `codex --version` puts its name first.
+/// digit, for the reason [`parse_runtime_versions`] gives: a CLI may put its name first.
 fn moved_runtimes(said: &str) -> Vec<(String, String, String)> {
     let version = |side: &str| {
         side.split_whitespace()
@@ -671,8 +667,7 @@ where
                     }
                 }
             }
-            // A runtime no running box uses has nobody to list, and "every running box is on
-            // codex …" about a fleet with no codex box in it says nothing true that matters.
+            // A runtime no running box uses has nobody to list.
             uses_it.then_some(out)
         })
         .collect()
@@ -779,7 +774,6 @@ const RUNTIME_UPDATE_SCRIPT: &str = concat!(
          [ "$#" -gt 0 ] || { echo 'no agent runtimes are configured here, so there is nothing to update'; exit 0; };
          command -v npm >/dev/null 2>&1 || { echo 'this sandbox has no npm, so the agent CLIs cannot be updated in it' >&2; exit 1; };
          was_claude="$(skein_runtime_version claude)";
-         was_codex="$(skein_runtime_version codex)";
          prefix="$(npm config get prefix 2>/dev/null)";
          case "$prefix" in undefined|null) prefix="";; esac;
          log="${TMPDIR:-/tmp}/skein-runtime-update.log";
@@ -790,8 +784,8 @@ const RUNTIME_UPDATE_SCRIPT: &str = concat!(
              exit 1;
          };
          moved=0;
-         for r in claude codex; do
-           case "$r" in claude) was="$was_claude";; codex) was="$was_codex";; esac;
+         for r in claude; do
+           was="$was_claude";
            now="$(skein_runtime_version "$r")";
            if [ -z "$now" ]; then continue; fi;
            if [ -z "$was" ]; then echo "$r: installed, now $now"; moved=1;
@@ -829,7 +823,7 @@ pub fn ensure_substrate(sandbox: &str) -> Result<(), String> {
     // — npm-installs an agent runtime onto it, which is both a 50s test and software nobody asked
     // for. $SKEIN_RUNTIME_PACKAGES set to empty means "install no runtimes".
     let packages = std::env::var("SKEIN_RUNTIME_PACKAGES")
-        .unwrap_or_else(|_| "@anthropic-ai/claude-code @openai/codex".to_string());
+        .unwrap_or_else(|_| "@anthropic-ai/claude-code".to_string());
     // Read on the host, because the record of what was approved lives there — see
     // `substrate::manifest_path` for why keeping it in the sandbox would defeat the whole point.
     let (apt, npm) = crate::substrate::approved_packages();
@@ -869,7 +863,7 @@ mod tests {
     fn only_a_runtime_that_is_actually_behind_is_offered_an_update() {
         let found = super::parse_runtime_versions(
             "claude 1.2.3 (Claude Code) 1.2.9\n\
-             codex 0.4.1 0.4.1\n",
+             claude 0.4.1 0.4.1\n",
         );
         assert_eq!(
             found,
@@ -1260,8 +1254,8 @@ mod tests {
             std::fs::write(&p, body).unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        /// npm, whose global prefix is `prefix` and whose newest versions are these two.
-        fn npm(&self, prefix: &str, claude: &str, codex: &str) {
+        /// npm, whose global prefix is `prefix` and whose newest version is this.
+        fn npm(&self, prefix: &str, claude: &str) {
             std::fs::create_dir_all(format!("{prefix}/bin")).unwrap();
             self.script(
                 "fleet-bin/npm",
@@ -1269,12 +1263,11 @@ mod tests {
                     r#"#!/bin/sh
 case "$1" in
   config) echo '{prefix}' ;;
-  view) case "$2" in *claude-code) echo '{claude}' ;; *codex) echo '{codex}' ;; esac ;;
+  view) case "$2" in *claude-code) echo '{claude}' ;; esac ;;
   install)
     for p in "$@"; do
       case "$p" in
         *claude-code) printf '#!/bin/sh\necho "{claude} (Claude Code)"\n' >'{prefix}/bin/claude'; chmod 755 '{prefix}/bin/claude' ;;
-        *codex) printf '#!/bin/sh\necho "codex-cli {codex}"\n' >'{prefix}/bin/codex'; chmod 755 '{prefix}/bin/codex' ;;
       esac
     done ;;
 esac
@@ -1303,7 +1296,7 @@ esac
         }
     }
 
-    const PACKAGES: &str = "@anthropic-ai/claude-code @openai/codex";
+    const PACKAGES: &str = "@anthropic-ai/claude-code";
 
     /// **A fleet whose boxes already run npm's newest is reported as current** (SKEIN-1224) — with
     /// an older root-owned copy beside it that no box runs, and with that copy removed, which is
@@ -1311,7 +1304,7 @@ esac
     ///
     /// What makes it fail: reading the version off the script's own PATH rather than the box's
     /// (`$r --version`, or `skein_runtime_at` without its `PATH=`). With the stale copy that reads
-    /// 2.1.272 and 0.154.0 and reports both behind, which is the bug as seen; without it, the
+    /// 2.1.272 and reports it behind, which is the bug as seen; without it, the
     /// runtime is not found at all and the check prints nothing, which the presence assertion
     /// catches — an empty "nothing behind" proves nothing on its own.
     #[test]
@@ -1319,16 +1312,13 @@ esac
         for stale in [true, false] {
             let f = CliFixture::new();
             f.cli("home/.local/bin/claude", "2.1.306 (Claude Code)");
-            f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
             if stale {
                 f.cli("fleet-bin/claude", "2.1.272 (Claude Code)");
-                f.cli("fleet-bin/codex", "codex-cli 0.154.0");
             }
-            f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+            f.npm(&f.path("home/.local"), "2.1.306");
             let out = f.run(&super::versions_script(PACKAGES));
             assert!(
-                out.contains("claude 2.1.306 (Claude Code) 2.1.306")
-                    && out.contains("codex codex-cli 0.163.0 0.163.0"),
+                out.contains("claude 2.1.306 (Claude Code) 2.1.306"),
                 "the check did not read the copy a box runs (root copy present: {stale}); it \
                  said:\n{out}"
             );
@@ -1356,17 +1346,12 @@ esac
         // A box on an older claude, a root copy older still.
         let f = CliFixture::new();
         f.cli("home/.local/bin/claude", "2.1.300 (Claude Code)");
-        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
         f.cli("fleet-bin/claude", "2.1.272 (Claude Code)");
-        f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+        f.npm(&f.path("home/.local"), "2.1.306");
         let said = f.run(&super::update_script(PACKAGES));
         assert!(
             said.contains("claude: 2.1.300 (Claude Code) -> 2.1.306 (Claude Code)\n"),
             "the update did not report the move in the copy a box runs:\n{said}"
-        );
-        assert!(
-            said.contains("codex: codex-cli 0.163.0 (already current)\n"),
-            "a runtime the install did not move is not reported as already current:\n{said}"
         );
         assert_eq!(
             super::moved_runtimes(&said),
@@ -1389,13 +1374,11 @@ esac
         // The fleet as the owner left it: no root copy, everything current.
         let f = CliFixture::new();
         f.cli("home/.local/bin/claude", "2.1.306 (Claude Code)");
-        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
-        f.npm(&f.path("home/.local"), "2.1.306", "0.163.0");
+        f.npm(&f.path("home/.local"), "2.1.306");
         let said = f.run(&super::update_script(PACKAGES));
         assert_eq!(
             said,
             "claude: 2.1.306 (Claude Code) (already current)\n\
-             codex: codex-cli 0.163.0 (already current)\n\
              nothing moved — every runtime here was already the newest npm has.\n",
             "with no root copy, the update did not report the copies a box runs"
         );
@@ -1411,9 +1394,8 @@ esac
     fn an_install_no_box_runs_is_reported_as_shadowed_on_stdout() {
         let f = CliFixture::new();
         f.cli("home/.local/bin/claude", "2.1.300 (Claude Code)");
-        f.cli("home/.local/bin/codex", "codex-cli 0.163.0");
         let elsewhere = f.path("elsewhere");
-        f.npm(&elsewhere, "2.1.306", "0.163.0");
+        f.npm(&elsewhere, "2.1.306");
         let said = f.run(&super::update_script(PACKAGES));
         assert!(
             said.contains("claude: 2.1.300 (Claude Code) (already current)\n"),
@@ -1461,14 +1443,13 @@ esac
     }
 
     /// **The version is not always the first thing a runtime says.** `claude --version` answers
-    /// `2.1.247 (Claude Code)` and `codex --version` answers `codex-cli 0.150.1` — the number
-    /// leads in one and trails in the other. Taking the first token put the package's NAME in the
-    /// bar, and the live fleet drew `codex codex-cli -> 0.150.1` (read from /api/health,
-    /// 2026-08-27). Both shapes are here because a fix that only handles one is the same bug.
+    /// `2.1.247 (Claude Code)`, but a CLI can name itself first, and taking the first token then put
+    /// the package's NAME in the bar (seen live, read from /api/health, 2026-08-27). Both shapes
+    /// are here because a fix that only handles one is the same bug.
     #[test]
     fn a_runtime_that_names_itself_before_its_version_shows_the_version_and_not_its_name() {
         let found = super::parse_runtime_versions(
-            "claude 2.1.221 (Claude Code) 2.1.247\ncodex codex-cli 0.149.0 0.150.1\n",
+            "claude 2.1.221 (Claude Code) 2.1.247\nclaude claude-cli 0.149.0 0.150.1\n",
         );
         let saw: Vec<(&str, &str)> = found
             .iter()
@@ -1476,7 +1457,7 @@ esac
             .collect();
         assert_eq!(
             saw,
-            vec![("claude", "2.1.221"), ("codex", "0.149.0")],
+            vec![("claude", "2.1.221"), ("claude", "0.149.0")],
             "the bar is naming something that is not a version — a reader cannot tell what they \
              have, which is half of the only sentence the bar says"
         );
@@ -1537,16 +1518,11 @@ esac
     #[test]
     fn updating_the_runtimes_asks_for_them_by_name_and_not_by_whether_they_are_installed() {
         assert!(
-            super::SUBSTRATE_SCRIPT.contains("skein_runtime_at claude")
-                && super::SUBSTRATE_SCRIPT.contains("skein_runtime_at codex"),
+            super::SUBSTRATE_SCRIPT.contains("skein_runtime_at claude"),
             "the launch path stopped skipping runtimes that are already installed, so every box \
-             start now waits on two npm installs"
+             start now waits on an npm install"
         );
-        for guard in [
-            "command -v claude",
-            "command -v codex",
-            "skein_runtime_at claude)\" ] ||",
-        ] {
+        for guard in ["command -v claude", "skein_runtime_at claude)\" ] ||"] {
             assert!(
                 !super::RUNTIME_UPDATE_SCRIPT.contains(guard),
                 "the update path consults {guard:?} — so a runtime that is present is skipped, \
@@ -1640,7 +1616,7 @@ esac
         env.set("SKEIN_HOME", &home);
         record_installs(
             "claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)\n\
-             codex: codex-cli 0.150.1 (already current)\n",
+             claude: 2.1.280 (Claude Code) (already current)\n",
             1000,
         )
         .expect("the install record is written");
@@ -1661,7 +1637,6 @@ esac
             turn("box-b", "claude", "working"),
             turn("box-c", "claude", "waiting"),
             turn("box-d", "claude", "waiting"),
-            turn("box-e", "codex", "waiting"),
         ];
         let found = agents_behind_with(&installs, &boxes, |name, _| match name {
             "box-a" => AgentStart::At(500),
@@ -1732,23 +1707,19 @@ esac
     /// Only a runtime that went from one version to another is recorded.
     ///
     /// **What makes it fail:** taking the second token rather than the first that starts with a
-    /// digit reads `codex-cli`'s version as `0.150.1` on one side and the name on the other; not
+    /// digit reads a CLI that names itself first as its name on one side; not
     /// skipping an unchanged version records a move that moved nothing; accepting any `x: a -> b`
     /// line records the shadowed-install warning's words as a runtime.
     #[test]
     fn only_a_runtime_that_moved_is_recorded() {
         let said = "claude: 2.1.278 (Claude Code) -> 2.1.280 (Claude Code)\n\
-                    codex: codex-cli 0.150.1 -> codex-cli 0.151.0\n\
+                    retired: retired-cli 0.150.1 -> retired-cli 0.151.0\n\
                     claude: 2.1.280 (Claude Code) (already current)\n\
-                    codex: installed, now codex-cli 0.151.0\n\
                     npm ERR!: 1 -> 2\n\
                     nothing moved — every runtime here was already the newest npm has.\n";
         assert_eq!(
             moved_runtimes(said),
-            vec![
-                ("claude".into(), "2.1.278".into(), "2.1.280".into()),
-                ("codex".into(), "0.150.1".into(), "0.151.0".into()),
-            ]
+            vec![("claude".into(), "2.1.278".into(), "2.1.280".into()),]
         );
     }
 
@@ -1820,7 +1791,7 @@ esac
     #[test]
     fn every_package_install_runs_the_same_bytes() {
         let shared = crate::substrate::PACKAGE_INSTALL_SH;
-        let rust: [(&str, String); 5] = [
+        let rust: [(&str, String); 4] = [
             (
                 "the fleet's substrate at each launch",
                 SUBSTRATE_SCRIPT.to_string(),
@@ -1833,10 +1804,6 @@ esac
             (
                 "an approved npm request",
                 crate::substrate::install_script("npm", &["prettier".into()]),
-            ),
-            (
-                "a takeover's source box",
-                crate::takeover::source_takeover_tools_script(),
             ),
         ];
         for (who, script) in &rust {
@@ -1985,9 +1952,8 @@ esac
             stub(&stubs, tool, "exit 0");
         }
         stub(&local_bin, "claude", "echo '2.1.316 (Claude Code)'");
-        stub(&local_bin, "codex", "echo 'codex-cli 0.170.0'");
 
-        let script = substrate_script("@anthropic-ai/claude-code @openai/codex", "", "");
+        let script = substrate_script("@anthropic-ai/claude-code", "", "");
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(&script)

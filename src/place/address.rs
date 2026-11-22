@@ -37,7 +37,7 @@ pub enum Where {
         /// Explicit rather than inherited, because `nsenter` carries the caller's environment in and
         /// a script that reads `~` must read the box's view of it. The privacy is in the *mounts*:
         /// `box-session.sh` binds the few paths that must differ per box (`~/.claude.json`,
-        /// `~/.claude`, `~/.codex`, `~/.config/sync`) and leaves the rest shared. Replacing HOME
+        /// `~/.claude`, `~/.config/sync`) and leaves the rest shared. Replacing HOME
         /// outright was the earlier design and it could not work — `claude` lives under `~/.local/bin`
         /// and its credentials under `~/.claude`, so the box had no agent to start.
         home: String,

@@ -492,7 +492,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/diff", get(api_diff))
         .route("/api/boxes/:name/unpushed", get(api_unpushed))
         .route("/api/boxes/:name/session", get(api_session))
-        .route("/api/boxes/:name/statusline", get(api_statusline))
         .route("/api/mailbox", get(api_mailbox).post(api_mailbox_send))
         .route("/api/boxes/:name/transcript", get(api_transcript))
         .route(
@@ -503,7 +502,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/boxes/:name/resume", post(api_resume))
         .route("/api/boxes/:name/restart-agent", post(api_restart_agent))
         .route("/api/boxes/:name/restart", post(api_restart_box))
-        .route("/api/boxes/:name/takeover", post(api_takeover))
         .route("/api/boxes/:name/narrate", get(api_narrate))
         .route("/api/resume-batch", post(api_resume_batch))
         .route("/api/boxes/:name/stop", post(api_stop))

@@ -583,7 +583,7 @@ impl Started {
              export SKEIN_HOME={skein_home} SKEIN_FLEET_ROOT={fleet_root}\n\
              {paths}\n\
              tmp={tmp}\n\
-             exec {{tmp_fd}}<\"$tmp/.\"; tmp_at=\"/proc/$$/fd/$tmp_fd\"; bin_at=''; claude_at=''; codex_at=''\n\
+             exec {{tmp_fd}}<\"$tmp/.\"; tmp_at=\"/proc/$$/fd/$tmp_fd\"; bin_at=''; claude_at=''\n\
              tree={tree}\n\
              sock={sock}\n\
              pidfile={pidfile}\n\

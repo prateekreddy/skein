@@ -4,7 +4,7 @@
 //! skein's mod writes `<store>/status/<box>.mod.json` from inside the agent's Claude Code session
 //! (`src/plugin/hooks/attention.ts`): the state the engine is in, entered on the event itself, and
 //! a `seen` heartbeat. `signals::turn_state` prefers it while `seen` is fresh and falls back to the
-//! hook edge fused with the screen otherwise, which is everything a Codex box, an old CLI or an
+//! hook edge fused with the screen otherwise, which is everything an old CLI or an
 //! account with mods off still has.
 //!
 //! The screen in every case below is a real capture of a box mid-turn, sampled now: the shape the
@@ -247,9 +247,9 @@ fn mod_not_loaded_is_said_of_a_running_claude_box_only() {
     );
     assert_eq!(engine_health("claude", &EngineRead::Fresh(some), true), "");
     assert_eq!(
-        engine_health("codex", &EngineRead::Absent, true),
+        engine_health("other", &EngineRead::Absent, true),
         "",
-        "Codex gets nothing from the mod, so its absence is not news"
+        "a runtime that loads no mod gets nothing from it, so its absence is not news"
     );
     assert_eq!(
         engine_health("claude", &EngineRead::Absent, false),

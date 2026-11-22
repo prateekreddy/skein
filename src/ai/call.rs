@@ -250,7 +250,7 @@ pub(crate) fn tried(
     let out = match out {
         Ok(out) => out,
         Err(why) => {
-            remember_refusal(&why, bin);
+            remember_refusal(&why);
             return Err(why);
         }
     };
@@ -279,7 +279,7 @@ pub(crate) fn tried(
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why, bin);
+        remember_refusal(&why);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();

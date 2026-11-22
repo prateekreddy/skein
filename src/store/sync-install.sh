@@ -13,9 +13,7 @@
 #   - `skein::sync_provision_box`, right after it writes those credentials.
 #
 # The `sync` MCP server comes from upstream's PLUGIN now, not from a registration of skein's — see
-# the block below for why the two cannot both be present. Codex is the exception, and not as a
-# fallback: plugins are a Claude Code feature, so the TOML block is the only way Codex ever gets
-# these tools.
+# the block below for why the two cannot both be present.
 #
 # Installs three things, and only AFTER the tools exist:
 #   - a "Work tracking" section in CLAUDE.md (and so in AGENTS.md) — always in context, because
@@ -98,12 +96,9 @@ cred="$HOME/.config/sync/env"
 # shellcheck disable=SC1090
 [ -r "$cred" ] && . "$cred" 2>/dev/null
 url="${SYNC_GATEWAY_URL:-}"
-token="${SYNC_AGENT_TOKEN:-}"
 
-# The URL is what makes a box wired; the token is not, any more. Claude reaches the gateway through
-# the plugin's OAuth, so requiring a minted token before doing anything would gate the whole install
-# on a credential only Codex still uses — and a box could not be given a tracker without one being
-# minted for it. The token is checked where it is spent, in the Codex block.
+# The URL is what makes a box wired. Claude reaches the gateway through the plugin's OAuth, so
+# nothing here reads a minted token.
 #
 # The URL can arrive three ways, in order of how specific they are: the box's own credential file,
 # an environment override, then the repo-wide gateway the host publishes into the store. The last is
@@ -337,40 +332,6 @@ if command -v claude >/dev/null 2>&1; then
   fi
 fi
 
-# Codex. Its config is TOML that may carry hand-written entries, so append only when the section is
-# absent and never rewrite it — except on a forced re-apply, which is how a new token arrives.
-#
-# Still a registration, and it has to be: plugins are a Claude Code feature. Codex cannot load one,
-# so the token route is not a fallback here, it is the only route — which is also why the minted
-# token is still worth writing into a box even though Claude no longer uses it.
-# Skipped without a token rather than written with an empty one: a bearer header of `Bearer ` is a
-# registration that looks complete and 401s on the first call, which is a worse place to discover
-# the credential is missing than here.
-codex_registered="no"
-codex_cfg="$HOME/.codex/config.toml"
-if [ -z "$token" ]; then
-  :
-elif command -v codex >/dev/null 2>&1 || [ -f "$codex_cfg" ]; then
-  mkdir -p "$HOME/.codex" 2>/dev/null || true
-  if [ -n "${SKEIN_SYNC_FORCE:-}" ] && [ -f "$codex_cfg" ]; then
-    tmpcfg="$codex_cfg.skein.tmp"
-    if awk '/^\[mcp_servers\.sync\]/ { skip=1; next } /^\[/ { skip=0 } skip != 1 { print }' \
-         "$codex_cfg" > "$tmpcfg" 2>/dev/null; then
-      mv "$tmpcfg" "$codex_cfg" 2>/dev/null || rm -f "$tmpcfg" 2>/dev/null
-    else
-      rm -f "$tmpcfg" 2>/dev/null
-    fi
-  fi
-  if grep -Fq '[mcp_servers.sync]' "$codex_cfg" 2>/dev/null; then
-    registered="yes"; codex_registered="yes"
-  elif printf '\n[mcp_servers.sync]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' \
-         "$url" "$token" >> "$codex_cfg" 2>/dev/null; then
-    registered="yes"; codex_registered="yes"
-  else
-    echo "[sync] could not write $codex_cfg" >&2
-  fi
-fi
-
 if [ "$registered" != "yes" ]; then
   echo "[sync] no runtime registered — work-tracking docs not installed" >&2
   exit 0
@@ -427,19 +388,12 @@ fi
 # 3. The skill. Loaded only when the model judges it relevant, which is why it can afford to be the
 # long one — Plane's whole surface and what each tool answers.
 #
-# Skipped when the plugin is here and Codex is not registered, because the plugin ships this skill
-# itself and keeps it current. Two copies of one skill is not a redundancy, it is a fork: the
-# vendored one is pinned to whatever upstream commit was last pulled into skein, so the moment an
-# argument name changes the box is being taught two contradictory versions of the same tool and
-# nothing says which is older.
-#
-# The test is whether CODEX GOT THE TOOLS, not whether codex exists. Every box has the binary — the
-# kit installs it — so `command -v codex` is true in all ten of them and a condition written on it
-# never fires, which is a skip that reads like a feature and behaves like nothing. Whether the sync
-# server was actually written into Codex's config is the fact that matters: if Codex has the tools,
-# something has to teach Codex the rules, and the plugin cannot.
+# Skipped when the plugin is here, because the plugin ships this skill itself and keeps it current.
+# Two copies of one skill is not a redundancy, it is a fork: the vendored one is pinned to whatever
+# upstream commit was last pulled into skein, so the moment an argument name changes the box is being
+# taught two contradictory versions of the same tool and nothing says which is older.
 want_skill="yes"
-if [ "$plugin" = "yes" ] && [ "$codex_registered" = "no" ]; then
+if [ "$plugin" = "yes" ]; then
   want_skill="no"
 fi
 if [ "$want_skill" = "yes" ] \
