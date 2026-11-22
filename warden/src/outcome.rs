@@ -1417,14 +1417,13 @@ mod tests {
     /// counterfactual is `overdue` followed by a retire on anything but `Ok(false)`.
     #[test]
     fn past_its_deadline_a_host_that_agrees_or_cannot_be_read_stays_undecided() {
-        let answers: [fn(&str) -> Result<bool, String>; 2] =
-            [|_| Ok(true), |_| Err("sbx ls failed".to_string())];
-        for (n, holds) in answers.into_iter().enumerate() {
+        let answers: [Result<bool, String>; 2] = [Ok(true), Err("sbx ls failed".to_string())];
+        for (n, answer) in answers.into_iter().enumerate() {
             let dir = scratch(&format!("overdue-stays-{n}"));
             left_running(&dir, "op-killed", past_the_deadline());
             let ran = AtomicUsize::new(0);
             let got = Store::new(&dir, forever())
-                .once("op-killed", &holds, |reach| {
+                .once("op-killed", &|_| answer.clone(), |reach| {
                     cross_then(reach, || {
                         ran.fetch_add(1, Ordering::SeqCst);
                         Ok("ran".to_string())
