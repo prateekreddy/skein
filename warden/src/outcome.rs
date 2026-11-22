@@ -61,6 +61,13 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// How long after crossing into its command an unfinished operation may still be running.
+///
+/// Longer than the 900 s a create is budgeted, and the same 1,800 s skein waits for a reply. A
+/// warden killed mid-`sbx` leaves the child running, so its death alone says nothing about the
+/// host. Past this, with no warden holding the record, the host is worth asking (SKEIN-1497).
+pub const DOER_DEADLINE: Duration = Duration::from_secs(1800);
+
 /// What a doer returned: its reply, or why it failed. Both are recorded — a failed operation that is
 /// retried under the same id must be told it already failed, not run again in the hope of better.
 pub type Done = Result<String, String>;
@@ -167,9 +174,11 @@ pub(crate) fn crossed_for_a_test() -> Result<Crossed, String> {
 /// * `Err` — nobody could look. Nothing runs and nothing is replayed, because both would be a
 ///   guess: the error goes to the caller.
 ///
-/// **Never asked about an unfinished record.** One still in flight may have a command running under
-/// it — a warden killed mid-`sbx` leaves the child behind — and the host half way through a destroy
-/// reads exactly like a host nobody has touched. That stays [`Outcome::Undecided`].
+/// **Not asked about an unfinished record until [`DOER_DEADLINE`] has passed.** One still in flight
+/// may have a command running under it — a warden killed mid-`sbx` leaves the child behind — and the
+/// host half way through a destroy reads exactly like a host nobody has touched. Past the deadline,
+/// with no live warden holding it, `Ok(false)` retires the record so a person is asked again
+/// (SKEIN-1497). `Ok(true)` and `Err` leave it [`Outcome::Undecided`].
 pub type Holds<'a> = &'a dyn Fn(&str) -> Result<bool, String>;
 
 /// What [`Store::once`] decided.
@@ -219,6 +228,10 @@ struct Record {
     /// How far the operation had got when this record was last written. See [`Stage`].
     #[serde(default)]
     stage: Stage,
+    /// RFC3339, set when the command was reached. Empty on a record from before this field, whose
+    /// deadline then runs from `started_at`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    crossed_at: String,
 }
 
 /// How far an operation had got — the difference between a claim worth taking back and one that is
@@ -246,8 +259,8 @@ enum Stage {
     /// Claimed, and in front of a person. Nothing has run, and the claim is released if the warden
     /// holding it is gone — which is what [`abandoned`] decides.
     Asking,
-    /// The command was reached. Never released: "we do not know" is the honest answer and the only
-    /// safe one, because the other one re-runs a destroy.
+    /// The command was reached. Never released by [`abandoned`]: "we do not know" is the honest
+    /// answer until [`DOER_DEADLINE`], and after it only the host can retire the record.
     Running,
 }
 
@@ -317,6 +330,7 @@ impl Store {
             outcome: None,
             forgotten: false,
             stage: Stage::Asking,
+            crossed_at: String::new(),
         };
         // Held open — and flocked — for as long as this operation is in front of a person. The
         // kernel drops it however this process dies, which is what lets the next warden tell an
@@ -328,14 +342,20 @@ impl Store {
 
         // The marker, and the only way to obtain a `Crossed`. Writing it before the command is what
         // makes a death during `sbx` distinguishable from a death before it.
+        //
+        // The rename below replaces the inode `_held` locks, so the new record is locked as well:
+        // that lock is how a later request tells a live warden with a slow `sbx` from a dead one.
+        let running = std::cell::RefCell::new(None);
         let reach = || -> Result<Crossed, String> {
-            self.put(
+            let held = self.put_held(
                 &path,
                 &Record {
                     stage: Stage::Running,
+                    crossed_at: chrono::Utc::now().to_rfc3339(),
                     ..mine.clone()
                 },
             )?;
+            *running.borrow_mut() = Some(held);
             Ok(Crossed(()))
         };
         let done = match f(&reach) {
@@ -391,14 +411,25 @@ impl Store {
                 continue;
             }
             // In flight, and not abandoned: somebody is at the approval, or a command may be
-            // running. The host is not asked — see `Holds` for why its answer would mean nothing.
+            // running. The host is not asked until the deadline — see `Holds`. After it, a host
+            // that shows the act did not take effect frees the id for a person to be asked. A host
+            // that agrees, or cannot be read, leaves it undecided.
             if record.finished_at.is_empty() {
+                if overdue(path, &record)
+                    && matches!(
+                        holds(&format!("was left running at {}", ran_from(&record))),
+                        Ok(false)
+                    )
+                {
+                    let _ = retired(path, &record);
+                    continue;
+                }
                 return Ok(Taken::Answered(answer_from(record)));
             }
             // Finished — with an answer, or with one the window has dropped. It answers this
             // request only if the host is still as that run left it. An `Err` leaves by `?`:
             // nobody could look, so nothing is replayed and nothing is run.
-            if holds(&record.finished_at)? {
+            if holds(&format!("finished at {}", record.finished_at))? {
                 return Ok(Taken::Answered(answer_from(record)));
             }
             // Not `return` on a refusal to retire: it means the record moved under us — another
@@ -488,6 +519,32 @@ impl Store {
         fs::rename(&staging, path).map_err(|e| format!("record {}: {e}", path.display()))?;
         let _ = sync_dir(path);
         Ok(())
+    }
+
+    /// Write `record` over `path` and hand back a lock on the file now at that name.
+    ///
+    /// A record that could not be locked is written as [`Stage::Unmarked`], the stage nothing ever
+    /// judges: without the lock a live warden could not be told from a dead one.
+    fn put_held(&self, path: &Path, record: &Record) -> Result<fs::File, String> {
+        let staging = staging(path, "put");
+        let mut held = write_into(&staging, record)?;
+        if !lock(&held) {
+            held = write_into(
+                &staging,
+                &Record {
+                    stage: Stage::Unmarked,
+                    ..record.clone()
+                },
+            )?;
+        }
+        fs::rename(&staging, path).map_err(|e| format!("record {}: {e}", path.display()))?;
+        let _ = sync_dir(path);
+        Ok(held)
+    }
+
+    /// Where the record for `id` lives, for the recovery line a person is given.
+    pub fn record_path(&self, id: &str) -> Result<PathBuf, String> {
+        checked_id(id).map(|id| self.path(id))
     }
 
     /// Drop the answers that are older than the window, keeping the ids.
@@ -596,7 +653,33 @@ fn abandoned(path: &Path, record: &Record) -> bool {
     fs::remove_file(path).is_ok()
 }
 
-/// Remove the finished record at `path` — the exact one `judged` — so its id can be claimed again.
+/// When the command under this record started, as near as the record can say.
+fn ran_from(record: &Record) -> &str {
+    match record.crossed_at.is_empty() {
+        true => &record.started_at,
+        false => &record.crossed_at,
+    }
+}
+
+/// Whether this unfinished record is past [`DOER_DEADLINE`] with no live warden holding it.
+///
+/// Every "no" leaves the record undecided. [`Stage::Unmarked`] is never overdue, because it may be
+/// a claim whose owner could not be detected at all, and a time that will not parse is not old.
+fn overdue(path: &Path, record: &Record) -> bool {
+    if record.stage != Stage::Running {
+        return false;
+    }
+    let Ok(from) = chrono::DateTime::parse_from_rfc3339(ran_from(record)) else {
+        return false;
+    };
+    let age = chrono::Utc::now().signed_duration_since(from);
+    if age.to_std().map_or(true, |age| age < DOER_DEADLINE) {
+        return false;
+    }
+    fs::File::open(path).is_ok_and(|file| lock(&file))
+}
+
+/// Remove the record at `path` — the exact one `judged` — so its id can be claimed again.
 ///
 /// Called once [`Holds`] has said the host no longer bears the record out. **Every "no" here leaves
 /// the record where it is**, as in [`abandoned`], and for the same reason: two requests can reach
@@ -1253,12 +1336,7 @@ mod tests {
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
         let asked = AtomicUsize::new(0);
-        fs::write(
-            dir.join("op-mid.json"),
-            br#"{"started_at":"2026-11-17T00:00:00Z","finished_at":"","outcome":null,
-                 "forgotten":false,"stage":"running"}"#,
-        )
-        .unwrap();
+        left_running(&dir, "op-mid", Duration::from_secs(60));
 
         let got = store
             .once(
@@ -1289,6 +1367,118 @@ mod tests {
             0,
             "an operation that may still be running was run again"
         );
+    }
+
+    /// A `running` record whose command crossed `age` ago, as a killed warden leaves it.
+    fn left_running(dir: &Path, id: &str, age: Duration) {
+        fs::create_dir_all(dir).unwrap();
+        let at = (chrono::Utc::now() - chrono::Duration::from_std(age).unwrap()).to_rfc3339();
+        let record = Record {
+            started_at: at.clone(),
+            finished_at: String::new(),
+            outcome: None,
+            forgotten: false,
+            stage: Stage::Running,
+            crossed_at: at,
+        };
+        fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn past_the_deadline() -> Duration {
+        DOER_DEADLINE + Duration::from_secs(60)
+    }
+
+    /// **A killed warden's operation is asked again once the host shows it did not take effect**
+    /// (SKEIN-1497). The counterfactual is `take` never consulting `overdue`: the answer is then
+    /// `Undecided` for ever and `ran` stays 0.
+    #[test]
+    fn past_its_deadline_a_host_that_disagrees_frees_the_operation() {
+        let dir = scratch("overdue-frees");
+        left_running(&dir, "op-killed", past_the_deadline());
+        let store = Store::new(&dir, forever());
+        let ran = AtomicUsize::new(0);
+        let got = store
+            .once(
+                "op-killed",
+                &|_| Ok(false),
+                |reach| {
+                    cross_then(reach, || {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok("asked and run".to_string())
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(got, Outcome::Ran(Ok("asked and run".to_string())));
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// The host agreeing, or being unreadable, proves nothing about a half-finished command. The
+    /// counterfactual is `overdue` followed by a retire on anything but `Ok(false)`.
+    #[test]
+    fn past_its_deadline_a_host_that_agrees_or_cannot_be_read_stays_undecided() {
+        let answers: [fn(&str) -> Result<bool, String>; 2] =
+            [|_| Ok(true), |_| Err("sbx ls failed".to_string())];
+        for (n, holds) in answers.into_iter().enumerate() {
+            let dir = scratch(&format!("overdue-stays-{n}"));
+            left_running(&dir, "op-killed", past_the_deadline());
+            let ran = AtomicUsize::new(0);
+            let got = Store::new(&dir, forever())
+                .once("op-killed", &holds, |reach| {
+                    cross_then(reach, || {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok("ran".to_string())
+                    })
+                })
+                .unwrap();
+            assert!(matches!(got, Outcome::Undecided { .. }), "{n}: {got:?}");
+            assert_eq!(ran.load(Ordering::SeqCst), 0, "answer {n} re-ran the work");
+        }
+    }
+
+    /// A slow `sbx` under a live warden is not a dead one's leftovers, however old. The
+    /// counterfactual is `overdue` losing its lock probe: `holds` is then asked.
+    #[test]
+    fn past_its_deadline_a_record_a_live_warden_holds_is_not_judged() {
+        let dir = scratch("overdue-held");
+        left_running(&dir, "op-slow", past_the_deadline());
+        let held = fs::File::open(dir.join("op-slow.json")).unwrap();
+        assert!(lock(&held), "the test could not take the lock it relies on");
+        let asked = AtomicUsize::new(0);
+        let got = Store::new(&dir, forever())
+            .once(
+                "op-slow",
+                &|_| {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Ok(false)
+                },
+                |_| Did::Never("must not be reached".into()),
+            )
+            .unwrap();
+        assert!(matches!(got, Outcome::Undecided { .. }), "{got:?}");
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// The marker itself holds the lock while the command runs, or the test above describes a
+    /// warden that does not exist. The counterfactual is `reach` going back to a plain `put`.
+    #[test]
+    fn a_running_command_holds_the_lock_on_its_marker() {
+        let dir = scratch("marker-locked");
+        let store = Store::new(&dir, forever());
+        let path = dir.join("op-live.json");
+        store
+            .once("op-live", &believed, |reach| {
+                cross_then(reach, || {
+                    let probe = fs::File::open(&path).unwrap();
+                    assert!(!lock(&probe), "the marker was unlocked while its command ran");
+                    Ok("ran".to_string())
+                })
+            })
+            .unwrap();
     }
 
     /// **A host nobody could read is neither "still so" nor "no longer so"** (SKEIN-1493).
@@ -1348,6 +1538,7 @@ mod tests {
             outcome: Some(Ok("fleet destroyed".into())),
             forgotten: false,
             stage: Stage::Running,
+            crossed_at: String::new(),
         };
         let judged = finished("2026-11-01T00:00:00+00:00");
         let later = finished("2026-11-17T00:00:00+00:00");
