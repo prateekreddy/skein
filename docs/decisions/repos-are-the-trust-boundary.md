@@ -1,21 +1,32 @@
 # Repos are the trust boundary
 
-**Decision.** skein's security model has three levels.
+**Decision.** A box is accident-prone, not hostile. skein stops one agent's mistake from damaging
+another's work. It does not try to stop an agent that means harm, including one turned by a prompt
+injection. The guards have three levels, and none is a wall against a box that sets out to cross it:
+`/run/docker.sock` is open to every box and gives a root container with any bind mount, which
+reaches past all of them. Do not use it to reach anything outside your own box's work.
 
-1. **A hard wall around the person's machine, their credentials, and skein itself.** No box reaches
-   the host, the fleet's credentials, or what skein runs and is built from.
-2. **A light wall between repos.** A box of one repo cannot read or change another repo's checkout,
-   store, memory, `~/shared` or tokens, and cannot plant anything another repo's boxes run.
-   Messaging between boxes (the mailbox, Claude messaging) stays open, and skein may share
-   read-only content it installed itself across the whole fleet.
-3. **Within one repo, a single trust domain.** The repo's boxes share freely. skein guards only
-   against accidents there: each box keeps its own checkout and its own build output.
+1. **Around the person's machine, their credentials, and skein itself.** Ordinary work in a box does
+   not touch the fleet's credentials or what skein runs and is built from. The `sbx` microVM is the
+   outer boundary, and the host directories the fleet mounts are inside it.
+2. **Between repos.** A box of one repo does not see another repo's checkout, store, memory,
+   `~/shared` or tokens, and does not run what another repo's boxes installed. Messaging between
+   boxes (the mailbox, Claude messaging) stays open, and skein may share read-only content it
+   installed itself across the whole fleet.
+3. **Within one repo, a single trust domain.** The repo's boxes share freely. Each box keeps its own
+   checkout and its own build output, so one agent's work does not land on another's.
 
 **Date.** 2026-10-29.
 
 **Decided by.** The project owner, on SKEIN-1350. Amended by the owner on 2026-10-31 (SKEIN-1426):
-each repo's caches move to its tools area on the fleet's disk. Amended again on 2026-11-06
-(SKEIN-1373): a repo's kinds decide which caches it gets; its shared compiler cache waits.
+each repo's caches move to its tools area on the fleet's disk. Amended on 2026-11-06 (SKEIN-1373):
+a repo's kinds decide which caches it gets; its shared compiler cache waits. Amended on 2026-11-22
+(SKEIN-1490, decisions 1 and 2): a box is accident-prone only, and Docker stays on for every box.
+
+**What the owner accepts.** A malicious or prompt-injected agent in any box can reach everything in
+the sandbox, credentials included. Stronger walls (a uid per repo, private process namespaces, a
+read-only root as a security wall, no write token in a model session) were proposed and declined:
+structure around the agents that prevents no accident adds friction.
 
 **Why.** The launcher bound the sandbox's `~/.cargo`, `~/.rustup` and `~/.npm` read-write into
 every box, whatever repo it belonged to. They were kept on the grounds that nothing on a box's
@@ -25,8 +36,8 @@ checking it again, build scripts included. So a box of one repo could plant code
 repo ran, which is the shape SKEIN-963 removed for `~/.local/bin`.
 
 Taking the caches away from every box was not the answer either. Sharing downloads is worth
-something, and the boxes of one repo already share a store, memory and `~/shared`, so a wall
-between them buys little. The wall that matters is between repos, and that is where the model
+something, and the boxes of one repo already share a store, memory and `~/shared`, so a guard
+between them buys little. The guard that matters is between repos, and that is where the model
 puts it.
 
 **What follows.**
@@ -140,4 +151,4 @@ puts it.
   `an_unused_tool_version_is_removed_only_while_nothing_has_it_open` (`tests/plugin_tools.rs`).
 - `skein-lock` for every agent: bwrap test `every_agent_in_a_box_has_skein_lock_and_cannot_change_it`
   (`tests/isolation_bwrap/repocache.rs`).
-- The other walls of levels 1 and 2 are the rows of [`docs/threat-model.md`](../threat-model.md).
+- The other guards of levels 1 and 2 are the rows of [`docs/threat-model.md`](../threat-model.md).

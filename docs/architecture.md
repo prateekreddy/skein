@@ -946,10 +946,10 @@ of §8.2 lost in a rendering decision.
 
 ## 9. The trust model
 
-Rewritten twice. The first draft asserted a namespace escape was "the only way through", which was
-false. The second draft over-corrected: it named the tmux socket as a box-to-box code path, and the
-source had already closed that. Both errors came from reading the `bwrap` exec without reading the
-isolation block eighty lines above it.
+**A box is accident-prone, not hostile** (`docs/decisions/repos-are-the-trust-boundary.md`). The
+mechanisms below stop one agent's mistake from reaching another's work. None is a wall against a box
+that means harm: `/run/docker.sock` reaches past all of them (R11). Where this section says a box
+"cannot" do something, read it as "not by accident"; `docs/threat-model.md` states the limits.
 
 ### 9.1 What a box actually shares
 
