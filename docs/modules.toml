@@ -160,6 +160,15 @@ item = "SKEIN-1"
 # tool can tell which sentence argued for which name, so no tool should be trusted to delete one.
 # @CURRENT
 
+[[cycle]]
+modules = ["announce", "health", "resource_signal"]
+why = """
+The cockpit's memory check names the box that lost a process (SKEIN-1504), and that record is the
+box's signal file, which `resource_signal` owns. `resource_signal` asks `announce` what the fleet
+needs of a box, and `announce` is built on the verdicts `health` computes.
+"""
+item = "SKEIN-1516"
+
 [current.agentpath]
 # `health` for the three-valued verdict every `doctor` line is written in — Satisfied, Unsatisfied
 # with a way out, Unknown for a check that could not be made. A fourth vocabulary for one row would

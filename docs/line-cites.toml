@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:501"]
+["docs/modules.toml:510"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1472,8 +1472,8 @@ cited_by = ["docs/recovery-survey.md"]
 line = "let check = HealthCheck::unsatisfied(detail, fix);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:507"]
-line = "p if p.killed > 0 => HealthCheck::unsatisfied("
+["src/health/report.rs:462"]
+line = "\" The kernel has killed {n} process(es) for memory since skein last looked{}.\","
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/health/report.rs:562"]
@@ -1498,12 +1498,12 @@ line = "false => HealthCheck::unsatisfied("
 window = "let gh = match crate::github::have_curl() {\u000bfalse => HealthCheck::unsatisfied(\u000b\"curl is not installed, and skein reads GitHub with it — pull requests, diffs, merges, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:716"]
+["src/health/report.rs:736"]
 line = "false => HealthCheck::unsatisfied("
 window = "true => HealthCheck::satisfied(format!(\"installed for {} managed repos\", repos.len())),\u000bfalse => HealthCheck::unsatisfied(\u000bprobe_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/health/report.rs:726"]
+["src/health/report.rs:746"]
 line = "false => HealthCheck::unsatisfied("
 window = "}\u000bfalse => HealthCheck::unsatisfied(\u000bmailbox_errors.join(\"; \"),"
 cited_by = ["docs/recovery-survey.md"]
