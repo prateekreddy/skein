@@ -30,9 +30,9 @@ or says which commit the number was true at. A new count that matters goes in th
 its check in `tests/parity_numbers.rs`.
 
 ```sh
-grep -c '\.route('  src/bin/skein-server/main.rs               # 120  (NOT '.route("' — that gives 104, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 187 unique, 192 occurrences
-grep -c 'function ' src/web/index.html                          # 548
+grep -c '\.route('  src/bin/skein-server/main.rs               # 111  (NOT '.route("' — that gives 99, missing every entry whose path is on the line below)
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 185 unique, 190 occurrences
+grep -c 'function ' src/web/index.html                          # 473
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -138,53 +138,13 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   `Answer::from_host` / `Answer::from_box` labelling, and a fallback whose target exists — **§7
   frames the fallback's target as being removed later; it is already unreliable now.**
 - **Inline diff comment composer**, comments interleaved between diff lines, `⌘↵` to save.
-- The pull-request queue. **Six actions, not one**: approve, request-changes, comment, **merge**,
-  **ask** (Q&A against the PR), **draft** (model-drafted comment). Merge is destructive and must not
-  hide behind a verb.
-- **The summary and the review are one reading, always** — including "draft again". Both halves come
-  out of a single CONVERSATION over a single diff download (`review::visit` → `summarise_and_draft`),
-  and both are stored together, so a row can never show a summary of one reading of a commit beside
-  a review from another. A reading is two TURNS of one conversation and not two readings (SKEIN-393):
-  the first produces the summary and the review, and the second asks that review which files it did
-  not open. **The conversation belongs to the pull request, not to the reading** (SKEIN-376): its id
-  is derived from `<repo_id>#<number>` (`ai::conversation_for`) rather than stored, and every turn
-  runs in that pull request's own directory (`review::conversation_of`, carried by `ai::Turn`)
-  because Claude Code
-  files a session under the working directory it was opened in — unpinned, every resume misses and
-  every round is a cold read while appearing to work. Whether this round opens or resumes is asked
-  rather than recorded (`ai::claude_in_conversation`): resume, then open, then no conversation at
-  all, so a sandbox recreated between rounds degrades to today's cold read instead of failing.
-  **That directory is a checkout of the change** (`review::stand_the_change_up`, SKEIN-395), which
-  is why it is per pull request rather than per repo: measured over one 26KB diff, a reviewer with
-  nowhere to look made zero tool calls in one turn, and the same prompt in a checkout made thirty
-  over thirty-one — reading the changed file around each hunk and following the caller into
-  another. It is stood up at exactly the commit being reviewed **or left empty**: a checkout at the
-  wrong commit is a review confidently wrong about code the change does not contain, which is worse
-  than no checkout at all. Every failure to stand it up is silent and the reading goes ahead. The second turn can only add to what the first wrote — it posts its own
-  addition to GitHub and there is nothing on skein's side to fold it into — resends no diff, and is
-  not a second unit — the unit is the pull request analysed, the same rule that makes
-  stage 2 free after stage 1. There is no standalone drafter: `draft_critique` and its own prompt were
-  deleted, because nothing needs a review without a summary (SKEIN-263). A press for a review
-  re-runs the reading rather than drafting beside the one on disk.
-- **One read control** (SKEIN-293). "Read it again" reads the whole change and reads it again from
-  scratch — always both halves, on the merged reading, over one diff download, for one unit. It
-  carries the reader's intent to the server as `?redraft=1` (`src/web/index.html`), which the server
-  reads as `review::Review::Always`.
-
-  **The confirmation this bullet used to describe is gone with the thing it protected.** The press
-  asked before replacing a review the reader had VETTED — a kept or dropped comment, or edited text
-  — and there is no such review to lose: skein stores none, and the vetting panel that recorded
-  those decisions went with it. Where there is nothing to lose it just goes, which is now every
-  time. The receipt and undo themselves are untouched and still carry every verdict.
-- **~~Approving with skein's own review~~ — cut, and the rule it was an exception to stands.** One
-  control used to post skein's drafted review as the approval body. Skein holds no review to post:
-  the session posts its own to GitHub under the reader's account (`src/review/asking.rs`, `gh pr review`).
-  Verdicts themselves did not move — approve, request-changes and comment are still on the row
-  (`revVerdictHtml`), and the keyboard still refuses `a` on a row that is not open.
+- The pull-request queue. **Four actions, not one**: approve, request-changes, comment, **merge**.
+  Merge is destructive and must not hide behind a verb. The model-driven ask, draft and reading
+  left with the review engine ([`decisions/review-engine-removed.md`](decisions/review-engine-removed.md)).
 - **CODEOWNERS parsing and ownership attribution**, including the gitignore-anchoring rule and the
   fact that team-requested reviews are not returned by `review-requested:@me`.
-- **Contract signals** — a mechanical diff scanner that escalates a PR the model called boring,
-  capped and deduplicated, deliberately non-redundant with the AI summary.
+- **Contract signals** — a mechanical diff scanner, capped and deduplicated, drawn on the change
+  view.
 - Review filter chips: all / author / reviewer / mentioned.
 - **An unreadable set-aside file is said, not read as empty** (SKEIN-552). A corrupt `archived.json`
   or `snoozed.json` puts an amber blind-spot line on the queue naming the file, and a `move it aside`
@@ -197,40 +157,6 @@ bug), and **holding right-Alt for 260 ms is push-to-talk**. Read KEYMAP *and* th
   from, and a step's number is its DEPTH — carrying `+` ("at least") whenever the stack's lowest
   steps are not in the queue, because a number that claims more than it knows is the defect.
 - **Blind-spot reporting** — the queue states what it could not see rather than under-reporting.
-- Summary caching keyed by head SHA; a parallelism throttle so summaries do not take the rate-limit
-  window from working boxes; the count poll deliberately off the board tick.
-- **The queue payload is the ROW shape, and the prose arrives when a row opens** (SKEIN-287). A
-  collapsed row draws the line, the flags, the depth and whether a review is drafted; the brief, the
-  signals, the ownership and the drafted review itself come back per row, off disk, through
-  `/review/:n/summary?held=1` — a request to REMEMBER, which can never become a model call on any
-  head at any hour of the budget. Measured locally over thirty-nine readings: 155,167 B → 12,055 B
-  for the list, 3,969 B for one opened row.
-- **The scope of what skein reads on its own**, in one sentence: *if you pressed it, it is free and
-  unconditional; if skein decided to read it, that happens only in a repo you switched read-ahead on
-  for, and it is counted against the day.* Per-repo consent is off until somebody switches it on
-  (`repos::Repo::read_prs`), the scope is a review somebody asked you for or a pull request you
-  opened — a mention is neither, and a draft is never read whoever wrote it (`review::worth_reading`
-  over `review::worth_a_visit`) — and BOTH readers obey it: the ten-minute background pass and the
-  review pane's own pump. It is enforced at the model call (`review::unasked_scope`) so no client
-  can widen it, and the day's ceiling (`Config::review_reads_per_day`) counts only that side.
-  Anything a person presses — expanding a row, "read it", "re-read" — is `review::Trigger::Asked`:
-  unscoped, never refused, never counted. SKEIN-242/265/277.
-- **A round runs when somebody asks for one** (SKEIN-444). A pull request skein has read before is
-  not re-read because a commit landed. The trigger is GitHub's own review request — `Pr::
-  my_review_requested`, checked in `review::spend_a_visit` before the diff is downloaded — so the
-  round costs nothing at all until an author says they are ready. This matters because
-  `Reason::Reviewed` keeps a pull request in `review::in_reading_scope` for ever: without it, one
-  review of a busy branch buys a round on every push to it, indefinitely. The kept reading is NOT
-  cached under the un-read commit, deliberately — a review request arrives without the diff
-  changing by a byte, and a cache entry keyed by the commit would swallow it. The row says which
-  commit went unread and why (`Summary::not_reread`) rather than looking current. A press is
-  `Trigger::Asked` and never reaches the check.
-
-  This replaced a gate that spent the round's first turn asking the model whether re-reading was
-  worth it (SKEIN-379). It worked; it was the wrong shape. It cost a turn per commit to find out,
-  and its answer was a judgement nobody could predict or audit. The owner's verdict:
-  *"I think we were complicating what the trigger for new round should be. Let's just reuse github
-  request review thing."*
 - Archive; review counts.
 - **Standing module notes**, including the freshness model: each note records the commit its module
   was at, and a stale note is never used.
@@ -441,6 +367,15 @@ decision rather than an omission.
 
 Each is a decision, with its cost stated in the user's terms.
 
+**The merge train, its workflows and the AI review engine are removed** (the owner, 2026-11,
+SKEIN-1509 and SKEIN-1510). Gone from the review pane: the train panel, the workflow editor, the
+AI reading and its gist on a row, read-ahead and its daily ceiling, `R`, the composer's ask and draft,
+and the "Reviews act as" setting. The cost: nothing merges or reviews a pull request unattended, and
+a row no longer carries a model's summary. A person still reads, comments, approves, requests changes
+and merges there, and an agent in a box can review with its own tools.
+[`decisions/review-engine-removed.md`](decisions/review-engine-removed.md) says what it did and how
+to recover it.
+
 **A repository no longer picks a runtime, and the Add-repository overlay's agent picker is gone**
 (the owner, 2026-09-27, SKEIN-1207). A runtime is one fleet default (Settings → Boxes → Default
 agent) plus a pick per box in the New box dialog. The cost: a person who wanted every box of one repo
@@ -465,7 +400,7 @@ nothing to fetch from, and would differ from a URL repo in nothing a box could o
 repo has no server needs a server — a bare repo reachable over `ssh://` is enough.
 
 One consequence the old entry listed as "must be built, not assumed" was in fact built: `diff`,
-`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:316`)
+`moduledocs` and `codeowners` read the repo's mirror through `repos::Tree` (`src/repos/mirror.rs:254`)
 rather than a working checkout.
 
 **The fleet-wide GitHub secret is no longer seeded, and the control that did it is gone.** Skein

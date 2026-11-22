@@ -397,7 +397,6 @@ new file mode 100644
             String::from_utf8_lossy(&made.stderr)
         );
         let repo = Repo {
-            read_prs: false,
             id: "demo".into(),
             source: seed.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),
@@ -493,7 +492,6 @@ new file mode 100644
             String::from_utf8_lossy(&made.stderr)
         );
         let repo = Repo {
-            read_prs: false,
             id: "demo".into(),
             source: seed.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),

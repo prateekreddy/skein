@@ -32,11 +32,6 @@ commit = "029c10be222a1acf3014d4772f85bb3516e3d4ab"
 subject = "feat(fleet): a box sees its own files, and one box may see them all"
 date = "2026-08-16T07:17:19Z"
 
-[citations."0aaa837"]
-commit = "0aaa837148d162c8a99594c60d957553afda0e2b"
-subject = "feat(review): a reading resumes the pull request's own conversation instead of starting a new one"
-date = "2026-08-26T20:18:52Z"
-
 [citations."0ad554e"]
 commit = "0ad554ed98b505df572002207bc3825a7a5a5667"
 subject = "fix(declared): a box cannot decide what skein decides about it"
@@ -77,24 +72,20 @@ commit = "3a462f2818932834688db81dd36d9c31950b788c"
 subject = "fix(gitgate): the grant records the box that was on screen, not the one in the file"
 date = "2026-08-20T15:11:08Z"
 
-[citations."44c387a"]
-commit = "44c387a9e08466e59ecdd762d2870db19a24038a"
-subject = "feat(review): the reviewer stands in the change instead of reading only the diff"
-date = "2026-08-27T00:55:26Z"
-
 [citations."48d2f7c1"]
 commit = "48d2f7c12fb8946f0a3fa65f04bc057ad015a49b"
 subject = "docs(architecture): one warden count, everywhere"
 date = "2026-08-20T12:29:17Z"
 
-[citations."4f2ab1c"]
-external = "the other half of src/review/cache.rs:1360's invented pair — see `9c1de07`. SKEIN-708."
-sites = ["docs/line-cites.toml", "src/review/cache.rs"]
-
 [citations."509373b"]
 commit = "509373b89fd7bf359e835372275503f3daed4360"
 subject = "fix(place): a placed box is addressed by its record, never by its own name"
 date = "2026-08-03T13:49:44Z"
+
+[citations."595d9dfc"]
+commit = "595d9dfcd2edb5f4a551242f1c5ff581a585502c"
+subject = "docs(fleet-pins): the request-write exemption follows its helper, now ask_with"
+date = "2026-11-17T02:20:28Z"
 
 [citations."5a4179d"]
 commit = "5a4179d972962bf19608811c71b61c0c6514cfa9"
@@ -159,10 +150,6 @@ commit = "94c3426308d392fbee383534da330ad13aaa9e63"
 subject = "fix(anchor): the check travels with the crossing, on both transports"
 date = "2026-08-20T14:58:42Z"
 
-[citations."9c1de07"]
-external = "invented placeholder in src/review/cache.rs:1360's test fixture (`a_reading_filed_under_a_commit_it_did_not_read_still_says_it_is_stale`), paired with `4f2ab1c` — neither was ever a real commit. SKEIN-708."
-sites = ["docs/line-cites.toml", "src/review/cache.rs"]
-
 [citations."9d1ddf5"]
 commit = "9d1ddf5839f74b719a4d7622bfc8943cf52685a6"
 subject = "refactor: a reference names the module it comes from, and the graph says something"
@@ -184,13 +171,8 @@ subject = "refactor: lib.rs declares modules and nothing else"
 date = "2026-08-20T14:06:41Z"
 
 [citations."abc1234"]
-external = "invented placeholder in test-fixture/example text, not a real commit anywhere: src/prwork/perform.rs:1413 and :1940 (a fixture PR moved between two made-up shas) and tools/prose-check.py:1865 (SELF_CHECK_DATED's own worked example). SKEIN-708."
-sites = ["docs/line-cites.toml", "src/prwork/perform.rs", "tools/prose-check.py"]
-
-[citations."abc6bbb"]
-commit = "abc6bbb89dd5a4dc51c03a7d02f0d44a46714bbc"
-subject = "feat(ai): a review call acts on GitHub as you, and a broken setup stops refusing a commit for ever"
-date = "2026-08-27T13:13:48Z"
+external = "invented placeholder in test-fixture/example text, not a real commit anywhere: tools/prose-check.py:1865 (SELF_CHECK_DATED's own worked example). SKEIN-708."
+sites = ["docs/line-cites.toml", "tools/prose-check.py"]
 
 [citations."bedc3fe"]
 commit = "bedc3fe4db3479ea290f7438994a11d59cf0ae0a"
@@ -207,23 +189,10 @@ commit = "d1c078cad9c1e93bf30b23e5f2aef2678f2f0603"
 subject = "fix(isolation): a box sees its own repo, and nothing the sandbox mounts for anyone else"
 date = "2026-08-20T14:29:30Z"
 
-[citations."d2abd03"]
-external = "acme/testbed's own commit, not skein's — src/review/asking.rs:782 cites the head of the benchmark's test repository (`acme/testbed#30`) that a measurement was read against, not a commit in this repository. SKEIN-708."
-sites = ["docs/line-cites.toml", "src/review/asking.rs"]
-
 [citations."dbe2318"]
 commit = "dbe2318f9f3bdba92b2e1e97f949a50fbd4257c6"
 subject = "refactor: delete four more guards on a fleet name that cannot be blank, and stop a fifth living in a fixture"
 date = "2026-09-10T16:38:54Z"
-
-[citations."dda3d3b"]
-commit = "dda3d3bb4dda6309568b4230a80097a9c064731d"
-subject = "refactor(review): the session posts its own review to GitHub, and skein stops keeping one"
-date = "2026-08-27T14:48:33Z"
-
-[citations."def5678"]
-external = "the other half of src/prwork/perform.rs:1413's invented pair — see `abc1234`. SKEIN-708."
-sites = ["docs/line-cites.toml", "src/prwork/perform.rs"]
 
 [citations."df48daa"]
 commit = "df48daab0ebb91481507882247f9eb6f633e8a51"

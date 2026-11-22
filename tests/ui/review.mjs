@@ -32,7 +32,6 @@ import { stopThenRemove } from "./harness/teardown.mjs";
 
 await import("./review/queue.mjs");
 await import("./review/keyboard.mjs");
-await import("./review/summaries.mjs");
 await import("./review/row.mjs");
 await import("./review/authoring.mjs");
 await import("./review/edges.mjs");

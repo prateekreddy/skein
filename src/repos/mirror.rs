@@ -65,9 +65,7 @@ pub(super) fn ensure_mirror_at_add(
     // and git refuses the second — `fatal: cannot copy .../templates/description: File exists` —
     // so BOTH failed and the repo was left with no mirror at all. That is not a transient: every
     // caller reads `None` as "this repo has nothing to say" rather than "I could not look", so the
-    // PR brief silently stopped attributing ownership and the notes pane offered no modules. And
-    // `review::summarise` caches its answer against the head sha, so one race froze a wrong summary
-    // for the life of that commit. Found by `tests/ui/review.mjs`, which read as flaky because a
+    // notes pane offered no modules. Found by `tests/ui/review.mjs`, which read as flaky because a
     // later call, alone, made the mirror and the checks after it passed.
     //
     // The half-made-mirror repair below made it sharper rather than safer: on a second attempt one
@@ -251,66 +249,6 @@ pub fn fetch_mirror(repo: &Repo) -> Result<(), String> {
         .args(["gc", "--auto", "--quiet"]);
     let _ = bounded_output(&mut pack, "git gc --auto", Duration::from_secs(120));
     Ok(())
-}
-
-/// Bring ONE pull request's head into the mirror — the ref `fetch_mirror` deliberately does not ask
-/// for.
-///
-/// **A pull request from a fork is in no `refs/heads/*` of the base repository.** Its commits live
-/// in the contributor's own repository, and the only place the base repo can serve them from is
-/// `refs/pull/<n>/head`, which GitHub maintains and [`fetch_mirror`]'s refspec —
-/// `+refs/heads/*` and `+refs/tags/*` — does not fetch. So a fork's pull request could not be stood
-/// up at all: `review::stand_the_change_up` checked the head out, failed, fetched, failed again,
-/// and answered "nothing here". Correct rather than wrong — a reviewer handed the base branch and
-/// told it is the change is the worst outcome that path has — but it meant the reviewer read a
-/// diff where it could have read a tree.
-///
-/// **One ref, on demand, and never in the mirror's own refspec.** Adding `+refs/pull/*` to
-/// [`fetch_mirror`] would drag every pull request ever opened into every repo's mirror on every
-/// fetch, for ever; `gadget-demo` on a live fleet is past 700 alone. This asks for the one pull
-/// request something is about to read, and only when its head is not already reachable — which for
-/// a same-repo pull request it always is, because that branch IS in `refs/heads/*`.
-///
-/// Fetched into the mirror rather than into the reader's checkout on purpose: the mirror is the one
-/// place in skein that talks to the remote and the one place its credentials are arranged, so a
-/// second door onto GitHub would be a second thing to authenticate and to get wrong. The checkout
-/// then takes it from the mirror, which is the hop it already makes for everything else.
-pub fn fetch_pull_head(repo: &Repo, number: u64) -> Result<String, String> {
-    let mirror = ensure_mirror(repo)?;
-    let refspec = pull_head_ref(number);
-    let mut command = Command::new("git");
-    // Never a terminal, and the fleet's own credential if it has one (SKEIN-954). The third
-    // fleet-side network git, and the one SKEIN-951 left out: a fork's pull-request head comes from
-    // nowhere else, so a private base repo with a missing or expired token hung the REVIEWER here
-    // on `Username for 'https://github.com':` exactly as `skein start` hung in `fetch_mirror`.
-    let auth = fleet_git(&mut command, repo);
-    command
-        .arg("-C")
-        .arg(&mirror)
-        .args(["fetch", "--quiet", "origin"])
-        .arg(format!("+{refspec}:{refspec}"));
-    let out = bounded_output(
-        &mut command,
-        "git fetch pull head",
-        Duration::from_secs(300),
-    )?;
-    if !out.status.success() {
-        return Err(git_refusal(
-            &format!("fetching {refspec} of {}", repo.id),
-            &String::from_utf8_lossy(&out.stderr),
-            &auth,
-        ));
-    }
-    Ok(refspec)
-}
-
-/// Where GitHub keeps a pull request's head, whoever opened it.
-///
-/// Its own function because two files name this ref and a ref spelled two ways is a ref that works
-/// in one of them: the mirror fetches it here, and the reader fetches the same string out of the
-/// mirror.
-pub fn pull_head_ref(number: u64) -> String {
-    format!("refs/pull/{number}/head")
 }
 
 /// A repo's files, read out of its **mirror** rather than off somebody's disk.
@@ -610,11 +548,7 @@ mod tests {
     /// Both used to run `git clone --mirror` into the same directory and git refused the second —
     /// `fatal: cannot copy .../templates/description: File exists` — so **both** failed and the repo
     /// was left with nothing. That is not a transient, because of what the callers do with `None`:
-    /// `review::ownership` returns `(vec![], 0)`, which its own doc says is deliberately
-    /// indistinguishable from "this repo has no CODEOWNERS", and `moduledocs::modules` returns an
-    /// empty list. So a PR brief quietly stopped saying which half of a change was yours. And
-    /// `review::summarise` caches against the head sha, so one race froze that answer for the life
-    /// of the commit.
+    /// `moduledocs::modules` returns an empty list.
     ///
     /// **What this test can and cannot see.** It asserts the outcome — every caller gets a usable
     /// mirror — because "both failed" IS the bug, and against the unlocked code it fails reliably at
@@ -635,7 +569,6 @@ mod tests {
         // Registered WITHOUT going through `add_repo`, which would make the mirror as a side effect
         // and leave nothing for the racing readers to do.
         let repo = Repo {
-            read_prs: false,
             id: "proj".into(),
             source: checkout.to_string_lossy().to_string(),
             store: home.join("store").to_string_lossy().to_string(),
@@ -673,7 +606,7 @@ mod tests {
     /// A repo that cannot be read says why, distinguishably from a repo with nothing to say.
     ///
     /// `Tree::open` folds both into `None`, and every caller used to read that as "nothing there":
-    /// `review::ownership` answered "you own none of this" and `moduledocs::modules` answered
+    /// `moduledocs::modules` answered
     /// "this repo has no modules" about a repo skein could not look at (SKEIN-117). The telling
     /// form is the seam those callers now stand on, so what it promises is pinned here: an
     /// unreadable repo is `Err` with a reason, and a readable one whose files are then absent is
@@ -687,7 +620,6 @@ mod tests {
 
         let checkout = tempdir();
         let repo = Repo {
-            read_prs: false,
             id: "proj".into(),
             source: checkout.to_string_lossy().to_string(),
             store: home.join("store").to_string_lossy().to_string(),

@@ -13,7 +13,7 @@ console.log("\nthe merge a person presses");
 // knew — that they had pressed merge. The two facts it never carried are which commit lands and
 // where it lands, and both are on the row the chip was drawn from.
 //
-// The commit is not decoration. It travels as `drafted_at`, and `prwork::merge_by_hand` refuses a
+// The commit is not decoration. It travels as `drafted_at`, and `prq::merge_by_hand` refuses a
 // merge whose branch has moved since — quoting back the sha it was handed. So a dialog naming one
 // sha while another travels would produce a refusal about a commit the reader was never shown, and
 // the checks below assert the two are the same value.
@@ -44,7 +44,8 @@ const mergeOutcome = async () => {
 };
 await check("the merge confirmation names the commit on the row and the branch it lands on", async () => {
   await page.evaluate(() => { revPending.clear(); revComposing = null; });
-  await page.evaluate(() => toggleRevRow("acme#1"));
+  // The part before this may have left it open, and a second toggle would fold it.
+  await page.evaluate(() => { if (!revOpen.has("acme#1")) toggleRevRow("acme#1"); });
   await page.waitForSelector("#revpane .revrow.open .revrowacts .revchip", { timeout: 15000 });
   await mustSee("#revpane .revrow.open .revrowacts .revchip:has-text('merge')", "the merge chip");
   const shown = await page.evaluate(() => (revKeyPr("acme#1") || {}).head_sha || "");

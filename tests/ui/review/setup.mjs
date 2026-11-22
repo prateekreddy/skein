@@ -74,7 +74,7 @@ const HOSTILE_CHECK_URL = "javascript:void(window.__followedHostileCheck = 1)";
 /// actually goes out.
 async function createGitHub(root) {
   // **The live head of a pull request, which is not the one the queue photographed.** A merge is
-  // checked against GitHub itself — `prwork::merge_by_hand` reads `prq::base_and_head` before it
+  // checked against GitHub itself — `prq::merge_by_hand` reads `prq::base_and_head` before it
   // sends anything — so a push landing while somebody reads is this map changing and nothing else.
   // Absent means the fixture's own `headRefOid`, so every PR starts where its search answer says.
   const heads = {};
@@ -227,13 +227,8 @@ async function makeFixture() {
     // `source_tree`, and NOT `work` beside it: `work` is a serde ALIAS for the same field, so both
     // together is a duplicate key and the whole file fails to parse — which reads downstream as
     // "no repo with id acme" rather than as a bad fixture.
-    // `read_prs: true` — read-ahead switched ON, which is what a person who wants their queue read
-    // has pressed. It is off by default and it is the SCOPE, not a preference: with it off, skein
-    // reads nothing here on its own, neither the background pass nor the pane's pump
-    // (`review::unasked_scope`, SKEIN-242), and every check below that reads a summary the pump
-    // fetched would be asserting on an empty pane.
     { id: "acme", source: "https://github.com/acme/thing.git",
-      source_tree: path.join(root, "work"), read_prs: true,
+      source_tree: path.join(root, "work"),
       store: path.join(root, "store"), agent: "claude", plane_project: "", sync_connection: "" },
   ]));
 
@@ -258,8 +253,8 @@ async function makeFixture() {
     // Approved, and GitHub has ASKED AGAIN. The re-request is what puts this row back in your
     // lane (SKEIN-354): `decided` reads GitHub's two answers — is your verdict standing, and is
     // skein still being asked — and the commit the review was left against is no longer one of
-    // them. Without the re-request this row is theirs, it leaves both the your-move lane and
-    // `worth_reading`'s, and every check below that drives it has nothing to drive.
+    // them. Without the re-request this row is theirs, it leaves the your-move lane, and every
+    // check below that drives it has nothing to drive.
     pr(3, "change the default timeout", "erin", {
       ...reviewed("APPROVED", "older"),
       reviewRequests: { totalCount: 1, nodes: [{ requestedReviewer: { login: "me" } }] },
@@ -642,8 +637,6 @@ const { srv, log } = await startServer({
     // records, gitgate requests and box sessions live under the fleet root.
     SKEIN_FLEET_ROOT: path.join(fx.root, "fleet"),
     SKEIN_GITHUB_API: fx.github.url,
-    // Deliberately NO SKEIN_REVIEW_AI: reading PRs is on by default, and the whole summary half of
-    // this suite passing without an override is the proof of it.
     SKEIN_CLAUDE_BIN: fx.claude,
     PATH: `${fx.bin}:${process.env.PATH}`,
   },

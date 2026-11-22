@@ -1,6 +1,6 @@
 // Hiding a warning at the top of the cockpit for a while (SKEIN-1244), in a real page.
 //
-// The owner's decisions, each a check below: every one of the four rows has a ✕; a plain press
+// The owner's decisions, each a check below: every one of the three rows has a ✕; a plain press
 // hides it for an hour and ▾ offers "for 1 hour", "for 4 hours" and "until tomorrow"; a hidden
 // row stays hidden across a reload, in this browser only; it comes back when its time is up, or at
 // once when a different problem arrives; the ✕ never does the row's own job; and a browser that
@@ -137,19 +137,19 @@ try {
   const { page, errors, sayBlips } = await open(context);
 
   // ---- every row is up, and every row has its ✕ and its ▾ --------------------------------------
-  // Fails if any of the four rows is drawn without the control, or the control is hidden by CSS.
-  for (const id of ["healthban", "loginban", "trainban"]) {
+  // Fails if any of the three rows is drawn without the control, or the control is hidden by CSS.
+  for (const id of ["healthban", "loginban"]) {
     await until(page, async () => (await shown(page, id)) === "shown");
   }
-  check("the three polled rows are up",
-    [await shown(page, "healthban"), await shown(page, "loginban"), await shown(page, "trainban")],
-    ["shown", "shown", "shown"]);
+  check("the two polled rows are up",
+    [await shown(page, "healthban"), await shown(page, "loginban")],
+    ["shown", "shown"]);
   check("and each has a ✕ and a ▾ on screen",
-    await page.evaluate(() => ["healthban", "loginban", "trainban"].map(id => {
+    await page.evaluate(() => ["healthban", "loginban"].map(id => {
       const seen = sel => { const e = document.querySelector(`#${id} ${sel}`); const r = e?.getBoundingClientRect(); return !!r && r.width > 0; };
       return [seen(".banx"), seen(".banmore")];
     })),
-    [[true, true], [true, true], [true, true]]);
+    [[true, true], [true, true]]);
   // Fails if the row is a button again with the ✕ inside it: the parser would move the inner one out.
   check("no button holds another button",
     await page.evaluate(() => document.querySelectorAll("button button").length), 0);
@@ -169,7 +169,7 @@ try {
       [await shown(page, "healthban"), await acts(page)], ["hidden", []]);
     check("for an hour", await stored(page, "healthban").then(r => r && [r.ids, r.until - r.now <= HOUR, r.until - r.now > HOUR - 5000]),
       [["check:registry"], true, true]);
-    check("and only that row", [await shown(page, "loginban"), await shown(page, "trainban")], ["shown", "shown"]);
+    check("and only that row", await shown(page, "loginban"), "shown");
 
     // ---- a reload remembers ---------------------------------------------------------------------
     // Fails if the dismissal is kept only in the page's memory.
@@ -255,40 +255,6 @@ try {
       await comesBack(page, "loginban",
         () => { health = { ...health, expired_logins: [] }; },
         () => { health = { ...health, expired_logins: dead }; }),
-      ["hidden", "absent", "shown"]);
-
-  });
-  await part("the train row", async () => {
-    // ---- the menu, by pointer; Escape gives focus back; the train row's own click still works -----
-    await page.click("#trainban .banmore");
-    await until(page, async () => (await page.$("#banmenu")) !== null);
-    await page.keyboard.press("Escape");
-    check("Escape closes the menu and puts focus back on the ▾",
-      await page.evaluate(() => [!!document.getElementById("banmenu"), document.activeElement?.classList.contains("banmore")]),
-      [false, true]);
-    check("having hidden nothing", await shown(page, "trainban"), "shown");
-    await page.click("#trainban .banmore");
-    await page.click("#banmenu >> text=until tomorrow");
-    check("'until tomorrow' hides the train row until local midnight, opening no review",
-      [await shown(page, "trainban"), await acts(page),
-       await page.evaluate(() => {
-         const r = JSON.parse(localStorage.getItem("skein.dismiss.trainban"));
-         const d = new Date(r.until);
-         return [r.ids, d.getHours(), d.getMinutes(), d.getDate() !== new Date().getDate()];
-       })],
-      ["hidden", [], [["alpha#7"], 0, 0, true]]);
-    // Fails if the train's fingerprint is the repo alone, or the reason text.
-    counts = [{ ...counts[0], stopped: [...counts[0].stopped, { number: 9, why: "conflict" }] }];
-    await repoll(page);
-    check("another pull request stopping shows the train row at once", await shown(page, "trainban"), "shown");
-    await page.click("#trainban .trainrepo");
-    check("and its repo still opens the review queue", (await acts(page)).map(a => a[0]), ["openReview"]);
-    // Fails if `renderTrainBanner` stops forgetting the dismissal when nothing is stopped.
-    const stuck = counts;
-    check("a train that moves and then stops on the same pull requests inside the hour shows the row",
-      await comesBack(page, "trainban",
-        () => { counts = stuck.map(c => ({ ...c, stopped: [] })); },
-        () => { counts = stuck; }),
       ["hidden", "absent", "shown"]);
 
   });

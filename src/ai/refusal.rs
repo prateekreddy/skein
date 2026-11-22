@@ -3,10 +3,6 @@
 
 use super::*;
 
-/// What [`crate::util::spawn_failure`] says in front of the OS's own words. Named because
-/// [`outside_box_because`] splits on it, and a literal spelled twice is a literal that drifts.
-pub(super) const SPAWN_REFUSED: &str = "could not be started: ";
-
 /// A refusal that will not change by asking again, remembered so it is not asked again.
 ///
 /// **Why this exists.** A host whose `claude` cannot log in answers every call instantly, and the
@@ -225,7 +221,6 @@ pub(crate) fn plant_refusal_saying(said: &str) {
             said: said.into(),
         },
         "claude",
-        Turn::Alone,
     );
 }
 
@@ -251,22 +246,7 @@ pub(super) fn standing_refusal() -> Option<Unread> {
     refusal_still_standing().map(|standing| standing.why)
 }
 
-pub(super) fn remember_refusal(why: &Unread, bin: &str, turn: Turn<'_>) {
-    // **A call that named a conversation is not evidence about the runtime** (SKEIN-376). Asking to
-    // resume a session the sandbox no longer has is answered `No conversation found with session
-    // ID: <id>` and exit 1 — an ordinary answer to an ordinary question, and remembering it would
-    // make one pull request's forgotten session refuse every model call skein makes until the
-    // standing refusal aged out.
-    //
-    // Nothing is lost by declining to remember here, and that is the part worth checking rather
-    // than assuming: [`claude_in_conversation`] always ends its ladder at [`Turn::Alone`], so a
-    // login that is genuinely broken still refuses a call that names no conversation, and THAT is
-    // the one remembered. The memo keeps its whole job — one Keychain dialog rather than one per
-    // pull request — and stops covering the one case where it was answering the wrong question.
-    // A labelled call is one of these too: its id is fresh, so it names no conversation to miss.
-    if !matches!(turn, Turn::Alone | Turn::Labelled { .. }) {
-        return;
-    }
+pub(super) fn remember_refusal(why: &Unread, bin: &str) {
     // A setup problem, not a bad moment. See the type above.
     if !matches!(
         why,

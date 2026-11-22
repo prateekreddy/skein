@@ -262,7 +262,7 @@ pub fn box_exposure(name: &str) -> Exposure {
 /// **Here rather than in the CLI**, and the difference is the whole point of putting it here.
 /// `skein start` already turns away a box with no registered repo, and that refusal is the *name*
 /// check — it never sees the box that is uncovered for the other reasons, and it is not on the path
-/// `reviewbox`, `takeover` or [`ensure_box_session`] take. The condition belongs where the manifest
+/// `takeover` or [`ensure_box_session`] take. The condition belongs where the manifest
 /// is computed, so every way of bringing a box up meets the same wall.
 ///
 /// **What it says, and why in that order** — the two standing UX rules, applied. *Inform and offer*:
@@ -1086,56 +1086,6 @@ fn box_progress_script(name: &str) -> String {
     )
 }
 
-/// **Is this box up and already provisioned for the start it is on?** — the script, so it can be
-/// read without a fleet.
-///
-/// Two facts and both are needed. A live `skein-shell` says the session is there; a
-/// `skein-startup.ready` marker carrying the CURRENT start id says provisioning finished for *this*
-/// session rather than for some earlier one. `box-session.sh` writes `skein-start-id` fresh on every
-/// launch and the kit suffixes its markers with it, so a marker from a previous start cannot answer
-/// for this one — which is the whole reason the id exists.
-///
-/// Prints `ready` and nothing else. Silence is "no", and so is anything unreadable: the caller's
-/// fallback is to start the box, which is what it did unconditionally before.
-pub fn box_ready_script(name: &str) -> String {
-    box_ready_script_in(&box_root(name))
-}
-
-/// [`box_ready_script`] with the box's root passed in rather than read off `$SKEIN_FLEET_ROOT`.
-///
-/// **So the test does not have to set a process-wide variable**, which is not a stylistic
-/// preference here: `fleet_root()` reads an environment variable, several tests in this file read it
-/// too and do not take `testutil::env_lock`, and a test that sets it is a test that can fail its
-/// neighbours. That is SKEIN-471's shape and it had already been paid for twice in this file. A
-/// function that takes its root cannot cause it a third time.
-fn box_ready_script_in(root: &str) -> String {
-    format!(
-        "id=$(cat {id_q} 2>/dev/null); \
-         [ -n \"$id\" ] || exit 0; \
-         {alive} || exit 0; \
-         [ -e {tmp_q}/skein-startup.ready.\"$id\" ] && echo ready; \
-         exit 0",
-        id_q = sh_quote(&format!("{root}/tmp/skein-start-id")),
-        // Connecting, not `tmux has-session` — see [`session_socket_probe`]. The session's *name*
-        // is not what this was asking: the marker beside it carries the current start id, which is
-        // the half that says provisioning finished for THIS session.
-        alive = session_socket_probe(&format!("{root}/session.sock")),
-        tmp_q = sh_quote(&format!("{root}/tmp")),
-    )
-}
-
-/// [`box_ready_script`], asked of the fleet. `false` whenever the answer is not a clear yes.
-pub fn box_is_ready(name: &str) -> bool {
-    if !valid_name(name) {
-        return false;
-    }
-    let sandbox = fleet_sandbox();
-    own_sandbox(&sandbox)
-        .exec(&box_ready_script(name), Duration::from_secs(20))
-        .map(|said| said.trim() == "ready")
-        .unwrap_or(false)
-}
-
 /// The kinds of project a box's repo is (`repos::KINDS`): the owner's choice for the repo when
 /// there is one ([`crate::repos::Repo::kinds`]), else what the box's own checkout holds, read as it
 /// starts the way its Rust toolchain pin is (`versions::wanted_versions`). `None` when neither
@@ -1379,7 +1329,7 @@ mod tests {
     /// tmux honours `MSG_SHELL` and `MSG_EXEC` from the server unconditionally, so a client is a
     /// place a hostile server runs a command — and every socket skein used to name lives under a
     /// box's own root, which is bound read-write into that box. Three sites here spent that: the
-    /// `kill-server` in [`stop_script`], and the two `has-session` probes. All three are now the
+    /// `kill-server` in [`stop_script`], and the two `has-session` probes. All are now the
     /// cgroup write and [`session_socket_probe`], which sends nothing and so can be answered with
     /// nothing.
     ///
@@ -1411,10 +1361,6 @@ mod tests {
         for (what, script) in [
             ("the stop", stop_script("web-main", &record)),
             ("the launch probe", box_progress_script("web-main")),
-            (
-                "the readiness probe",
-                box_ready_script_in(&box_root("web-main")),
-            ),
         ] {
             assert!(
                 !script.contains("tmux"),
@@ -1462,103 +1408,6 @@ mod tests {
         );
     }
 
-    /// **A box is "ready" only for the start it is actually on.**
-    ///
-    /// [`box_ready_script`] is what lets `reviewbox::open_at` skip `start_box` for a box that is
-    /// already up, and the whole value of skipping is that provisioning is the cost of a start. So
-    /// the two ways this can be wrong are opposite and both expensive: answering yes for a box that
-    /// was never provisioned leaves a review box with no kit and no hooks, and answering yes off a
-    /// marker from an EARLIER start does the same to a box that has since been restarted.
-    ///
-    /// Run against a real tmux session and real marker files rather than asserted on the string —
-    /// the third row is the one a string test would have missed, because the id is interpolated at
-    /// run time and reading the script cannot tell whether it matched.
-    ///
-    /// **What would make each row fail**, in order: the first is the half that must NOT refuse, and
-    /// a guard that never says yes costs the whole fix; dropping the marker check says yes to an
-    /// unprovisioned box; matching the marker without the id says yes to a box whose provisioning
-    /// belongs to a start that is over; dropping `has-session` says yes to a box that is not
-    /// running at all.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_box_is_ready_only_for_the_start_it_is_on() {
-        if std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-        {
-            crate::testutil::skip("no tmux here");
-            return;
-        }
-        // **No environment at all**, which is why `box_ready_script_in` takes its root: several
-        // tests in this file read `$SKEIN_FLEET_ROOT` without `env_lock`, so a test that set it
-        // would be a test that fails its neighbours. Twice paid for here already.
-        let dir = crate::testutil::tempdir();
-        let root = dir.join("ready-probe");
-        let tmp = root.join("tmp");
-        std::fs::create_dir_all(&tmp).expect("box tmp");
-        let id = "20260903090000-1234";
-        std::fs::write(tmp.join("skein-start-id"), format!("{id}\n")).expect("start id");
-
-        let sock = root.join("session.sock").display().to_string();
-        let tmux = |args: &[&str]| {
-            std::process::Command::new("tmux")
-                .args(["-S", &sock])
-                .args(args)
-                .output()
-                .expect("tmux")
-        };
-        let _ = tmux(&["new-session", "-d", "-s", "skein-shell", "sleep", "120"]);
-        let asked = || {
-            String::from_utf8_lossy(
-                &std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(box_ready_script_in(&root.display().to_string()))
-                    .output()
-                    .expect("sh")
-                    .stdout,
-            )
-            .trim()
-            .to_string()
-        };
-
-        let marker = tmp.join(format!("skein-startup.ready.{id}"));
-        std::fs::write(&marker, "").expect("marker");
-        assert_eq!(
-            asked(),
-            "ready",
-            "a box that is up and provisioned for this very start is not recognised, so every \
-             reading goes on paying for a provisioning pass it does not need"
-        );
-
-        std::fs::remove_file(&marker).expect("drop the marker");
-        assert_eq!(
-            asked(),
-            "",
-            "a box whose provisioning never finished was called ready, which is a review box with \
-             no kit and no hooks"
-        );
-
-        std::fs::write(tmp.join("skein-startup.ready.20260101000000-1"), "").expect("stale marker");
-        assert_eq!(
-            asked(),
-            "",
-            "a marker from an earlier start answered for this one — the id exists precisely so it \
-             cannot"
-        );
-
-        std::fs::write(&marker, "").expect("marker again");
-        let _ = tmux(&["kill-session", "-t", "skein-shell"]);
-        assert_eq!(
-            asked(),
-            "",
-            "a box with no session was called ready, so `open_at` would skip the start that is the \
-             only thing able to give it one"
-        );
-        let _ = tmux(&["kill-server"]);
-    }
-
     // A box's turn state describes a SESSION, and the store it is written to outlives the box. So a
     // migrated box came up reading `ended` — the old sandbox's agent died on the way out, its
     // SessionEnd hook recorded that faithfully, and the new box inherited it and looked terminated
@@ -1572,7 +1421,6 @@ mod tests {
             fs::create_dir_all(store.join(dir)).unwrap();
         }
         let repo = Repo {
-            read_prs: false,
             id: "bridge".into(),
             source: String::new(),
             store: store.to_string_lossy().into_owned(),
@@ -1705,7 +1553,6 @@ mod tests {
         let store = home.join("store");
         std::fs::create_dir_all(&store).unwrap();
         crate::repos::save_repos(&[crate::repos::Repo {
-            read_prs: false,
             id: "web".into(),
             source: "https://example.invalid/web.git".into(),
             store: store.to_string_lossy().into_owned(),

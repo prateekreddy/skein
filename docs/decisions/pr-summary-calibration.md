@@ -5,7 +5,8 @@ gist on every row; a fuller brief only when the change earns one; mechanical evi
 shown apart from what the model claims; and a reading that did not see everything names exactly what
 it did not see, never a guess. Summaries are not to become chattier or terser.
 
-**Date.** 2026-08-24.
+**Date.** 2026-08-24. The review engine this describes was removed afterwards; see
+[`review-engine-removed.md`](review-engine-removed.md). The citations in this document name lines as they stood at `595d9dfc`.
 
 **Decided by.** The project owner, on reading the summaries in use: they hit exactly the level of
 detail wanted.

@@ -170,7 +170,7 @@ pub(crate) struct EnvPins(Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>)
 /// Start pinning environment variables. See [`EnvPins`].
 /// Switch settings on the way a person does: in `$SKEIN_HOME/config.json`, through the same merge
 /// the Settings route uses. An environment variable can only hold a switch OFF
-/// (`config::env_holds_off`), so a test that needs `pr_workflows` or `ai_enrichment` on says so
+/// (`config::env_holds_off`), so a test that needs `ai_enrichment` on says so
 /// here. `$SKEIN_HOME` must already be this test's own directory; `skein_home` refuses otherwise.
 pub(crate) fn switch_on(set: impl FnOnce(&mut crate::config::Config)) {
     crate::config::update_config(|c| {

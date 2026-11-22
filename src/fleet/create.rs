@@ -1461,7 +1461,6 @@ mod tests {
     /// volume — the ordinary shape, and the one the property below is measured against.
     fn repo_at(id: &str, work: &str, store: &str) -> crate::repos::Repo {
         crate::repos::Repo {
-            read_prs: false,
             id: id.into(),
             source: work.into(),
             store: store.into(),
@@ -1649,7 +1648,6 @@ mod tests {
             std::fs::create_dir_all(d).unwrap();
         }
         crate::repos::save_repos(&[crate::repos::Repo {
-            read_prs: false,
             id: "thing".into(),
             source: work.to_string_lossy().into_owned(),
             store: store.to_string_lossy().into_owned(),

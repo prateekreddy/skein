@@ -951,7 +951,6 @@ mod tests {
         // A repo registered against a store nobody made — `skein add` interrupted, or a volume
         // mounted somewhere else since.
         crate::repos::save_repos(&[crate::repos::Repo {
-            read_prs: false,
             id: "orphan".into(),
             source: "https://github.com/a/b".into(),
             store: home.join("gone/.claude").to_string_lossy().into_owned(),

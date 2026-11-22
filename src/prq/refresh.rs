@@ -86,8 +86,7 @@ pub fn queue(repo: &Repo, force: bool) -> Result<Queue, String> {
 /// each would be a network round trip per repo per tab, which is the steady-state spend that got a
 /// live fleet rate-limited once already (see [`queue_within`]'s own note about it). Ten minutes
 /// is the badge poller's interval — the slowest thing that asks — so at worst the mirror trails the
-/// queue by one of those, and any reader that needs an exact commit still fetches for itself
-/// (`review::stand_the_change_up`).
+/// queue by one of those, and any reader that needs an exact commit still fetches for itself.
 ///
 /// Errors are dropped on purpose and this returns nothing: the caller asked for a queue. A mirror
 /// that could not be fetched is the mirror that was already there, which is what every reader had
@@ -351,10 +350,7 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
             );
             // A label list cut off at [`LABELS_FETCHED`] (SKEIN-373). Said out loud for the same
             // reason the truncated rollup above is: the row would otherwise show a set of labels
-            // that looks like the whole set, and `workflow::Cond::NoLabel` would answer a question
-            // about a label skein never received. The sentence names what it costs, because the
-            // cost is not a missing chip — it is a merge train that will not act, on purpose,
-            // rather than acting on a hole.
+            // that looks like the whole set.
             if !pr.labels_whole() {
                 blind_spots.push(format!(
                     "#{number}'s labels: GitHub says it has {}, skein read {} — so no workflow \
@@ -443,7 +439,6 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
         slug,
         trunk,
         viewer: login,
-        ai: crate::review::summaries_enabled(),
         prs,
         blind_spots,
         unreadable_set_aside,
@@ -510,8 +505,8 @@ pub fn queue_within(repo: &Repo, max_age: Duration) -> Result<Queue, String> {
 /// a test that never mentions caching would fail because of one that does.
 ///
 /// **Why it can be switched on** (SKEIN-314). Off unconditionally, no test could put a queue that
-/// is OLD in front of a caller, so three stated defences had nothing that could fail on them: the
-/// `invalidate` after a workflow acts (`crate::prwork::sweep`), the 60s-vs-600s split between the
+/// is OLD in front of a caller, so the stated defences had nothing that could fail on them: the
+/// 60s-vs-600s split between the
 /// pane and the badge poll, and anything else that turns on a queue being stale rather than
 /// absent. Each was pinned by reading the source instead — which catches a call being deleted and
 /// nothing about whether it works.
@@ -617,16 +612,6 @@ pub struct Count {
     /// the pane and notice the repo was missing from it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub skipped: String,
-    /// PRs whose workflow has stopped and is waiting on a person — the merge train's skips. On the
-    /// badge poll rather than the pane's answer, because the pane is only open when somebody is
-    /// already looking: this is the row that has to reach them when they are not.
-    ///
-    /// **Filled by the counts route, not here.** The stops live in `prwork`'s file, and `prq`
-    /// reading them would put `prq` inside the module cycle (`docs/modules.toml`); the server
-    /// already stands on both modules, so the decoration is its one line. Everything `prq` builds
-    /// leaves this empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stopped: Vec<StoppedPr>,
     /// What this repo's queue could **not** see, in the queue's own words — carried onto the
     /// badge rather than left behind in the pane.
     ///
@@ -642,15 +627,6 @@ pub struct Count {
     /// Empty means the count is whole, and that is the only case a bare number may be drawn for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blind_spots: Vec<String>,
-}
-
-/// One pull request a workflow has stopped on, and why — the shape the counts poll carries to the
-/// cockpit's banner row. Defined here beside [`Count`], the payload it rides in; `prwork::stops`
-/// produces it, because the stops file is that module's.
-#[derive(Debug, Clone, Serialize)]
-pub struct StoppedPr {
-    pub number: u64,
-    pub why: String,
 }
 
 /// Take the count for every repo that has a review queue switched on.
@@ -682,7 +658,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: 0,
                     error: String::new(),
                     skipped,
-                    stopped: Vec::new(),
                     // Nothing was looked at, so there is nothing this repo failed to see.
                     // `skipped` is the whole story for it.
                     blind_spots: Vec::new(),
@@ -694,7 +669,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: q.prs.iter().filter(|p| p.lane == Lane::NeedsYou).count(),
                     error: String::new(),
                     skipped: String::new(),
-                    stopped: Vec::new(),
                     // The number and what it is missing travel together, or the number is a
                     // claim the queue never made (SKEIN-239).
                     blind_spots: q.blind_spots,
@@ -704,7 +678,6 @@ pub fn counts() -> Vec<Count> {
                     needs_you: 0,
                     error: e,
                     skipped: String::new(),
-                    stopped: Vec::new(),
                     // No queue was built, so there are no blind spots to report — `error` is
                     // already the strongest thing this can say.
                     blind_spots: Vec::new(),
@@ -723,9 +696,6 @@ pub fn counts() -> Vec<Count> {
 /// list of failures rather than one flattened result that could only be as good as its worst repo.
 #[derive(Debug, Clone, Serialize)]
 pub struct MergedQueue {
-    /// The one global switch, said once — the per-queue `ai` repeats it, but the pane asks the
-    /// merged answer, not a queue it may not have.
-    pub ai: bool,
     pub queues: Vec<Queue>,
     /// Repos that could not be read, each with its reason. Attributed, never pooled: "a repo
     /// failed" hides exactly the information that decides whether you care.
@@ -738,7 +708,6 @@ pub struct MergedQueue {
 
 pub fn merged(force: bool) -> MergedQueue {
     let mut out = MergedQueue {
-        ai: crate::review::summaries_enabled(),
         queues: Vec::new(),
         failed: Vec::new(),
         skipped: Vec::new(),
@@ -751,7 +720,6 @@ pub fn merged(force: bool) -> MergedQueue {
         };
         if !skipped.is_empty() {
             out.skipped.push(Count {
-                stopped: Vec::new(),
                 blind_spots: Vec::new(),
                 repo_id: repo.id,
                 needs_you: 0,
@@ -796,7 +764,6 @@ pub fn merged(force: bool) -> MergedQueue {
         match queue(&repo, force) {
             Ok(q) => out.queues.push(q),
             Err(e) => out.failed.push(Count {
-                stopped: Vec::new(),
                 // The queues this repo's siblings DID build carry their own blind spots on the
                 // `Queue` itself; a repo that built none has only its error.
                 blind_spots: Vec::new(),
@@ -1522,44 +1489,6 @@ mod tests {
 
         forget_host_token();
         forget_renames();
-    }
-
-    /// `review::prune` reads this queue's list, and it may only do so when the list is whole.
-    ///
-    /// Asserted against the source, the way [`the_badge_reads_through_a_ten_minute_budget`] is and
-    /// for the same reason: the call lives in the server binary, behind an HTTP handler and a
-    /// detached task, so no test in this module can reach it — and the thing that goes wrong is
-    /// the guard being dropped, which a runtime test of the pruning itself would never notice.
-    ///
-    /// What it costs when it is dropped: every pull request past a truncated search's page is
-    /// absent from `open`, so its summary takes the "closed and merged is asked" road and pays a
-    /// `pr_is_open` REST call — per file, per tab open, for ever, for pull requests that are alive
-    /// and merely past the hundredth (SKEIN-231).
-    #[test]
-    fn the_only_other_reader_of_this_list_stands_down_when_it_is_partial() {
-        let server = crate::testutil::server_source();
-        assert_eq!(
-            server.matches("review::prune(").count(),
-            1,
-            "there is more than one caller now, and only one of them is pinned here"
-        );
-        let guarded = server
-            .split("review::prune(")
-            .next()
-            .expect("the source before the call");
-        // The PROPERTY, not one spelling of it: somewhere before the call, the queues that reach
-        // it are filtered on `whole`. Pinned this way round because the exact expression has
-        // already moved once — it was `slug.filter(|_| queue.whole)` inline, and is now a filter
-        // in the helper that builds the list — and a test that fails on a refactor which KEEPS
-        // the guard teaches whoever meets it to delete the test.
-        assert!(
-            guarded
-                .lines()
-                .any(|line| line.contains("filter") && line.contains("whole")),
-            "the queue's list is pruned against without asking whether it saw everything — a \
-             search cut off at its page makes every pull request past the hundredth absent for a \
-             reason that has nothing to do with it"
-        );
     }
 
     /// **A queue that could not be fully asked never replaces one that was** (SKEIN-447).

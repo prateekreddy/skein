@@ -1416,7 +1416,6 @@ mod tests {
     /// Register `slug` as a box's own repo and place a token for it, as a live fleet would.
     fn box_holding(name: &str, slug: &str) -> std::path::PathBuf {
         crate::repos::save_repos(&[crate::repos::Repo {
-            read_prs: false,
             id: name.into(),
             source: format!("https://github.com/{slug}.git"),
             store: String::new(),

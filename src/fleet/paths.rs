@@ -86,23 +86,6 @@ pub(super) fn stale_sandbox_secrets() -> Vec<String> {
     vec![format!("{}/.skein/review-github.token", fleet_root())]
 }
 
-/// A name no other in-flight review call has, for the credential file [`box_credential_paths`]
-/// names.
-///
-/// **Per call, not one shared file.** The unlink ([`forget_review_token`]) is what makes the name
-/// matter: two readings can be in flight at once — the queue runs them on threads — and with one
-/// shared path the first to finish would take the credential out from under the second between its
-/// write and its `cat`. The failure would be silent, because a reading with no token is exactly the
-/// reading skein did before any of this existed.
-///
-/// pid and a counter, the shape [`crate::secret`]'s temp names use and for the same reason: two
-/// threads of one process are the case a pid alone does not separate.
-pub(super) fn review_call_id() -> String {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}-{n}", std::process::id())
-}
-
 /// Where the provisioning script is installed inside the fleet sandbox.
 ///
 /// Beside the launcher rather than in `~/.local/bin` (where the kit puts it) for two reasons: a box
@@ -239,19 +222,12 @@ mod tests {
     /// path. Two spellings of it is a cover that misses, so the string is asserted here rather than
     /// only read: a rename on either side has to fail somewhere, and the alternative is a
     /// credential in the open with every test still green.
-    ///
-    /// And the box-side destination is asserted to be **outside** the fleet root, which is the
-    /// half that is easy to get backwards. `place::Place::crossing` runs a box call's script after
-    /// `exec nsenter`, so the `$(cat …)` happens inside the box — where this directory is a tmpfs
-    /// with nothing in it. A credential written under the cover for a call that reads it from
-    /// inside a box is a reading with no GitHub access and no message about it.
     #[test]
     fn every_secret_skein_keeps_in_the_sandbox_is_under_one_covered_directory() {
         let _g = crate::testutil::env_lock();
         std::env::set_var("SKEIN_FLEET_ROOT", "/boxes");
         let private = fleet_private_dir();
         let stale = stale_sandbox_secrets();
-        let (box_dir, box_file) = box_credential_paths("7-0");
         std::env::remove_var("SKEIN_FLEET_ROOT");
 
         assert_eq!(private, "/boxes/.skein/private");
@@ -268,14 +244,6 @@ mod tests {
         assert!(
             !stale.iter().any(|p| p.starts_with(&private)),
             "the sweep would delete a credential skein had just written under the cover: {stale:?}"
-        );
-        assert!(
-            !box_file.contains("/boxes") && !box_file.contains(&private),
-            "a box call's credential was put where the box cannot read it: {box_file}"
-        );
-        assert!(
-            box_dir.starts_with("\"$HOME\"/") && box_file.starts_with("\"$HOME\"/"),
-            "the box side must be a path the box's own shell expands: {box_file}"
         );
     }
 

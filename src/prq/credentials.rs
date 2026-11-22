@@ -116,10 +116,9 @@ pub fn host_token() -> Result<crate::secret::Secret, String> {
 /// rate-limited refresh does not fail these lookups: it fills them, permanently, with answers
 /// nobody was given. The limit lifts, the queue comes back, and skein goes on believing a thing it
 /// was never told until somebody restarts it. Nothing logs, nothing shows a blind spot, and there
-/// is nothing for a person to clear because nothing says it is there. Found three times — the
-/// merge train dead until a restart (SKEIN-238), a renamed repo reading as an empty queue
-/// (SKEIN-281), and once avoided on purpose in `crate::prwork::facts_of`, where an unknown trunk
-/// is `None` rather than "not the trunk" so that blindness cannot become a stop.
+/// is nothing for a person to clear because nothing says it is there. Found more than once:
+/// a stale trunk until a restart (SKEIN-238) and a renamed repo reading as an empty queue
+/// (SKEIN-281).
 ///
 /// So: `ask` returns `Ok` only when GitHub answered. An `Err` — a refusal, a hold, a missing
 /// token, a body that did not carry the field — is returned to the caller and **not written down**,
@@ -133,8 +132,7 @@ pub fn host_token() -> Result<crate::secret::Secret, String> {
 ///
 /// **And an answer is believed for [`GITHUB_SAID_FRESH`], not for the life of the process**
 /// (SKEIN-1281). "About once a year" still happens: a repository whose default branch moved from
-/// `master` to `main` kept `master` as its trunk until a restart, and the merge train's
-/// `base:trunk` claimed nothing in between. Two REST calls per repository per half hour is what
+/// `master` to `main` kept `master` as its trunk until a restart. Two REST calls per repository per half hour is what
 /// that costs.
 fn what_github_said<T: Clone>(
     memo: &GithubSaid<T>,
@@ -252,14 +250,13 @@ pub fn forget_renames() {
 /// Remembered per process for [`renamed_to`]'s reason: this is a REST round trip whose answer
 /// changes about never, asked from a poll. Through [`what_github_said`], so only a branch GitHub named
 /// is written down — a refusal is not, and the next refresh asks again (SKEIN-238: cached, one
-/// rate-limited refresh made `base_is_trunk` false on every pull request in the repo, the merge
-/// train's `base:trunk` claimed nothing, and the train was dead until a restart).
+/// rate-limited refresh left the trunk wrong until a restart).
 ///
 /// `""` for a repo whose trunk skein has not been told, which is [`Queue::trunk`]'s contract for
 /// "not known" — and the empty string is never what gets remembered, because a body with no
 /// `default_branch` is an `Err` here rather than an answer.
 ///
-/// **`pub` for the merge a person presses** (SKEIN-338). [`crate::prwork::merge_by_hand`] needs the
+/// **`pub` for the merge a person presses** (SKEIN-338). [`super::merge_by_hand`] needs the
 /// trunk and must not refresh the queue to get it, and this is already the memoised answer the
 /// queue itself uses — so both roads to a merge read the repository's default branch from the same
 /// place and cannot disagree about what the trunk is.
@@ -681,7 +678,7 @@ mod tests {
     /// **What GitHub said about a repository is believed for a while, not for ever** (SKEIN-1281).
     ///
     /// The trunk and the rename were remembered for the life of the server, so a repository moved
-    /// from `master` to `main` stalled the merge train until a restart. What makes this fail:
+    /// from `master` to `main` kept the old trunk until a restart. What makes this fail:
     /// dropping the age check in `believed_for` (`an aged answer is asked again` sees the first
     /// answer and one ask); or forgetting the aged answer when the re-ask is refused (`a refusal
     /// keeps the last answer` gets `None`).

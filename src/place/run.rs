@@ -44,9 +44,8 @@ impl Place {
     /// Any exit code is `Ok`, because "it ran and said no" is an answer, and only the caller knows
     /// what to make of it. See [`Ran`].
     ///
-    /// **`feed` is a parameter and not a second method** (SKEIN-799). There is one caller —
-    /// [`crate::fleet::model_call_in_box`] — and a twin that differed only in its stdin would be
-    /// one function nothing calls plus one place for the two to stop agreeing. `&[]` is a pipe
+    /// **`feed` is a parameter and not a second method** (SKEIN-799). A twin that differed only
+    /// in its stdin would be one more place for the two to stop agreeing. `&[]` is a pipe
     /// that closes immediately rather than `/dev/null`, which is the same thing to every script
     /// this could ever carry: a script that reads stdin gets EOF either way.
     ///
@@ -777,9 +776,7 @@ mod tests {
     /// The property was stated in three places and asserted in none of them: `fleet/model.rs`'s "the
     /// payload in `ps` … what was in it is the diff of a pull request, private repositories
     /// included", [`Place::attempt`]'s own "a pipe … is also not `/proc/<pid>/cmdline`", and
-    /// SKEIN-706's done-when. What guarded it was that `model_call_script` no longer takes a
-    /// prompt, so the exact revert fails to *compile* — a guard against one revert rather than
-    /// against the property. Any new caller of [`Place::attempt`] that inlines its payload into
+    /// SKEIN-706's done-when. Any new caller of [`Place::attempt`] that inlines its payload into
     /// the script, or a convenience that appends it to the argv, passes every other gate here.
     ///
     /// **Measured on a real process, running production's own argv.** The seam records the argv
@@ -791,9 +788,7 @@ mod tests {
     /// `sbx` hop and no `nsenter`, and what spawns is `env PATH=… bash -c <script>` doing exactly
     /// what the fixture above says.
     ///
-    /// **The payload is deliberately SMALL, and that is what this adds to
-    /// `ai::tests::a_call_with_a_box_reaches_the_box_and_carries_its_prompt_on_stdin`.** That one
-    /// sends 600,000 bytes because its subject is the ceiling: past `MAX_ARG_STRLEN` — 32 pages,
+    /// **The payload is deliberately SMALL.** The subject is not the ceiling: past `MAX_ARG_STRLEN` — 32 pages,
     /// 131,072 bytes on 4 KiB-page hardware — a payload back inside the script cannot be spawned
     /// at all, so a regression fails there on "the box was never reached" and its argv assertion
     /// never gets to speak. Under the cap the spawn *succeeds* and the leak is silent. That is the

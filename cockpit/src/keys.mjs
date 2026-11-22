@@ -76,10 +76,6 @@ const REVIEW = {
   c: "rev-comment",
   a: "rev-approve",
   r: "rev-request",
-  // Shift-R, beside `r`, and a capital because it spends nothing and undoes nothing: it asks skein
-  // to read the selected pull request again against the commit that is there now (SKEIN-228). The
-  // day's ceiling is on skein's own initiative, never on a person, so this key is never refused.
-  R: "rev-reread",
   "]": "rev-next-file",
   "[": "rev-previous-file",
   "?": "keys",
@@ -208,7 +204,6 @@ const SAYS = {
   "rev-open": "open the selected row — o opens things here; GitHub is g h",
   "rev-aside": "set aside — the row greys in place, u takes it back within 8s",
   "rev-undo": "undo the held act",
-  "rev-reread": "read this one again, against the commit that is there now",
   "rev-search": "find a pull request",
   "rev-last": "last row",
   "rev-first": "first row",

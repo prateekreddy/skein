@@ -6,7 +6,7 @@
 //
 // A switch can only be held OFF, because an environment variable may only turn things off
 // (`config::env_holds_off`); the review model is a value, so any value set holds it.
-const SWITCHES = ["pr_workflows", "ai_enrichment", "review_summaries", "box_plugin"];
+const SWITCHES = ["ai_enrichment", "review_summaries", "box_plugin"];
 
 export function heldNote(field, held) {
   const name = held && held[field];

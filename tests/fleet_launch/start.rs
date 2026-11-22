@@ -142,7 +142,6 @@ fn start_box_leaves_a_box_that_is_actually_usable() {
     ensure_store(&store).expect("seed the store");
     ensure_probe_in(&store).expect("seed the store's scripts");
     let repo = Repo {
-        read_prs: false,
         id: "demo".into(),
         source: remote.clone(),
         store: store.to_string_lossy().into_owned(),

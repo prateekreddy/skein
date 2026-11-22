@@ -275,10 +275,8 @@ fn epoch_now() -> u64 {
 /// **What it costs when it is missing is not this test's failure.** An unauthenticated request to
 /// api.github.com is rate-limited per IP, so the budget a stray test spends is the whole box's, and
 /// the suite that runs out of it fails somewhere else entirely, for a reason that is not in its
-/// own diff. It has already happened here: `review::visit`'s requested-review test downloaded a
-/// diff from the real api.github.com, unpinned, and the same run against a neighbour's leftover
-/// stub read a whole diff and spent a model call — same assertions, two different halves of the
-/// function (SKEIN-693, `src/review/visit.rs`).
+/// own diff. It has already happened here: a test downloaded a diff from the real api.github.com, unpinned,
+/// and the same run against a neighbour's leftover stub read a whole diff (SKEIN-693).
 pub(crate) fn api_base() -> String {
     if let Some(base) = std::env::var("SKEIN_GITHUB_API")
         .ok()
@@ -293,8 +291,8 @@ pub(crate) fn api_base() -> String {
          https://api.github.com: every caller of this turns it straight into a request, an \
          unauthenticated one is rate-limited PER IP, and the budget it spends belongs to the whole \
          box — so the suite that runs out of it is not this one (SKEIN-693). Point this test at \
-         its own listener (`prwork::testkit::github`, `review::testkit::stub_github`, or \
-         `tests/common`'s `fake_github`), or at `http://127.0.0.1:1` where nothing listens if the \
+         its own listener (`tests/common`'s \
+         `fake_github`, or a `TcpListener` of its own), or at `http://127.0.0.1:1` where nothing listens if the \
          call is not what is being asserted.",
         marker = crate::util::TEST_MARKER,
     );
@@ -304,7 +302,7 @@ pub(crate) fn api_base() -> String {
 /// One path segment of a GitHub URL, with everything a segment may not carry escaped.
 ///
 /// **It lives here, beside [`api_base`], because this module is what every path builder in the
-/// crate already calls.** It used to live inside `prwork::remove_label` as a `map` over bytes, and
+/// crate already calls.** It used to live inside one caller as a `map` over bytes, and
 /// the function ten lines below it built `/repos/{slug}/git/refs/heads/{head_ref}` raw — so the
 /// tree knew the rule and applied it in one of two places. A helper in the private scope of the one
 /// caller that remembered is not a rule; it is a coincidence.
@@ -314,7 +312,7 @@ pub(crate) fn api_base() -> String {
 /// `~ ^ : ? * [ \` in a ref and allows `#`, `%`, `&`, `+` and `;` — and `#` is the one that does
 /// damage silently, because curl never sends a fragment: `DELETE …/heads/release#2` leaves GitHub
 /// reading `DELETE …/heads/release`, which is a *different branch that probably exists*. `%` is the
-/// louder half of the same bug, a malformed escape and a 404 that stops a merge train.
+/// louder half of the same bug, a malformed escape and a 404.
 ///
 /// Unreserved characters (RFC 3986 §2.3) pass through; every other byte becomes `%XX`. **`/` is
 /// escaped too**, which is why this is a *segment* encoder and not a path one: a ref really can be
@@ -331,8 +329,7 @@ pub(crate) fn api_base() -> String {
 /// **This escape is half a defence and [`call`]'s `--path-as-is` is the other half.** Measured
 /// against a loopback listener: curl decodes `%2E` back to `.` and *then* normalises, so
 /// `/repos/acme/%2E%2E/%2E%2E/pulls/41` and the unescaped spelling left the process as the same
-/// `GET /pulls/41`. `prwork::acts`'s `a_repository_name_made_of_dots_cannot_climb_out_of_the_repos_path`
-/// fails if either half is removed.
+/// `GET /pulls/41`. The tests below fail if either half is removed.
 pub(crate) fn path_segment(raw: &str) -> String {
     // `.` and `..` — and, so no clever spelling is left out, any run of dots, none of which names
     // anything a repository, ref or label could have been called.
@@ -427,8 +424,8 @@ fn git_config(token: &crate::secret::Secret) -> String {
 /// reached here — `prq::host_token` mints it, and `get_json`, `send_json` and `graphql` carry it.
 /// It used to be converted to one on the first line of this body instead (SKEIN-519, secrets
 /// Rule 2), which shut the door at the last room rather than the front: everything upstream of
-/// `call` still held the credential as a printable `String`, so a `{token}` anywhere in `prq`,
-/// `prwork` or `update` was a leak that compiled.
+/// `call` still held the credential as a printable `String`, so a `{token}` anywhere in `prq`
+/// or `update` was a leak that compiled.
 fn call(
     method: &str,
     url: &str,
@@ -999,8 +996,7 @@ pub(crate) fn send_json(
 /// silently under-reports, which is the one thing it must not do.
 ///
 /// **Nothing that goes out through here is ever sent a second time** (SKEIN-341). This is the half
-/// that carries skein's mutations: `update_branch` sends `updatePullRequestBranch` and
-/// `set_thread_resolved` sends `resolve`/`unresolveReviewThread`. A third non-test caller,
+/// that carries skein's mutations: `set_thread_resolved` sends `resolve`/`unresolveReviewThread`. A third non-test caller,
 /// `pr_body`, is a QUERY and goes through here anyway — forgoing the retry can cost it one
 /// avoidable failure and can never repeat an act, which is the only direction this wire may err
 /// in. All three, and nothing else: `grep -rn "github::graphql(" src/`. Every shape that would be
@@ -1505,9 +1501,7 @@ fn rate_limit_sentence(said: &str) -> String {
 /// before the status was ever looked at, so `serde_json::from_str("")` failed and every 204 came
 /// back as "GitHub answered 204 with an empty body" — the `200..=299` arm below was unreachable for
 /// any 204 GitHub has ever sent. `DELETE /repos/{slug}/git/refs/heads/{ref}` is exactly that
-/// answer, and it is the call `prwork`'s train makes on the step after it merges: what a person
-/// read after every clean merge-and-delete was "merged #12, but topic is still there: GitHub
-/// answered 204 with an empty body" — a lie about a branch that was gone.
+/// answer, so a clean branch delete read as a failure about a branch that was gone.
 ///
 /// **204 by name, rather than "any 2xx whose body is empty".** An empty **200** is the opposite
 /// thing: the edge shrugging with nothing behind it (SKEIN-258) — the shape [`edge_shrug`] names,
@@ -1626,9 +1620,8 @@ mod tests {
     /// The cost of the default is not paid by the test that takes it. api.github.com rate-limits an
     /// unauthenticated request per IP, so a stray call spends a budget the whole box shares, and the
     /// suite that runs out of it fails somewhere else entirely. It has already happened here:
-    /// `review::visit::tests` downloaded a real diff, and the same test against a neighbour's
-    /// leftover stub read a whole diff and spent a model call — same assertions, two different
-    /// halves of the function (SKEIN-693, `src/review/visit.rs`).
+    /// a test downloaded a real diff, and the same test against a neighbour's leftover stub read
+    /// a whole diff (SKEIN-693).
     ///
     /// **Both directions in one test.** A pinned base has to be answered and an unpinned one
     /// refused: a check that only ever exercised the pinned path would still pass with the
@@ -2676,8 +2669,8 @@ mod tests {
     /// the backend carried the request out. That retry sat in [`graphql_answer`], which [`graphql`]
     /// shares, so a mutation met it — an edge 502 arriving after `updatePullRequestBranch` had
     /// already rebased the branch sent the rebase a second time, GitHub refused that one because
-    /// `expectedHeadOid` no longer matched what it had just written, and `prwork` wrote a permanent
-    /// stop saying the rebase failed on a branch that had in fact been rebased.
+    /// `expectedHeadOid` no longer matched what it had just written, and the caller reported a failed
+    /// rebase on a branch that had in fact been rebased.
     ///
     /// The fixture answers the shrug first and something perfectly good second, so a retry cannot
     /// hide: were the mutation asked again it would come back `Ok`. Each shape is then driven down
@@ -2750,9 +2743,8 @@ mod tests {
     ///
     /// `DELETE /repos/{slug}/git/refs/heads/{ref}` is answered `204 No Content` with zero bytes.
     /// [`json`] parsed the body before it read the status, so `from_str("")` failed and every
-    /// successful delete came back as "GitHub answered 204 with an empty body" — which `prwork`'s
-    /// train, deleting on the step after it merges, printed as "merged #12, but topic is still
-    /// there: …" about a branch that was already gone. The `200..=299` arm could not be reached by
+    /// successful delete came back as "GitHub answered 204 with an empty body" — a false
+    /// failure about a branch that was already gone. The `200..=299` arm could not be reached by
     /// any 204 ever sent.
     ///
     /// The second half is the boundary the fix must not blur: an empty **200** is the edge

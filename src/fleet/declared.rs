@@ -594,7 +594,6 @@ mod tests {
         .unwrap();
         std::env::set_var("GIT_DIR", work.join(".git"));
         let _repo = Repo {
-            read_prs: false,
             id: "web".into(),
             source: work.to_string_lossy().into_owned(),
             store: home.join("store").to_string_lossy().into_owned(),

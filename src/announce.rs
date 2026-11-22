@@ -914,8 +914,8 @@ mod tests {
     /// nothing to poll while the announcement is in flight, so an auto-advancing clock could run
     /// the ticks out from under the work they started.
     ///
-    /// The runtime is built by hand rather than by `#[tokio::test]` for the reason
-    /// `bin/skein-server/review.rs`'s `on_a_runtime` gives: [`crate::testutil::env_lock`] returns a guard
+    /// The runtime is built by hand rather than by `#[tokio::test]` because
+    /// [`crate::testutil::env_lock`] returns a guard
     /// carrying a `std::sync::MutexGuard`, held for the whole body, and under `#[tokio::test]` it
     /// would be held across await points — the shape `clippy::await_holding_lock` names, and a real
     /// deadlock.

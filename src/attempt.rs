@@ -97,9 +97,7 @@ fn holder() -> String {
 /// ([`crate::util::update_json_lossy`]), so two processes arriving together cannot both come away
 /// holding it — which is the entire point, and the reason this is not a bare "does the file exist".
 ///
-/// **`_lossy` is chosen here, and skein chooses it in exactly two places (SKEIN-359)** — this and
-/// the review budget's day ledger (`review::budget::reserve_a_read`), which argues it the same way
-/// and cites this one. A
+/// **`_lossy` is chosen here (SKEIN-359).** A
 /// lease file that will not parse is taken as no lease and written over. Everywhere else that would
 /// be destroying somebody's grants or credentials; here the file's entire content is one claim with
 /// a deadline on it, held by a process that may not even be running, and there is nothing in it a

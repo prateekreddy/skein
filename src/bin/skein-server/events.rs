@@ -45,24 +45,7 @@ pub(super) async fn api_events() -> Response {
             }
         }
     });
-    // **Readings ride the same connection** (SKEIN-366). They are not fleet ticks and are not a
-    // `Tick` — a reading is a fact about a pull request, and the fleet producer stops when nobody
-    // is watching the board, which a reading must not depend on. So they are their own channel,
-    // merged onto this one stream: the page holds ONE `EventSource`, and the number of connections
-    // it spends does not grow with the number of readings it has in flight.
-    let readings =
-        tokio_stream::wrappers::BroadcastStream::new(skein::review::subscribe_readings())
-            .filter_map(|item| match item {
-                Ok(done) => Some(Ok(Event::default()
-                    .event("reading")
-                    .data(serde_json::to_string(&done).unwrap_or_else(|_| "{}".into())))),
-                // Dropped rather than reported as a hole. A board that fell behind on readings cannot
-                // repair itself from a count the way it can from a snapshot, and the page has its own
-                // recovery for a reading that never arrived: the in-flight poll finds the read no
-                // longer running and picks the answer up off disk.
-                Err(_) => None,
-            });
-    Sse::new(tokio_stream::once(sse(&snapshot)).chain(following.merge(readings))).into_response()
+    Sse::new(tokio_stream::once(sse(&snapshot)).chain(following)).into_response()
 }
 
 /// One tick, as the wire carries it.

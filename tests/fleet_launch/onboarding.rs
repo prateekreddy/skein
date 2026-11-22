@@ -129,7 +129,6 @@ fn an_uncovered_box_is_refused_until_it_is_allowed_and_then_says_so_where_someon
     ensure_store(&store).expect("seed the store");
     ensure_probe_in(&store).expect("seed the store's scripts");
     let repo = Repo {
-        read_prs: false,
         id: "demo".into(),
         source: remote.clone(),
         store: store.to_string_lossy().into_owned(),

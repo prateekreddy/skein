@@ -64,7 +64,7 @@ pub fn add_repo_with_token(
     }
     // **This is the one place a repo id is ever minted**, so it is the one place the id has to be
     // checked — and everything that later joins an id onto a path (`mirror_path` here,
-    // `prq::review_dir`, `prwork`'s three workflow files, `moduledocs`) reads it back out of
+    // `prq::review_dir`, `moduledocs`) reads it back out of
     // `repos.json` and is safe by that. The alternative, a guard at each join, is the shape that
     // left two review routes writing outside `~/.skein`.
     //
@@ -134,20 +134,10 @@ pub fn add_repo_with_token(
         source: source.to_string(),
         store: store.to_string_lossy().into_owned(),
         // A repo skein has just been told about reads nothing on its own until somebody says so.
-        read_prs: false,
         // And it acts on nothing. Spelled out rather than defaulted, because `add` is the one place
         // a repo's starting state is DECIDED: everything else that builds a `Repo` is a fixture or
         // a file being read back. The rule for the whole feature — "I will toggle on when needed.
         // So no default" — is this line.
-        auto_review: false,
-        auto_review_on: default_auto_review_on(),
-        auto_review_ceiling: Ceiling::default(),
-        auto_review_authors: default_auto_review_authors(),
-        auto_review_dry_run: false,
-        // Never said, which is the whole set — see `Repo::owed_checks`. `add` decides a repo's
-        // starting state, and the state a reviewer wants on a repo nobody has configured is the
-        // one where a deletion is audited before it is approved.
-        owed_checks: None,
         // Never chosen: each box reads the kinds off its own checkout (`Repo::kinds`).
         kinds: None,
         // The remote's default until somebody names another on the repo card.

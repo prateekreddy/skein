@@ -25,9 +25,6 @@ import { grab, harness, pure } from "./lift.mjs";
 
 const t = harness();
 
-// Markers no collapsed or summarised form can produce: each reading's line ends in a token that
-// only appears if the whole line was rendered into the step's own cell.
-const READ_LINE = "Sets out the conflict inventory the rest works through — GIST-DREW-THE-WHOLE-LINE";
 
 // The owner's own stack, four steps of it, at the shape it was reported in: the root reviewed, the
 // next one waiting, and two above it that cannot be reviewed until it is.
@@ -85,8 +82,6 @@ function world() {
     ${grab("revMoved")}
     ${grab("REV_MOVE_WORDS")}
     ${grab("revMove")}
-    ${grab("revElapsed")}
-    ${grab("revGist")}
     ${grab("revWaitedSince")}
     ${grab("revSortAt")}
     ${grab("revSortWord")}
@@ -109,17 +104,12 @@ function world() {
     // is lifted rather than approximated, and it brings its two questions with it — does skein
     // read this repo ahead, and is this a pull request it reads on its own.
     const revFlows = new Map([["acme", { read_prs: false }]]);
-    ${grab("revReadsAhead")}
-    ${grab("revSkeinsToRead")}
-    ${grab("revReadAgain")}
     ${grab("revStackSteps")}
     return {
       // Built by the REAL detector, so the depth, the branch marks and the order are the ones the
       // pane would draw rather than a hand-written shape that agrees with the test.
       stackOf: prs => revChains(prs)[0],
       steps: prs => revStackSteps(revChains(prs)[0]),
-      read: (key, s) => revSums.set(key, s),
-      flight: (key, at) => revInFlight.set(key, { started_ms: at, asked: true }),
       mv: (prs, number) => {
         const st = revChains(prs)[0];
         return revStepMove(st, st.steps.find(p => p.number === number));
@@ -135,31 +125,6 @@ const stepOf = (html, number) => {
   const parts = html.split('<div class="step');
   return (parts.find(p => p.includes(`#${number}<`)) || "");
 };
-
-// ── 1. the gist cell exists on a step, with all four of its states ─────────────────────────────
-{
-  const w = world();
-  w.read("acme#686", { number: 686, head_sha: "h686", depth: "expanded", line: READ_LINE, flags: [] });
-  w.read("acme#687", { number: 687, head_sha: "h687", depth: "unread",
-                       unread_because: "the day's automatic budget is spent" });
-  w.flight("acme#685", Date.now() - 12000);
-  const html = w.steps(LADDER);
-
-  t.check("a step skein has read says what it found, in full",
-    stepOf(html, 686).includes(READ_LINE), true);
-  t.check("a step nothing has read says so, rather than saying nothing",
-    /class="gist unknown"[^>]*>not read/.test(stepOf(html, 684)), true);
-  t.check("a step skein could not read says why",
-    stepOf(html, 687).includes("not read — the day&#39;s automatic budget is spent"), true);
-  t.check("and a step being read right now carries its running counter",
-    /revflight-secs" data-started="\d{10,}/.test(stepOf(html, 685)), true);
-
-  // The count the reader was given is now checkable against the list: four steps, one read, one
-  // running, two not. That sentence is the whole of SKEIN-352 and this is it as an assertion.
-  t.check("so a run's count can be checked against the steps",
-    [(html.match(/class="gist unknown"/g) || []).length,
-     (html.match(/class="gist reading"/g) || []).length], [2, 1]);
-}
 
 // ── 2. the rail, which is what makes a step auditable at all ───────────────────────────────────
 {

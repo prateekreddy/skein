@@ -82,9 +82,6 @@ test("with the review pane the surface, review keys mean review actions", () => 
     ["e", "rev-aside"], ["u", "rev-undo"], ["/", "rev-search"],
     ["g", "rev-chord"], ["G", "rev-last"],
     ["c", "rev-comment"], ["a", "rev-approve"], ["r", "rev-request"],
-    // Shift-R asks for a fresh reading and is never refused: the day's ceiling is on skein's own
-    // initiative, not on a person (SKEIN-228).
-    ["R", "rev-reread"],
     ["]", "rev-next-file"], ["[", "rev-previous-file"],
   ]);
   for (const [k, action] of named) {
@@ -215,7 +212,7 @@ test("the sheet shows exactly the keys the review table binds, and states the on
   const shown = rows.flatMap(([keys]) => keys.join(" "));
   // `g` is the chord's first key and `?` is under Anywhere; every other key is on a row of its own.
   const review = boundKeys().review.filter(k => k !== "g" && k !== "?");
-  assert.ok(review.includes("R") && review.includes("ArrowLeft"), "the review table was not read");
+  assert.ok(review.includes("r") && review.includes("ArrowLeft"), "the review table was not read");
   for (const k of review) {
     const printed = Object.entries(EVENT).find(([, v]) => v === k)?.[0] || k;
     assert.ok(rows.some(([keys]) => keys.length === 1 || keys[0] !== "g" ? keys.includes(printed) : false),

@@ -41,10 +41,8 @@ fn verdict(c: &CheckContext) -> CheckVerdict {
 ///
 /// **Two sources, and the more cautious of them wins** (SKEIN-232). The contexts array is a page of
 /// a hundred; GitHub's own `state` is its verdict over all of them however many there are. Read
-/// from the page alone, a pull request whose 101st context is red reads "passing" — and
-/// `docs/pr-workflow.md`'s merge train acts on `checks:passing` by merging and deleting the branch,
-/// so that is not a wrong dot on a row, it is a merge performed on a guarantee that was never
-/// checked. So a red in either source is "failing", and where they disagree in the other direction
+/// from the page alone, a pull request whose 101st context is red reads "passing", and a
+/// person deciding to merge reads that row. So a red in either source is "failing", and where they disagree in the other direction
 /// — GitHub says green while a context this page holds has not finished — the answer is "pending".
 /// Both of those are the over-report direction this function already takes for a conclusion it does
 /// not recognise (see [`verdict`]): more of your attention, and never a merge on a check nobody read.
@@ -354,12 +352,6 @@ mod tests {
     /// The queue used to compute the verdict itself, from a `contexts(first: 100)` page, and never
     /// asked GitHub for its own answer over all of them. A matrix build (`os × rust-version ×
     /// feature`) reaches three digits routinely, so the 101st context being red was invisible.
-    ///
-    /// The consequence is asserted here rather than described, because it is not a wrong dot on a
-    /// row: `docs/pr-workflow.md`'s merge train fires on `checks:passing` — the same string, off the
-    /// same field ([`crate::prwork`] builds `Facts::checks` from `Pr::checks`) — and its act is
-    /// `merge:squash+delete`. A green verdict computed from a page nobody could see all of is a
-    /// merged pull request whose CI failed, with the journal recording a clean merge.
     #[test]
     fn a_red_check_past_the_hundredth_context_does_not_read_as_passing() {
         let flat = node_of(&rollup_node(Some("FAILURE"), 143, &a_full_page_of_green()));
@@ -371,54 +363,10 @@ mod tests {
              in the 43 it never read, and GitHub's own verdict is the only thing that knows"
         );
 
-        // And the act that verdict guards. The owner's train, as `docs/pr-workflow.md` writes it.
-        let train = crate::workflow::from_bytes(
-            br#"{"workflow":[{"name":"train","serial":true,"matches":["mine"],"steps":[
-                 {"when":["label:ci-queue","checks:passing","mergeable","current"],
-                  "do":"merge:squash+delete"}]}]}"#,
-        )
-        .expect("the merge train must be expressible");
-        let facts = crate::workflow::Facts {
-            approved: true,
-            labels: vec!["ci-queue".into()],
-            checks: rollup(&flat),
-            mergeable: Some(true),
-            behind: Some(false),
-            base_is_trunk: Some(true),
-            mine: true,
-            // `ci-queue` is ALL of this pull request's labels, said rather than defaulted:
-            // `Facts::default()` is skein having looked nothing up, and on that a `no-label:` may
-            // not hold (SKEIN-373). This fixture is about the check rollup, so it must not be
-            // silently exercising a truncated label list as well.
-            labels_whole: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            crate::workflow::next(&train[0], &facts),
-            None,
-            "the merge train took a step on a pull request whose CI failed — this is the merge, \
-             and the branch deletion, that the wrong verdict authorises"
-        );
-
-        // The other direction, which is what stops this fix being "say pending and never merge":
-        // a rollup GitHub calls green, whose contexts are green, still merges.
+        // The other direction, which is what stops this fix being "say pending for ever": a rollup
+        // GitHub calls green, whose contexts are green, reads as passing.
         let green = node_of(&rollup_node(Some("SUCCESS"), 143, &a_full_page_of_green()));
         assert_eq!(rollup(&green), "passing");
-        let facts = crate::workflow::Facts {
-            checks: rollup(&green),
-            ..facts
-        };
-        assert!(
-            matches!(
-                crate::workflow::next(&train[0], &facts),
-                Some(crate::workflow::Chosen {
-                    act: crate::workflow::Act::Merge(_),
-                    ..
-                })
-            ),
-            "a genuinely green pull request must still merge, or the fix has broken the train \
-             instead of the bug"
-        );
     }
 
     /// The verdict is the more cautious of the two sources, and an old answer still reads as it did.

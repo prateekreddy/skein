@@ -122,14 +122,11 @@ function world(opts = {}) {
     // The verdicts, on the row's own control strip — where the receipt replaces them.
     ${grab("revVerdictHtml")}
     ${grab("revMoved")}
-    ${grab("revFlowChip")}
     ${grab("REV_MOVE_WORDS")}
     ${grab("revMove")}
     ${grab("revRail")}
     ${grab("revSize")}
     ${grab("revAge")}
-    ${grab("revGist")}
-    ${grab("revUpdatedChip")}
     // The mark a refused act leaves on the line (SKEIN-385): revRow calls it, so a world that
     // draws a row needs it, and its label map with it.
     ${grab("REV_ACT_NAME")}
@@ -139,7 +136,6 @@ function world(opts = {}) {
     ${grab("revSortAt")}
     ${grab("revSortWord")}
     // The row's own read control (SKEIN-228).
-    ${grab("revReadAgain")}
     ${grab("revRow")}
     ${grab("archivePr")}
     return {
@@ -226,7 +222,7 @@ const ONE = { prs: [{ ...PR }] };
 
 // --- a merge names the commit the row shows, and posts at once ---------------------------------
 //
-// The one act that carries `drafted_at` (SKEIN-365): `prwork::merge_by_hand` checks the sha it is
+// The one act that carries `drafted_at` (SKEIN-365): `prq::merge_by_hand` checks the sha it is
 // given against the live head, so sending "" would leave the server to guess from a queue that may
 // have lagged — and the reader would be refused for not having read the code they were looking at.
 // Break it by making `mergeHead` "" in `revAct` and this is the check that goes red.

@@ -52,7 +52,6 @@ mod terminal;
 mod update;
 mod upload;
 mod versions;
-mod workflows;
 
 use agents::*;
 use asks::*;
@@ -70,7 +69,6 @@ use terminal::*;
 use update::*;
 use upload::*;
 use versions::*;
-use workflows::*;
 // Vendored, not CDN-loaded: the terminal must work in the firewalled sbx network the tool lives in.
 // They are no longer four constants and four handlers — `skein::assets` generates the table from the
 // directory, because a build step emits files whose names carry content hashes and neither the count
@@ -231,55 +229,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
                     healed.len()
                 ),
                 _ => {}
-            }
-        }
-    });
-    // **Reading the queue you have to work, before you open it.** Nothing here until a repo is
-    // switched on for it, and then only pull requests somebody asked you to review — your own
-    // limits, and the reason there is no daily quota: the scope is the budget.
-    //
-    // Ten minutes. This is the one tick that spends money, and what it waits for is a branch going
-    // quiet for an HOUR, so a faster pass would only ask the same question sooner and get the same
-    // answer. Three per pass keeps a queue that settles all at once from firing thirty model calls
-    // in a minute.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(600));
-        loop {
-            tick.tick().await;
-            match tokio::task::spawn_blocking(skein::review::read_waiting).await {
-                Ok(read) => {
-                    for what in read {
-                        eprintln!("skein: {what}");
-                    }
-                }
-                Err(e) => eprintln!("skein: the reading pass did not finish ({e})"),
-            }
-        }
-    });
-    // **What makes a workflow automation rather than a button.** One pass over every repo skein
-    // manages, one step per pull request, and the pass is the only thing that acts.
-    //
-    // Two minutes, and the number is chosen by what it is waiting for. The things a workflow reacts
-    // to are minutes-scale — a review lands, CI finishes, somebody pushes — and the queue underneath
-    // is cached for a minute, so a faster tick would mostly re-read its own cache. A slower one
-    // would leave a green, approved pull request sitting unmerged for no reason a person could see.
-    //
-    // Does nothing at all until `pr_workflows` is switched on, including no GitHub reads: a feature
-    // that is off should be invisible in every way somebody might notice, a rate limit included.
-    tokio::spawn(async {
-        let mut tick = tokio::time::interval(Duration::from_secs(120));
-        loop {
-            tick.tick().await;
-            match tokio::task::spawn_blocking(skein::prwork::sweep).await {
-                // Silent when nothing happened, which is nearly always. A line per action, because
-                // this is skein doing something outward-facing that nobody asked for just now —
-                // the audit has it with its authority, and this is what a person watching sees.
-                Ok(did) => {
-                    for what in did {
-                        eprintln!("skein: {what}");
-                    }
-                }
-                Err(e) => eprintln!("skein: the workflow pass did not finish ({e})"),
             }
         }
     });
@@ -458,7 +407,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         )
         .route("/api/review", get(api_review_merged))
         .route("/api/review/counts", get(api_review_counts))
-        .route("/api/review/reading", get(api_review_reading))
         .route("/api/repos/:id/modules", get(api_modules))
         .route("/api/repos/:id/modules/write", post(api_write_module))
         .route("/api/repos/:id/review", get(api_review_queue))
@@ -474,28 +422,6 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route(
             "/api/repos/:id/set-aside/:file/move-aside",
             post(api_move_set_aside_aside),
-        )
-        .route(
-            "/api/repos/:id/review/:number/summary",
-            get(api_review_summary),
-        )
-        // The same reading, started rather than awaited: the answer arrives on `/api/events`, so
-        // ten of these cost one browser connection between them instead of ten (SKEIN-366).
-        .route("/api/repos/:id/review/:number/read", post(api_review_read))
-        .route("/api/repos/:id/review/summaries", get(api_review_summaries))
-        .route("/api/repos/:id/workflows", get(api_workflows))
-        .route("/api/repos/:id/reading", post(api_set_reading))
-        .route(
-            "/api/workflows",
-            get(api_workflow_file).put(api_save_workflows),
-        )
-        .route(
-            "/api/repos/:id/review/:number/workflow",
-            post(api_set_workflow),
-        )
-        .route(
-            "/api/repos/:id/review/:number/triggers",
-            post(api_set_pr_triggers),
         )
         .route("/api/repos/:id/review/:number/act", post(api_review_act))
         // The shape of a change: which modules moved and how. The same route shape for both
@@ -882,18 +808,6 @@ tokio::task_local! {
     static KNOCK: std::sync::Arc<skein::knock::Knock>;
 }
 
-/// Is a query flag on? Present, and spelled `1` or `true`.
-///
-/// One reading of the idiom rather than one per flag. There are five of them on the review routes
-/// now — `force`, `asked`, `rows`, `held`, `redraft` — and they all default the same safe way
-/// round: absent or misspelled means OFF, so a caller that fumbles a marker gets the cautious
-/// behaviour (the budgeted path, the full payload, the drafted review left where it is) rather
-/// than the permissive one. `redraft` is the sharpest case: fumbled, a reader's vetted review
-/// survives; honoured by accident, it is gone.
-fn flag(q: &HashMap<String, String>, key: &str) -> bool {
-    q.get(key).is_some_and(|v| v == "1" || v == "true")
-}
-
 #[cfg(test)]
 /// `SKEIN_HOME`, `SKEIN_GITHUB_API` and `GH_TOKEN` are PROCESS-wide, and `cargo` runs these
 /// tests as threads in one process. Two of them point skein at different GitHubs at the same
@@ -942,9 +856,9 @@ fn scratch_dir(what: &str) -> std::path::PathBuf {
 /// This binary's source, EVERY file of it, for the tests that read the server as text.
 ///
 /// It was one file, and they read it with `include_str!` of that file. Re-rooting each to the one
-/// file its subject lives in now would read less than it did: `the_route_the_pane_opens_is_what_prunes`
-/// counts the callers of `review::prune` across the whole server, and a second caller in a sibling
-/// file is exactly what it exists to catch (SKEIN-1103). So the directory is read rather than a list
+/// file its subject lives in now would read less than it did: a check
+/// that counts callers across the whole server must see a second caller in a sibling file
+/// (SKEIN-1103). So the directory is read rather than a list
 /// of it, and a file added later is read without anybody remembering to add it.
 ///
 /// `main.rs` first and the rest by name. A read that finds `main.rs` alone refuses: a `!contains`
@@ -1040,37 +954,6 @@ mod tests {
         assert!(refuse_unknown_args(&arg("--help"))
             .expect("help")
             .contains("no subcommands"));
-    }
-
-    /// A marker nobody spelled is OFF, and that direction is the whole safety of these routes.
-    ///
-    /// `force`, `asked`, `rows` and `held` all pass through one reader, and every one of them is
-    /// written so that failing to send it costs a caller the permissive behaviour, never grants
-    /// it: no `asked` means the day's budget applies, no `held` means the request may compute, no
-    /// `rows` means the full payload. A reader that treated "present" as true would turn
-    /// `?asked=0` into an un-budgeted model call.
-    #[test]
-    fn a_review_marker_nobody_spelled_is_off() {
-        let q: std::collections::HashMap<String, String> = [
-            ("on", "1"),
-            ("alsoOn", "true"),
-            ("off", "0"),
-            ("alsoOff", "false"),
-            ("empty", ""),
-            ("shouty", "TRUE"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        assert!(flag(&q, "on") && flag(&q, "alsoOn"));
-        assert!(!flag(&q, "off") && !flag(&q, "alsoOff"));
-        assert!(!flag(&q, "missing"), "an absent marker read as ON");
-        assert!(!flag(&q, "empty"), "`?held=` read as ON");
-        assert!(
-            !flag(&q, "shouty"),
-            "a spelling the routes do not document read as ON, so the set of ways to un-gate a \
-             model call is larger than the set anybody wrote down"
-        );
     }
 }
 
@@ -1658,16 +1541,6 @@ mod cockpit_routes {
                 "POST",
                 "a repo's declared CI build output and its cap (SKEIN-1476), set by the owner \
                  through the API until the repo card has its control, SKEIN-1478",
-            ),
-            (
-                "/api/repos/:id/review/:number/triggers",
-                "POST",
-                "§10's per-pull-request trigger override, deliberately with no page caller yet. \
-                 The MECHANISM is the part that was missing — the repo's set was the only one a \
-                 pull request could be governed by — and what it should look like on a row is the \
-                 owner's call rather than this build's: a picker over the trigger words is a \
-                 surface, and skein has a rule about inventing those. Reachable by API and by the \
-                 workflow file until then",
             ),
             (
                 "/api/repos/:id/review",

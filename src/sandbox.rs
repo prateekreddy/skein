@@ -1212,7 +1212,6 @@ mod tests {
         .unwrap();
         let store = home.join("st").join(".claude");
         let repo = Repo {
-            read_prs: false,
             id: "thing".into(),
             source: "s".into(),
             store: store.to_string_lossy().into_owned(),
@@ -1260,7 +1259,6 @@ mod tests {
         })
         .unwrap();
         let repo = Repo {
-            read_prs: false,
             id: "skein".into(),
             source: "s".into(),
             store: home.join("store/.claude").to_string_lossy().into_owned(),
@@ -1350,7 +1348,6 @@ mod tests {
         env::set_var("SKEIN_HOME", &home);
         env::remove_var("SKEIN_LAUNCH_CMD");
         save_repos(&[Repo {
-            read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
             store: home
@@ -1406,7 +1403,6 @@ mod tests {
         env::remove_var("SKEIN_LAUNCH_CMD");
         placed("web-feat-x");
         let repo = Repo {
-            read_prs: false,
             id: "web".into(),
             source: "git@github.com:o/web.git".into(),
             store: home
@@ -1669,7 +1665,6 @@ mod tests {
         fs::create_dir_all(store.join("status")).unwrap();
         fs::create_dir_all(store.join("skein").join("launch")).unwrap();
         save_repos(&[Repo {
-            read_prs: false,
             id: "demo".into(),
             source: "s".into(),
             store: store.to_string_lossy().into_owned(),

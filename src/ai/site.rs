@@ -259,9 +259,7 @@ impl CallNoted {
     pub(crate) fn begin(turn: Turn<'_>) -> CallNoted {
         let session = match turn {
             Turn::Alone => None,
-            Turn::Labelled { id } | Turn::Opening { id, .. } | Turn::Resuming { id, .. } => {
-                Some(id)
-            }
+            Turn::Labelled { id } => Some(id),
         };
         CallNoted {
             noted: current_site()
@@ -277,18 +275,6 @@ impl Drop for CallNoted {
             note_call(site, &session, from_ms, epoch_ms());
         }
     }
-}
-
-/// Write down that a pull-request reading ended, and whether it finished.
-///
-/// "Finished" is a reading that produced a summary; one that came back unread — refused, out of
-/// time, a box that did not answer, an answer skein could not parse — did not, and its spend is
-/// charged to the readings that did.
-pub fn note_reading(finished: bool) {
-    append(serde_json::json!({
-        "reading": if finished { "finished" } else { "unfinished" },
-        "at": epoch_ms(),
-    }));
 }
 
 /// One call's window, as the ledger has it.

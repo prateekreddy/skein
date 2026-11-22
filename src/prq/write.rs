@@ -125,11 +125,10 @@ pub fn re_anchor(
     comments: &[ReviewComment],
     new_diff: &str,
 ) -> (Vec<ReviewComment>, Vec<ReviewComment>) {
-    // ONE diff grammar, and it lives where the vetting happens (SKEIN-233). This was a
-    // second body with the same name: identical code, and `review::commentable` had a
-    // THIRD reading of the same bytes that lacked the `\ No newline at end of file` case
-    // and silently discarded the rest of its hunk. `prq -> review` is already declared.
-    let lines = crate::review::right_side_lines(new_diff);
+    // ONE diff grammar, and it lives where the vetting happens (SKEIN-233). A second
+    // reading of the same bytes once lacked the `\ No newline at end of file` case and silently
+    // discarded the rest of its hunk.
+    let lines = right_side_lines(new_diff);
     let mut anchored = Vec::new();
     let mut displaced = Vec::new();
     for c in comments {
@@ -256,7 +255,7 @@ pub struct ReviewPost<'a> {
     pub token: &'a crate::secret::Secret,
 }
 
-/// Post one review carrying line comments — the vetted output of `crate::review::critique`.
+/// Post one review carrying line comments.
 ///
 /// `head_sha` is the LIVE head, sent as `commit_id` — always. `drafted_at` is the head the
 /// comments were drafted against; empty means "assume current". When they differ, the review is
@@ -337,12 +336,7 @@ pub fn submit_review_with_comments(post: ReviewPost<'_>) -> Result<String, Strin
             })
             .collect();
     }
-    // **Taken rather than looked up**, which every other write in this module already does
-    // (`add_label`, `merge_pr`, `update_branch`). It used to reach for the host token here, and nothing
-    // was wrong with the answer — `prwork`'s tick and the server's route both source the same one —
-    // but a credential a function reaches for is one no caller can see. The test for a verdict step
-    // had to set `GH_TOKEN` to make an assertion about a CEILING pass, which is the shape that says
-    // a coupling is hidden rather than absent.
+    // **Taken rather than looked up**: a credential a function reaches for is one no caller can see.
     //
     // The rule it enforced is unchanged and lives at the call site now: **a review is posted AS the
     // person**, so what arrives here is their own credential. There is deliberately no second,
@@ -649,13 +643,12 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
 /// the person read: GitHub answers 409 if somebody pushed in between, and this translates that 409
 /// into the sentence a reader can act on instead of leaving GitHub's own wording — *"Head branch
 /// was modified"* — to stand for it. Until SKEIN-338 this function sent `merge_method` and nothing
-/// else, while `prwork::merge_pr` beside it sent `sha`; the automated merge could not land a
-/// revision nobody had looked at and the merge a PERSON pressed could, which is the wrong way round.
+/// else, so the merge a PERSON pressed could land a revision nobody had looked at.
 ///
 /// The empty string is refused rather than defaulted to the live head because "assume current" is
 /// precisely the hole: a caller with no idea what the reader saw must say so and be stopped, not
 /// have skein invent an answer that agrees with whatever GitHub has now. The one caller is
-/// [`crate::prwork::merge_by_hand`], which checks the trunk as well — there is no merge in this
+/// [`super::merge_by_hand`], which checks the trunk as well — there is no merge in this
 /// crate that goes to GitHub past neither guard.
 pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, String> {
     if expected_head.trim().is_empty() {
@@ -685,7 +678,7 @@ pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, Str
         "PUT",
         &format!("{}/pulls/{number}/merge", crate::github::repo_path(slug)),
         &token_for(slug, Need::Write)?,
-        // `sha` is the head the person read. Same field, same reason, as `prwork::merge_pr`: GitHub
+        // `sha` is the head the person read. GitHub
         // refuses with a 409 if the branch has moved, and a merge decided about code that is no
         // longer what would be merged is the one outcome this whole path exists to prevent.
         &serde_json::json!({ "merge_method": method, "sha": expected_head }),
@@ -763,16 +756,6 @@ fn it_conflicts_with_its_base(number: u64, said: String) -> String {
 ///
 /// The gate [`it_conflicts_with_its_base`] above states in full, and nothing but the gate — the
 /// rule written out there is what this holds, and the paragraphs there are its documentation.
-///
-/// **Shared because the wire shape is one fact and the sentence is two.** There are two merges in
-/// this crate: [`merge`], which a person presses, and `prwork::merge_pr`, which a train drives, and
-/// SKEIN-423 is the second one arriving at the same 405. What they must agree about is which
-/// answers from GitHub *are* this refusal — that is knowledge of `crate::github`'s two wrappers,
-/// and a second copy of it is a second thing to miss when a wrapper changes. What they must NOT
-/// share is the words: "resolve them on the branch, push, then merge" is advice to somebody
-/// standing at a button, and the reader of a stop is somebody who was not watching, reading later.
-/// So the predicate is `pub(crate)` and each caller writes its own sentence
-/// (`prwork::conflicts_stopped_the_train` is the other one).
 pub(crate) fn refused_for_conflicts(said: &str) -> bool {
     let refused = said.starts_with("GitHub said 405") || said.starts_with("GitHub answered 405");
     refused && said.to_ascii_lowercase().contains("conflict")
@@ -856,6 +839,64 @@ fn set_thread_resolved(slug: &str, thread_id: &str, resolved: bool) -> Result<()
         )),
         _ => Ok(()),
     }
+}
+
+/// **Which lines of a unified diff the NEW file shows, and what is on them**: `(path, new-side line
+/// number, content with the diff marker stripped)`, in the order the diff lists them.
+///
+/// Exactly the lines GitHub accepts a RIGHT-side review comment on: context and added lines count,
+/// a deleted line exists only on the left, and a deleted file has no right side at all. A `\ No
+/// newline at end of file` marker in the middle of a hunk moves no counter and ends no hunk
+/// (SKEIN-233). The content is each comment's durable anchor ([`ReviewComment::text`]).
+fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut new_line: u64 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            path = None;
+            in_hunk = false;
+        } else if !in_hunk && line.starts_with("+++ ") {
+            // `b/` is git's convention and not part of the path; `+++ /dev/null` is a deleted file,
+            // which has no right side to comment on. The `!in_hunk` guard is what keeps an ADDED
+            // line whose own text begins `++ ` from being read as a file header.
+            let name = line["+++ ".len()..].trim();
+            path =
+                (name != "/dev/null").then(|| name.strip_prefix("b/").unwrap_or(name).to_string());
+        } else if !in_hunk && line.starts_with("--- ") {
+            // The old-file header; only the +++ side names what RIGHT comments attach to.
+        } else if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — only `+c` matters here. A header this cannot read leaves
+            // `in_hunk` false rather than counting from a number nobody supplied.
+            in_hunk = false;
+            if let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) {
+                let start = plus[1..].split(',').next().unwrap_or("");
+                if let Ok(n) = start.parse::<u64>() {
+                    new_line = n;
+                    in_hunk = true;
+                }
+            }
+        } else if in_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            } else if line.starts_with('\\') || line.starts_with('-') {
+                // `\ No newline…` is a note ABOUT the previous line, not a line of either file, so
+                // it moves no counter and ends no hunk. `-` lines live only in the old file.
+            } else {
+                // Context: a leading space, or the entirely empty line git emits for blank context.
+                let rest = line.strip_prefix(' ').unwrap_or(line);
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -990,7 +1031,7 @@ mod tests {
 
     /// **A merge with no expected head never reaches the network.**
     ///
-    /// The backstop, one layer below `prwork::merge_by_hand`'s own refusal, and it is here rather
+    /// The backstop, one layer below `merge_by_hand`'s own refusal, and it is here rather
     /// than only there because this is the function holding the `PUT`. Until SKEIN-338 it sent
     /// `{"merge_method": …}` and nothing else, so every caller — present and future — merged
     /// whatever HEAD happened to be. Making the argument required is only half of that; refusing
@@ -1717,7 +1758,6 @@ mod tests {
             slug: "acme/thing".into(),
             trunk: "main".into(),
             viewer: "me".into(),
-            ai: false,
             prs: vec![pr],
             blind_spots: Vec::new(),
             unreadable_set_aside: Vec::new(),

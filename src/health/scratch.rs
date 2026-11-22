@@ -36,8 +36,7 @@ const SCRATCH_PROBE: &str = "d=\"${TMPDIR:-/tmp}/claude-$(id -u)\"\n\
 pub fn model_scratch_health() -> HealthCheck {
     // The question is about the /tmp the fleet's `claude` runs in, and **this process is standing
     // in it** — one arm now (SKEIN-576). The other asked the sandbox through `sbx exec`, a hop that
-    // no longer exists in either direction; `crate::fleet::model_call_in_box` is the only crossing
-    // a model call still makes, and a box has a /tmp of its own that this check is not about.
+    // no longer exists in either direction, and a box has a /tmp of its own that this check is not about.
     let (reported, whose) = (run_here(SCRATCH_PROBE), "this fleet's shared /tmp");
     scratch_verdict(reported, whose)
 }

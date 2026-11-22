@@ -241,8 +241,7 @@ pub(super) struct CommitDetail {
 ///
 /// Two sources rather than one, and [`rollup`] takes the more cautious of them (SKEIN-232): the
 /// page is a hundred contexts, `state` is the verdict over however many there are. Read from the
-/// page alone, a pull request whose 101st context is red reads green — and a merge train acts on
-/// that.
+/// page alone, a pull request whose 101st context is red reads green.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct Rollup {
@@ -519,9 +518,7 @@ pub(super) fn build_pr(
         replied_to_me: None,
     };
     // **Answered here rather than by the reader**, exactly as `my_review` and `review_is_current`
-    // are, and for their reason: this is the one place the viewer's login is in scope. The engine
-    // asks this question from `review::triggers_read_from`, which is handed a `Pr` and no identity
-    // — so a `replied_to` computed there would have nobody to compare thread authors against.
+    // are, and for their reason: this is the one place the viewer's login is in scope.
     Pr {
         replied_to_me: built.replied_to(login),
         ..built
@@ -598,8 +595,7 @@ fn my_review_state(item: &PrNode, login: &str, head_sha: &str) -> (String, bool)
 ///   there, so the two still agree.
 /// * **What "standing" means.** The review's own commit equals the head, exactly as
 ///   [`my_review_state`] decides [`Pr::review_is_current`]. A review with no commit on it cannot
-///   be proved to cover this head and is not counted — the under-report direction, which for a
-///   merge train means holding a pull request rather than shipping one.
+///   be proved to cover this head and is not counted — the under-report direction.
 ///
 /// `None` only where there is no head to compare against: without one, every review would be
 /// judged against an empty string, and a count of nought derived from skein not knowing the head
@@ -1032,8 +1028,8 @@ mod tests {
     /// The defect, measured against `acme/testbed#20`: GitHub's REST answer carries
     /// 22 labels and the queue payload carried 20 (`area/mod-01` … `area/mod-20`). The query asked
     /// `labels(first: 20)` with no `totalCount`, so the two that were dropped left no trace in the
-    /// row, in the payload, or in the blind spots — and [`Pr::labels`] is what the merge train
-    /// decides on, so a `hold` sorting past the twentieth stopped holding anything.
+    /// row, in the payload, or in the blind spots — so a label sorting past the
+    /// twentieth read as absent.
     ///
     /// The assertion is the RULE and not the measured pair: a list is whole exactly when every
     /// label GitHub counted arrived. A test that only checked 22-against-20 would pass with the
@@ -1135,8 +1131,7 @@ mod tests {
     /// that paged without saying how much they paged. Both are one review per author, so the case
     /// is a pull request more than [`REVIEWS_FETCHED`] *people* have reviewed — and what it cost
     /// could not be seen from the row: [`my_review_state`] finds no row of yours in the page and
-    /// reports `"none"`, and [`standing_approvals`] counts the approvals that arrived and hands the
-    /// merge train the total.
+    /// reports `"none"`, and [`standing_approvals`] counts the approvals that arrived.
     ///
     /// The assertion is the RULE rather than the measured pair: whole exactly when every review
     /// GitHub counted arrived. A test pinned to 31-against-30 passes with the truncation restored
@@ -1269,15 +1264,12 @@ mod tests {
     ///
     /// [`Pr`] carried the repository's verdict and the viewer's own review and nothing else, so on
     /// a repository that requires no review — `reviewDecision` is `""` there — a third party's
-    /// standing approval was invisible and `prwork::facts_of` had to read `approved` as false. The
-    /// merge train then held approved work, for ever, on a repo where you are the author and
-    /// somebody else reviews: the ordinary case rather than an edge.
+    /// standing approval was invisible, on a repo where you are the author and somebody else
+    /// reviews: the ordinary case rather than an edge.
     ///
     /// The load-bearing assertion is the last one: **this and [`Pr::my_review`] read the same two
     /// connections and may never disagree about the same person's review.** Everything else here
-    /// is a case; that is the rule, and it is what keeps
-    /// `prwork::tests::an_approval_is_still_an_approval_where_the_repository_asks_for_none`'s
-    /// stale half true for everybody rather than only for the viewer.
+    /// is a case; that is the rule.
     #[test]
     fn an_approval_from_anybody_is_counted_and_a_stale_one_is_not() {
         const HEAD: &str = "abc";
@@ -1483,7 +1475,7 @@ mod tests {
         assert_eq!(pr.mergeable, Some(true));
         assert_eq!(
             pr.merge_state, "BEHIND",
-            "GitHub's merge-state verdict was parsed away — the merge train reads BEHIND to know \
+            "GitHub's merge-state verdict was parsed away — BEHIND is how a reader knows \
              the base must be merged in first"
         );
         // **And a node that CARRIES neither is not given a verdict** (SKEIN-257). The assertions
@@ -1492,7 +1484,7 @@ mod tests {
         // all, which is an everyday state: `mergeStateStatus` is absent for a while after every
         // push and on a token that cannot see it. Empty and `None` are what "not known" looks
         // like here, and both fields' own docs turn on it: a caller reading `""` as `CLEAN` or
-        // `None` as "not mergeable" advances a merge train on a guess.
+        // `None` as "not mergeable" acts on a guess.
         let silent = build_pr(
             &node_of(&item(
                 r#"{"number":8,"title":"t","url":"u","isDraft":false,
@@ -2199,8 +2191,8 @@ mod tests {
     /// **Whether a pull request comes from a fork is asked for, parsed, and carried — and an
     /// answer that does not say stays "nobody said"** (SKEIN-1494).
     ///
-    /// The merge train's branch delete is by name in the base repository, so this field is the
-    /// only thing standing between a fork's `develop` and the base repository's own.
+    /// A branch name means nothing without its repository, so this field is what tells a fork's
+    /// `develop` from the base repository's own.
     ///
     /// **What would make it fail:** dropping `isCrossRepository` from [`PR_FRAGMENT`] (the first
     /// assertion); `build_pr` not copying the field across (the fork assertion), or copying it as

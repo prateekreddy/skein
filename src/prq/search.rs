@@ -71,9 +71,8 @@ pub(super) const REVIEW_REQUESTS_FETCHED: usize = 20;
 /// `labels(first: 20)` with no `totalCount`, so a pull request with more had the rest deleted on
 /// the way in and nothing — not the row, not the blind spots, not [`Pr`] — could tell. Measured
 /// against `acme/testbed#20`: GitHub's REST answer carries 22 labels, the queue
-/// payload carried 20 (`area/mod-01` … `area/mod-20`). That is not cosmetic, because
-/// [`Pr::labels`] is what `prwork::facts_of` turns into `workflow::Facts::labels`, and
-/// `workflow::Cond::NoLabel` then read a `hold` label that sorted past the twentieth as *absent*.
+/// payload carried 20 (`area/mod-01` … `area/mod-20`). That is not cosmetic: a label
+/// that sorted past the twentieth read as *absent*.
 ///
 /// **Twenty rather than GitHub's hundred, and that is a measurement rather than a taste.**
 /// [`PR_FRAGMENT`] travels once per pull request for up to [`SEARCH_PAGE`] of them per membership
@@ -122,8 +121,7 @@ pub(super) const REVIEWS_FETCHED: usize = 30;
 /// **The rollup asks for GitHub's own verdict as well as the contexts** (SKEIN-232). `contexts` is
 /// capped at a hundred and a matrix build (`os × rust-version × feature`) reaches three digits
 /// routinely, so a verdict computed only from that array reads a pull request whose 101st context
-/// is red as green — and `docs/pr-workflow.md`'s merge train reads exactly that field, so the
-/// failure is not a wrong dot but a merge of a pull request whose CI failed. `state` is GitHub's
+/// is red as green, on the row a person decides a merge from. `state` is GitHub's
 /// answer over ALL of them and costs nothing to ask for; `totalCount` says how much of the list
 /// this page is. Both are read by [`rollup`]; the contexts are left to NAME what failed.
 ///
@@ -138,8 +136,7 @@ pub(super) const REVIEWS_FETCHED: usize = 30;
 /// contexts, and it buys the difference between "you decided" and "you said something".
 ///
 /// **`isCrossRepository`, and not `headRepository { nameWithOwner }` beside it** (SKEIN-1494). The
-/// merge train's branch delete needs to know a fork's pull request when it sees one, and the
-/// boolean is all it needs. The fork's name would only have made a sentence better, and it does not
+/// boolean says a pull request is a fork's, and that is all anything needs. The fork's name would only have made a sentence better, and it does not
 /// fit: measured 2026-11-17 by `the_conversation_is_measured_against_the_answer_it_grew_from`, the
 /// worst case was 496,727 bytes before this field, 499,327 with it (`false` is the longer answer,
 /// so that is what the fixture carries), and about 504,700 with the name as well — past the 500,000-byte
@@ -724,7 +721,7 @@ mod tests {
             doc.contains(&format!("{promise} [`REVIEW_THREADS_FETCHED`] of them")),
             "`Pr::review_threads` stopped promising the {promise} threads while the query still \
              asks for them with `{argument}:` — the drift SKEIN-340 was. Change both or neither: \
-             a reader believes the doc and a merge train believes the query. The doc block \
+             a reader believes the doc and the code believes the query. The doc block \
              read:\n{doc}"
         );
     }
@@ -1263,8 +1260,6 @@ mod tests {
             !archived("search-cut").expect("readable").contains(&4242),
             "a queue that saw everything still prunes a set-aside PR that is no longer open"
         );
-        // Nothing here can prove what the OTHER reader of this list does with it — see
-        // `the_only_other_reader_of_this_list_stands_down_when_it_is_partial`.
 
         forget_host_token();
         forget_renames();
@@ -1429,7 +1424,7 @@ mod tests {
     ///     cost a second request each;
     ///   * and once the last page says `hasNextPage: false` the queue is `whole` with NO blind
     ///     spot, because a search that was followed to the end saw everything there was. That is
-    ///     what lets the prunes in `queue_within` and `review::prune` run again.
+    ///     what lets the prunes in `queue_within` run again.
     #[test]
     fn a_membership_rule_longer_than_one_page_is_followed_to_the_end() {
         let _g = crate::testutil::env_lock();

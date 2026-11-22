@@ -76,11 +76,10 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 30] = [
+const NODE_SUITES: [&str; 25] = [
     "attach",
     // The away digest's wiring: it reads the server's journal and moves the server's mark.
     "away",
-    "budget",
     // The arrival of the close code `panecover.mjs` reads. It drives one terminal socket by hand,
     // because the condition — a frame landing after the pump stopped reading, at a client that has
     // not drained its own receive queue — is not something a page can be asked to do (SKEIN-746).
@@ -106,7 +105,6 @@ const NODE_SUITES: [&str; 30] = [
     "leakcheck",
     "loginban",
     "overlays",
-    "provenance",
     // The same hand-driven terminal socket as `closecode`, for the opposite half of the same loop:
     // a client that reads everything and writes more input than the child is consuming, proving the
     // pane keeps saying what its command says (SKEIN-750).
@@ -116,7 +114,6 @@ const NODE_SUITES: [&str; 30] = [
     "revbadge",
     "review_return",
     "screenhalf",
-    "stackread",
     "stacksteps",
     // `serverBinary()` refusing a `$SKEIN_SERVER_BIN` older than a page it embeds — a hole only the
     // by-hand loop had, since this suite's own `env!("CARGO_BIN_EXE_skein-server")` is always fresh
@@ -124,8 +121,6 @@ const NODE_SUITES: [&str; 30] = [
     "stalebin",
     "stream",
     "substrate",
-    "train",
-    "trainpanel",
     "tabs",
     "undo",
     "unowned",
@@ -133,11 +128,7 @@ const NODE_SUITES: [&str; 30] = [
 ];
 
 /// Needs Playwright's chromium as well.
-///
-/// `connections` is here rather than in the node tier because the thing it measures does not exist
-/// outside a browser: the six-connection-per-origin cap on HTTP/1.1 is a BROWSER behaviour, and
-/// diagnosing SKEIN-366 from code constants and curl was not proof of it — curl has no such cap.
-const BROWSER_SUITES: [&str; 22] = [
+const BROWSER_SUITES: [&str; 21] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -149,7 +140,6 @@ const BROWSER_SUITES: [&str; 22] = [
     // typed line on a question that offered options too, and answered ones under a closed row
     // until two days have passed (SKEIN-1466).
     "asks",
-    "connections",
     // A box's ask for a bigger disk allowance, approved on its card in the Decisions strip: the
     // reason as plain text, the allowance raised at once, and the box's inbox told (SKEIN-1425).
     "diskask",

@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 mod checks;
 mod credentials;
+mod handmerge;
 mod node;
 mod refresh;
 mod search;
@@ -49,9 +50,8 @@ pub use credentials::{
     forget_trunks, host_token, host_token_source, refused_repos, repo_slug, repo_token_source,
     slug_for_write, token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
 };
-pub use refresh::{
-    counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,
-};
+pub use handmerge::merge_by_hand;
+pub use refresh::{counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue};
 pub use search::forget_batch_widths;
 pub use store::{
     archived, move_set_aside_aside, remembered, remembered_head, review_dir, set_archived,
@@ -68,10 +68,7 @@ pub use write::{
 };
 
 pub(crate) use types::newest_first;
-pub(crate) use write::refused_for_conflicts;
 
-#[cfg(test)]
-pub(crate) use refresh::CachedQueues;
 #[cfg(test)]
 pub(crate) use store::remember_for_test;
 #[cfg(test)]

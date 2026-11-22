@@ -138,45 +138,6 @@ await check("no keypress in the pane changes the fleet selection behind it", asy
     throw new Error(`a keypress navigated out of review: ${said.mode} → ${said.modeAfter}`);
   if (said.tabs) throw new Error(`↵ opened a terminal from inside the review pane (${said.tabs} tabs)`);
 });
-// §6's first focus rule, in a real browser: the selection is a PR number, so the summaries still
-// landing under it move it nowhere. The measured failure was an index-based selection drifting off
-// the row you are looking at every time one arrived.
-//
-// **The summaries are MADE to land, and the landing is waited for** (SKEIN-833). What stood here
-// was a wait for one `.gist` with `.catch(() => {})` around it — so a reading already on screen from
-// the load fifty checks ago satisfied it in a frame, and a reading that never came satisfied it too
-// — followed by `settle(600)`. Both ends fail the wrong way: this is a negative assertion, so a
-// window nothing arrives inside reports the rule holding rather than reporting that nothing
-// arrived. The selection was then trivially where it had been, because nothing had landed under it.
-//
-// `revKnownHeard` is the page's own record of the bulk row payload arriving — cleared at the
-// request, added in the answer's `.then`, one entry per repo (index.html:4363, :4380) — and it is
-// the same fact `revPumpSummaries` waits on rather than a mark invented for this check.
-await check("the selection survives the summaries landing under it", async () => {
-  const before = await selectedRk();
-  if (!before) throw new Error("nothing is selected, so there is no selection for a summary to move");
-  const repos = await page.evaluate(() => {
-    const ids = ((revQueue || {}).queues || []).map(q => q.repo_id);
-    revKnownHeard.clear();
-    for (const id of ids) loadKnownSummaries(id);
-    return ids;
-  });
-  if (!repos.length) throw new Error("the queue names no repo to ask for readings — nothing could land");
-  await page.waitForFunction(n => revKnownHeard.size >= n, repos.length, { timeout: 20000 })
-    .catch(async () => {
-      const heard = await page.evaluate(() => [...revKnownHeard]);
-      throw new Error(`the readings never landed — ${JSON.stringify(heard)} of `
-        + `${JSON.stringify(repos)} answered, so nothing arrived under the selection`);
-    });
-  // And they are DRAWN: `loadKnownSummaries` ends in a render, and a render is what moved an
-  // index-based selection. An assertion made before it would be about nothing.
-  await page.waitForFunction(
-    () => [...document.querySelectorAll("#revpane .gist")].some(e => /parser/.test(e.textContent)),
-    null, { timeout: 20000 })
-    .catch(() => { throw new Error("no reading is drawn in the queue, so nothing landed under the selection"); });
-  const after = await selectedRk();
-  if (after !== before) throw new Error(`a summary landing moved the selection ${before} → ${after}`);
-});
 // §6's one-line assertion, verbatim — the whole of SKEIN-159's done-when, in the browser it was
 // measured in: focused:"rev-compose",caret:4 → focused:BODY,caret:0 on every re-render.
 await check("a half-typed comment survives renderReview()", async () => {
@@ -191,12 +152,12 @@ await check("a half-typed comment survives renderReview()", async () => {
     return !!row && /null deref/.test(row.textContent || "");
   }, null, async () => "pressing the null-deref row did not open it: the open row is "
     + `${JSON.stringify(await page.$eval("#revpane .revrow.open .revtitle", e => e.textContent.trim()).catch(() => null))}`);
-  await page.click("#revpane .revrow.open .revacts .revchip:has-text('ask')");
+  await page.click("#revpane .revrow.open .revrowacts .revchip:has-text('comment')");
   await page.fill("#rev-compose", "half a thought");
   const said = await page.evaluate(() => {
     const el = document.activeElement;
     const before = { id: el.id, start: el.selectionStart };
-    renderReview();                                   // a summary lands, the stale re-poll fires
+    renderReview();                                   // the stale re-poll fires
     const now = document.activeElement;
     return { before, after: { id: now.id, start: now.selectionStart }, text: (now.value || "") };
   });

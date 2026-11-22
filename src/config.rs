@@ -143,19 +143,6 @@ pub struct Config {
     /// on every settings save. The key is read by `openssl` and never enters skein's memory.
     #[serde(default)]
     pub github_app_key: String,
-    /// Whose GitHub identity a pull-request review acts with: `"me"` or `"app"` (SKEIN-516).
-    ///
-    /// **`"me"` by default, and that is the owner's rule rather than a placeholder**: everything
-    /// skein does on its own is done as the owner, with no "on behalf of", so a review reads and
-    /// posts with the owner's own token (`crate::prq::host_token`). `"app"` is for team installs,
-    /// where the review should act as the skein GitHub App instead: the session is handed
-    /// `gitgate::mint_token(slug)`, and only when an App is configured.
-    ///
-    /// A string rather than an enum, on purpose. `config.json` is hand-editable and one field serde
-    /// cannot read discards the whole file (`config_error`), so a typo here would cost every other
-    /// setting. Anything that is not `"app"` reads as `"me"` — see [`Config::reviews_as_app`].
-    #[serde(default = "default_review_identity")]
-    pub review_identity: String,
     /// Spend *rationed* Haiku calls on the Claude subscription to enrich the board: a one-line
     /// summary for a box with no journal, and a conservative safety gate on **Continue N**.
     ///
@@ -174,7 +161,7 @@ pub struct Config {
     /// replaced.
     ///
     /// `$SKEIN_REVIEW_AI=off` holds it off ([`env_holds_off`]). Off is not a broken state — every PR simply reads
-    /// "not summarised" and stays at full attention. See [`crate::review`].
+    /// "not summarised" and stays at full attention.
     #[serde(default = "default_true")]
     pub review_summaries: bool,
     /// Which model reads and reviews pull requests — summaries, questions, drafted comments, and
@@ -193,34 +180,7 @@ pub struct Config {
     /// with. `$SKEIN_BOX_PLUGIN=off` holds it off ([`env_holds_off`]).
     #[serde(default = "default_true")]
     pub box_plugin: bool,
-    /// How many pull requests the review queue may ANALYSE per UTC day, across every repo — one
-    /// fleet-wide budget, counted in [`crate::review`] at the moment a model call is actually
-    /// made. One unit is one `(number, head_sha)` analysed, whether the visit produced a
-    /// one-liner, a brief, or a brief plus a drafted review; a summary served from the disk cache
-    /// costs nothing and counts nothing. The day rolls over at midnight UTC.
-    ///
-    /// **Default 100** — the ceiling as it was asked for, verbatim: "the allowance can be very
-    /// high. Say for example not more than 100 PRs a day (cache misses, actual analysis)". Not a
-    /// per-repo number and not a throttle: it exists to put a roof over the runaway case (the old
-    /// client-side allowance had none — every button press refilled it, measured at up to 180
-    /// calls/day) while never starving an ordinary day's queue. Zero means zero: no unasked or
-    /// asked reads at all today, which is a supported state, not a broken one.
-    #[serde(default = "default_review_reads_per_day")]
-    pub review_reads_per_day: u32,
 
-    /// May skein act on pull requests on its own — labels, updates, merges, deleted branches?
-    ///
-    /// **Off by default, and the only default in skein that leans this way.** Everything else
-    /// defaults toward showing you more; what this one gates is not a reading but a merge, and a
-    /// fleet that starts merging because a config file was absent is not one anybody would trust
-    /// twice.
-    ///
-    /// `$SKEIN_PR_WORKFLOWS=off` holds it off — so a fleet doing something you want stopped can be
-    /// stopped from the command line that starts the server, without the cockpit and without
-    /// finding the file. It cannot hold it ON against the pause ([`env_holds_off`]). See
-    /// [`crate::prwork`].
-    #[serde(default)]
-    pub pr_workflows: bool,
     /// The one sbx sandbox that hosts every box. **Naming it is the only supported shape.**
     ///
     /// Empty used to mean skein's original model — one microVM per box — and that is gone. It does not
@@ -521,9 +481,9 @@ pub fn config_error() -> Option<String> {
 ///
 /// **An environment variable may only turn things off** (the owner, 2026-09-27). It exists so a
 /// fleet doing something you want stopped can be stopped from the command line that starts the
-/// server; it must never defeat a switch the person turned off. `$SKEIN_PR_WORKFLOWS=on` beating
-/// the pause button was the case that decided it: the button wrote `false`, the env read back
-/// `true`, and the cockpit said "workflows resumed" while merges carried on. So a yes in the
+/// server; it must never defeat a switch the person turned off. An environment yes beating a
+/// pause button was the case that decided it: the button wrote `false`, the env read back `true`,
+/// and the cockpit said one thing while the fleet did another. So a yes in the
 /// environment means nothing, and each switch reads `setting && !env_holds_off(..)`.
 pub fn env_holds_off(name: &str) -> bool {
     matches!(
@@ -533,8 +493,7 @@ pub fn env_holds_off(name: &str) -> bool {
 }
 
 /// The switches an environment variable can hold off, by the `Config` field each one holds.
-pub const ENV_SWITCHES: [(&str, &str); 4] = [
-    ("pr_workflows", "SKEIN_PR_WORKFLOWS"),
+pub const ENV_SWITCHES: [(&str, &str); 3] = [
     ("ai_enrichment", "SKEIN_AI"),
     ("review_summaries", "SKEIN_REVIEW_AI"),
     ("box_plugin", "SKEIN_BOX_PLUGIN"),
@@ -705,24 +664,7 @@ fn default_fleet_memory() -> String {
     "26g".to_string()
 }
 
-fn default_review_reads_per_day() -> u32 {
-    100
-}
-
-fn default_review_identity() -> String {
-    "me".to_string()
-}
-
-impl Config {
-    /// Does a review act as the skein GitHub App rather than as the owner?
-    ///
-    /// Only an exact `"app"` says so. Every other value, a typo included, is the owner's default,
-    /// because the alternative reading of a value nobody meant is a review acting as an identity
-    /// nobody chose.
-    pub fn reviews_as_app(&self) -> bool {
-        self.review_identity.trim() == "app"
-    }
-}
+impl Config {}
 
 /// Every field here calls the SAME function its `#[serde(default = …)]` names.
 ///
@@ -735,7 +677,6 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             seed_gh_secret: false,
-            pr_workflows: false,
             review_model: String::new(),
             default_agent: default_agent(),
             base_branch: String::new(),
@@ -743,11 +684,9 @@ impl Default for Config {
             scope_git_to_repo: default_true(),
             github_app_id: String::new(),
             github_app_key: String::new(),
-            review_identity: default_review_identity(),
             ai_enrichment: false,
             review_summaries: default_true(),
             box_plugin: default_true(),
-            review_reads_per_day: default_review_reads_per_day(),
             fleet_sandbox: default_fleet_sandbox(),
             fleet_memory: default_fleet_memory(),
             fleet_cpus: String::new(),
@@ -773,23 +712,6 @@ impl Default for Config {
 
 #[cfg(test)]
 mod tests {
-    /// **A review acts as the owner unless the owner says otherwise** (SKEIN-516) — for a config
-    /// that never mentions the key, for the built-in default, and for a value nobody recognises.
-    ///
-    /// The concrete change that fails it: `default_review_identity` answering `"app"`, or
-    /// `reviews_as_app` testing anything looser than the exact word.
-    #[test]
-    fn a_review_acts_as_the_owner_unless_the_config_says_app() {
-        let absent: super::Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(absent.review_identity, "me");
-        assert!(!absent.reviews_as_app());
-        assert!(!super::Config::default().reviews_as_app());
-        let garbled: super::Config =
-            serde_json::from_str(r#"{"review_identity":"application"}"#).unwrap();
-        assert!(!garbled.reviews_as_app(), "an unknown word chose the App");
-        let app: super::Config = serde_json::from_str(r#"{"review_identity":"app"}"#).unwrap();
-        assert!(app.reviews_as_app());
-    }
 
     /// **A fleet always has a name, whatever is in the file** (SKEIN-484).
     ///
@@ -1048,7 +970,7 @@ mod tests {
     /// and one *other* field serde cannot deserialise.
     const ONE_BAD_FIELD: &str = r#"{
         "confirm_destroy": false,
-        "review_reads_per_day": "12",
+        "review_summaries": "12",
         "ssh_key": "~/.ssh/id_ed25519"
     }"#;
 
@@ -1069,7 +991,7 @@ mod tests {
         // makes this fixable — "somewhere in your config" would leave the user no better off than
         // the silence it replaced.
         assert!(
-            why.contains("line 3") && why.contains("expected u32"),
+            why.contains("line 3") && why.contains("expected a boolean"),
             "the complaint must locate the failure, not just name the file: {why}"
         );
 

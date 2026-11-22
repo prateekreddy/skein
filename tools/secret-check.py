@@ -102,12 +102,6 @@ WRITERS = {
         "the no-python3 fallback of the same propagation: `cp` creates the temp with the source's "
         "mode, which is a login's 0600, so the chmod only re-asserts it before the rename",
     ),
-    "src/fleet/credentials.rs::place_credential_script": (
-        1,
-        "the review credential is written inside the box that uses it (SKEIN-576), over the "
-        "crossing's stdin. `umask 077` rather than a chmod after, so it is never readable at the "
-        "ambient umask — the writer's rule, spelled in the language the write is made in.",
-    ),
     "src/fleet/fleetlogin.rs::sync_fleet_login_with": (
         2,
         "the host's kept login pushed back into the fleet sandbox's HOME, over stdin: `umask 077` "
@@ -138,8 +132,6 @@ EXPOSED = {
     "waits for the owner (SKEIN-516)",
     "src/gitgate/credentials.rs::gh_login": "the remembered `gh` login copied into a fresh Secret "
     "per caller, because Secret has no Clone; it never becomes a String",
-    "src/fleet/credentials.rs::github_export": "written into the box over the crossing's stdin and "
-    "read back there from a 0600 file; never argv, never this process's environment",
     "src/gitgate/credentials.rs::reach_beyond": "read only to compare its first four bytes with "
     "the classic-token prefixes; nothing is copied, logged or passed on",
     "src/github.rs::git_config": "git's Basic credential for `github.com`, in curl's config fed over "
@@ -187,9 +179,6 @@ PLACEMENT = {
     ("src/gitgate/decide.rs", "{}/git-tokens/why/{}"): "not a credential: one sentence saying "
     "why a granted repository has no token, beside the box's tokens so the helper that reads them "
     "can say it; it never holds token bytes",
-    ("src/fleet/credentials.rs", "\\\"$HOME\\\"/.cache/skein/review-{call}.token"): "the review "
-    "credential, in the box's own private HOME for the life of one call (SKEIN-576): a call into a "
-    "box reads it inside that box's namespace, where the fleet's `private/` is covered",
     ("src/fleet/paths.rs", "{}/.skein/review-github.token"): "the review credential's OLD location, "
     "named so `stale_sandbox_secrets` can delete what fleets from before the move still carry",
     ("src/repos/add.rs", "gh-secret-seeded"): "a marker that an sbx secret was once seeded, which "

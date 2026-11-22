@@ -174,8 +174,6 @@ function openSettings(pane = "repos") {
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
-    document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
-    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
@@ -377,27 +375,6 @@ function repoField(r, key, title, desc, placeholder) {
 // A picker, not a text field: the thing a repo needs is a whole connection — a gateway *and* the
 // token that mints at it — and only Work tracking knows which pairs exist. Typing a URL here could
 // only ever name half of one.
-// **The composition nobody chose in one place** — docs/pr-review.md §13. Auto-review with the
-// ceiling at `approve`, plus a merge train that claims this repo's pull requests, is skein
-// approving its own work and merging it with nobody in it. That is reachable on purpose; what it
-// came with is that it must not be reachable silently.
-//
-// Rendered from the two halves the PAGE can see — this repo's own switches — and it names
-// `skein doctor` for the half it cannot: whether any workflow in the fleet actually merges is a
-// fleet-level fact, and `prwork::the_loop_this_repo_has_built` is the authority on it. A page that
-// guessed at that would either cry wolf or stay quiet, and both are worse than pointing at the
-// thing that knows.
-//
-// It appears at the moment the decision is made — under the ceiling select, when "approve" is what
-// is chosen — rather than in a banner somewhere a person is not looking.
-function repoLoopWarning(r) {
-  if (!r.auto_review || r.auto_review_ceiling !== "approve") return "";
-  return `<div class="set-field"><span class="desc warnline">`
-    + `Approvals are unattended here. Where a merge train also claims this repo's pull requests, `
-    + `<b>an approval skein posts is what merges it</b> — nobody is in that loop. `
-    + `Run <code>skein doctor</code> to see whether one does.`
-    + `</span></div>`;
-}
 function repoSelect(r, key, title, desc, options) {
   // A boolean field arrives as true/false and its <option> values are strings; without this the
   // select falls back to its first option and silently misreports the stored setting.
@@ -750,26 +727,9 @@ function renderRepoList() {
             ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
             : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
           [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
-      // The per-repo half of "may skein read pull requests" (docs/pr-review.md §10, layer 1), on the
-      // card beside the queue it reads from. It had been reachable only from a chip in the review
-      // pane. Posted to its own route (`revSetReadingFor`), which is the one place it is written.
-      + repoSelect(r, "read_prs", "Read ahead",
-          "let skein read this repo's pull requests on its own: the ones waiting on your review and the ones you opened, one unit of the day's budget each. Off, it reads one only when you ask. Needs <b>Read pull requests</b>, the master switch in Settings → Boxes",
-          [["false", "Off"], ["true", "On"]])
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
-      // The reviewer engine's two switches, in the order they resolve: may it act here at all, and
-      // then how far. Separate rows because they answer different questions and one is a
-      // permission — folding them into a single four-value select would make "off" and "on but
-      // posting nothing" the same control, and they are not the same decision.
-      + repoSelect(r, "auto_review", "Automatic review",
-          "let skein review this repo's pull requests on its own — read them, and post what the ceiling below allows. Off everywhere by default; nothing turns it on by itself",
-          [["false", "Off"], ["true", "On"]])
-      + repoSelect(r, "auto_review_ceiling", "Unattended up to",
-          "how far automatic review may go without you. Anything past the ceiling is still read, and waits. <b>Comment</b> is where a repo starts: findings unattended, verdicts waiting",
-          [["none", "Nothing — read only"], ["comment", "Findings"], ["changes", "Findings and refusals"], ["approve", "Everything, including approvals"]])
-      + repoLoopWarning(r)
       + repoTokenRow(r)
       + repoKindsRow(r)
       + repoCacheRow(r)
@@ -852,22 +812,10 @@ function joinShareWarning(slug, chosen) {
 function saveRepoField(input) {
   const { id, key } = input.dataset;
   // Booleans on the wire. Sending the string "false" would deserialize-fail and the field would
-  // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
-  // than one name because the second such field arrived (`auto_review`) and a comparison that
-  // named one would have made the new one fail exactly that way, silently.
-  const BOOL_KEYS = ["review_queue", "auto_review", "read_prs"];
+  // report saved while nothing changed — the worst shape a settings bug can take.
+  const BOOL_KEYS = ["review_queue"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
-  const saved = () => {
-    // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
-    const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
-    if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-  };
-  // Consent to read has its own route and its own writer, shared with the review pane's chip.
-  if (key === "read_prs") {
-    revSetReadingFor(id, value).then(ok => ok ? loadRepos().then(() => { renderRepoList(); saved(); }) : input.focus());
-    return;
-  }
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
@@ -945,7 +893,6 @@ function settingsPayload() {
     fleet_one_disk: document.getElementById("set-onedisk").checked,
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
-    review_identity: document.getElementById("set-review-identity").value,
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.

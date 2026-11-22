@@ -67,19 +67,8 @@
   #banmenu button { border:0; background:none; color:var(--text); font:13px/1.3 var(--ui);
                     text-align:left; padding:7px 10px; border-radius:5px; cursor:pointer; }
   #banmenu button:hover, #banmenu button:focus-visible { background:var(--accent-bg); outline:none; }
-  /* The merge train's stops: the same kind of ROW as #healthban, but a different message — not
-     "a box is stale" (amber, environment) but "a machine needs your decision" (attn-red, work).
-     Each repo is its own click target, straight into that repo's review queue. */
-  #trainban { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:14px; row-gap:2px;
-              width:100%; flex:none; background:var(--attn); color:#08090b;
-              font:600 12px/1.35 sans-serif; padding:6px 14px; }
-  #trainban .trainlead { flex:none; }
-  #trainban .trainrepo { border:0; background:none; color:inherit; font:inherit; cursor:pointer;
-                         padding:0; text-align:left; max-width:100%; white-space:nowrap;
-                         overflow:hidden; text-overflow:ellipsis;
-                         text-decoration:underline dotted; text-underline-offset:2px; }
   /* The third kind of ROW: the fleet lost a credential. Not the amber "environment" (#healthban),
-     not the attn-red "a machine needs a decision" (#trainban) — the --error hot amber the palette
+     not an attn-red decision — the --error hot amber the palette
      reserves for API failure, because that is what this is: every model call is being declined. */
   #loginban { display:flex; flex-wrap:wrap; align-items:center; column-gap:10px; row-gap:2px;
               width:100%; flex:none; background:var(--error); color:#08090b;
@@ -574,6 +563,8 @@
   .revrow.held > .revline { opacity:.55; }
   .revline { display:grid; grid-template-columns:14px 46px minmax(0,50fr) minmax(0,32fr) auto;
              align-items:center; gap:0 10px; padding:4px 10px; min-height:28px; cursor:pointer; }
+  /* A row with no gist cell gives its title the gist's column too. */
+  .revline > .tcell:nth-last-child(2), .step > .tcell:nth-last-child(2) { grid-column:span 2; }
   .revline:hover { background:color-mix(in srgb,var(--elevated) 60%,transparent); }
   .revnum { font:11px var(--mono); color:var(--faint); text-align:right; }
   /* `overflow:hidden` is load-bearing, not tidiness. The chips are `flex:none`, so on a crowded row
@@ -611,20 +602,6 @@
      is one run of text and truncates as one, and making them all flex would change all of them. */
   .gist.reading { color:var(--faint); font-style:italic;
                   display:flex; align-items:baseline; }
-  /* A READING IN FLIGHT (SKEIN-333). Promoted out of `.gist.reading`'s faint italic, which was
-     written for a placeholder that lasted a moment: this one lasts most of a minute and is the
-     answer to "is anything happening at all", so it carries `--accent` — the page's one meaning
-     for "your move" — and stays upright. `flex:none` so a running counter can never be the thing
-     that wraps a row onto a second line. */
-  .revflight { color:var(--accent-2); font-style:normal; white-space:nowrap; flex:none; }
-  /* Tabular figures: the counter is rewritten in place once a second and proportional digits make
-     the text beside it twitch on every tick. */
-  .revflight-secs { font-variant-numeric:tabular-nums; }
-  .revflight-who { color:var(--faint); margin-left:6px; font-size:11px; }
-  /* The reading being REPLACED, kept visible and plainly subordinate — a reader scanning the list
-     keeps their place, and nobody mistakes it for what skein thinks now. */
-  .revflight-was { color:var(--faint); font-style:italic; margin-left:8px; flex:1 1 auto;
-                    min-width:0; overflow:hidden; text-overflow:ellipsis; }
   /* Landed while you were elsewhere, and not yet looked at. Filled, unlike `.revwhy`'s bare words:
      this is a fact about the ROW's freshness rather than a sentence about the pull request, and it
      has to survive being scanned past at speed. */
@@ -660,13 +637,6 @@
   .revtag.refused { background:color-mix(in srgb,var(--attn) 18%,transparent); color:var(--attn); }
   .revtag.draft { background:color-mix(in srgb,var(--waiting) 16%,transparent); color:var(--waiting); }
   .revtag.moved { background:color-mix(in srgb,var(--working) 16%,transparent); color:var(--working); }
-  /* "read it" / "re-read" on the collapsed line (SKEIN-228). Outlined rather than filled, because
-     it is the one ACTION among the row's facts and the difference has to be legible without
-     reading it; sized to the chips so it cannot change a row's height. */
-  .revread { font:10px var(--mono); background:none; border:1px solid var(--border-3);
-             border-radius:3px; padding:0 5px; flex:none; color:var(--faint); cursor:pointer;
-             line-height:15px; }
-  .revread:hover { color:var(--accent-2); border-color:var(--accent); }
   /* CI, said once at the top when it is most of the queue: 25 red rows is one broken pipeline,
      not twenty-five decisions. Demoted, not hidden — the expanded row still says its own checks. */
   .cired { border-left:2px solid var(--attn); padding:3px 10px; margin:2px 0 8px;
@@ -683,89 +653,8 @@
   .revmeta { font:11.5px var(--mono); color:var(--dim); margin-bottom:9px;
              display:flex; flex-wrap:wrap; gap:4px 14px; }
   .revmeta a { color:var(--accent-2); }
-  /* No summary is a *state*, not an absence: skein's rule is that AI may only add scrutiny, so a
-     PR it could not summarise stays at full attention and says so plainly. */
-  .revnosum { border:1px dashed var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
-              color:var(--text-2); font-size:12.5px; }
-  /* The day's automatic budget, spent. Amber rather than orange: nothing failed and nothing is
-     wrong — skein stopped spending on its own initiative, and the button beside it is not
-     budgeted at all. Solid, because unlike the other absences this one has a move in it. */
-  .revnosum.budget { border:1px solid var(--border-2); border-left:2px solid var(--waiting); }
-  .revnosum.budget b { color:var(--waiting); font-weight:600; }
   .revtag.flow { background:var(--accent-bg); color:var(--accent-2); }
   .revtag.stopped { background:color-mix(in srgb,var(--attn) 14%,transparent); color:var(--attn); }
-  .revflow { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:9px 11px;
-    margin-top:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-direction:column; gap:6px; }
-  .revflow-head { display:flex; align-items:center; gap:8px; }
-  .revflow-head span { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint); }
-  .revflow-stop { color:var(--attn); display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-  /* HELD, which is neither of the two states beside it (SKEIN-279/326). Not `.revflow-stop`'s red:
-     nothing failed and there is nothing to clear. Not amber either — amber on this page is "true,
-     you should know", and it is spoken for by conditions somebody has to act on. A held workflow is
-     one doing exactly what it was configured to do, so it is promoted out of `.dim` (which read as
-     "nothing here") and no further: the sentence is the whole of the treatment. */
-  .revflow-holding { color:var(--text-2); border-left:2px solid var(--border-3);
-                     padding:1px 0 1px 9px; line-height:1.55; }
-  .revflow-off { color:var(--waiting); }
-  /* The merge-train panel, at the top of the workflows pane: the switch, the front, the line. */
-  .revtrain { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
-    margin:0 0 8px; display:flex; flex-direction:column; gap:8px; font-size:12.5px; color:var(--text-2); }
-  .revtrain-state { display:flex; align-items:center; gap:10px; font-weight:600; color:var(--text); }
-  .revtrain-off { color:var(--attn); font-weight:400; }
-  /* Paused is unmistakable: the body dims as one block, and the state line says so in words. */
-  .revtrain.off .revtrain-body { opacity:.45; }
-  .revtrain-body { display:flex; flex-direction:column; gap:8px; }
-  .revtrain-repo h5 { margin:0 0 4px; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
-    color:var(--faint); font-weight:600; }
-  .revtrain-flow { font-weight:600; margin:2px 0; }
-  .revtrain-now { margin:0 0 2px; }
-  .revtrain-car { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:2px 0 2px 8px;
-    border-left:2px solid transparent; }
-  .revtrain-car.front { border-left-color:var(--accent); }
-  .revtrain-car.stopped .revtrain-doing { color:var(--attn); }
-  .revtrain-pos { flex:0 0 34px; text-align:right; color:var(--faint); font-variant-numeric:tabular-nums; }
-  .revtrain .trainnum { border:0; background:none; color:var(--accent-2); font:inherit; cursor:pointer;
-    text-decoration:underline; padding:0; }
-  .revtrain-doing { color:var(--dim); }
-  .revtrain-log { margin:2px 0 6px 44px; display:flex; flex-direction:column; gap:2px; font:11.5px var(--mono); }
-  .revtrain-log .when { color:var(--faint); display:inline-block; min-width:44px; }
-  .revtrain-log .kind { color:var(--dim); display:inline-block; min-width:110px; }
-  .revtrain-log .stopped .kind { color:var(--attn); }
-  .revtrain-log .cleared .kind { color:var(--done); }
-  /* The editor. Steps are numbered and stacked because their ORDER is their meaning — the first one
-     that applies is the one that happens — so it has to look like a sequence, not like a set. */
-  .revflow-edit { border:1px solid var(--border-3); border-radius:var(--radius-sm); padding:10px;
-    margin:8px 0; display:flex; flex-direction:column; gap:8px; }
-  .revflow-edit-head { display:flex; align-items:center; gap:8px; }
-  .revflow-edit-head input { flex:0 1 220px; font-weight:600; }
-  .revflow-edit-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
-  .revstep { display:flex; align-items:flex-start; gap:8px; border-top:1px solid var(--border-2);
-    padding-top:8px; }
-  .revstep-n { flex:0 0 20px; text-align:center; color:var(--faint); font-variant-numeric:tabular-nums;
-    line-height:26px; }
-  .revstep-body { flex:1 1 auto; display:flex; flex-direction:column; gap:5px; }
-  .revstep-line { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
-  .revstep-lbl { text-transform:uppercase; letter-spacing:.06em; font-size:10.5px; color:var(--faint);
-    flex:0 0 46px; }
-  .revstep-atom { display:inline-flex; align-items:center; gap:3px; }
-  .revstep-move { display:flex; gap:2px; }
-  .revx { background:none; border:1px solid transparent; color:var(--faint); cursor:pointer;
-    border-radius:var(--radius-sm); padding:1px 5px; font-size:12px; }
-  .revx:hover { color:var(--text-1); border-color:var(--border-3); }
-  .revstale { border:1px solid var(--working); border-radius:var(--radius-sm); padding:8px 10px;
-    margin-bottom:8px; font-size:12.5px; color:var(--text-2); display:flex; flex-wrap:wrap;
-    align-items:center; gap:6px; }
-  .revstale code { color:var(--text-1); }
-  /* A reading built from a remembered queue is a WEAKER claim than a stale one — it says
-     skein cannot tell, not that it knows. Same block, quieter border, so the two are read as
-     the same kind of caution at different strengths rather than as one alarm. */
-  .revstale.blind { border-color:var(--border-3); }
-  /* And a reading that lost its box is the STRONGEST of the three: stale says "this describes an
-     older commit", blind says "skein cannot tell", and this says the reading may not have been of
-     the change at all — it ran with no checkout of it. Amber rather than the blue caution, and
-     never red: the reading did happen and is worth reading, which is why it is drawn beside the
-     brief rather than in place of it. */
-  .revstale.outsidebox { border-color:var(--waiting); }
   /* SKEIN-162: the pressed control becomes the receipt — success is green where the eye already
      is, a refusal is red and STAYS until acted on. No toast carries either. */
   .revreceipt { display:inline-flex; align-items:center; gap:7px; color:var(--done);
@@ -778,13 +667,6 @@
   .revrow.done .revtitle { text-decoration:line-through; text-decoration-color:var(--border-3);
     color:var(--faint); }
   .revtag.flag { color:var(--accent-2); border-color:var(--accent); }
-  .revsignals { border:1px solid var(--border-2); border-left:2px solid var(--accent);
-                border-radius:var(--radius-sm); padding:8px 11px; margin-bottom:11px;
-                font:11.5px var(--mono); color:var(--text-2); }
-  .revsignals b { display:block; font-weight:600; color:var(--faint); text-transform:uppercase;
-                  letter-spacing:.06em; font-size:10px; margin-bottom:5px; }
-  .revsignals > div { margin-top:4px; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
-  .revsignals .dim { color:var(--faint); }
   /* WHO STILL OWES AN APPROVAL (SKEIN-306). One line, in the expanded row and nowhere else: an
      author goes looking for this, and a chip on the collapsed line would be a nag about something
      that is deliberately not their move. */
@@ -814,11 +696,6 @@
      the internet is the one thing on this page `marked.parse` must not be pointed at. Capped and
      scrollable, so one four-hundred-line comment cannot become the whole expanded row. */
   .revconv-caret { color:var(--faint); width:9px; flex:none; }
-  /* The stack's own read control and its progress (SKEIN-337). It sits above the steps, inside the
-     expansion, because reading eighteen pull requests is a decision about the STACK and not about
-     whichever step the selection happens to be on. */
-  .stackread { display:flex; align-items:center; gap:9px; flex-wrap:wrap;
-               padding:6px 10px 7px; border-bottom:1px solid var(--line); font-size:12px; }
   /* One line, and only one: `nowrap` with an ellipsis is what makes a collapsed list a LIST rather
      than a shorter wall. A comment whose first line is a 2,000-character paragraph — which is the
      measured case, not a hypothetical — must still occupy exactly one row. */
@@ -827,14 +704,6 @@
   .revcomment-body { font-size:12.5px; line-height:1.55; color:var(--text);
                      white-space:pre-wrap; overflow-wrap:anywhere;
                      max-height:260px; overflow-y:auto; }
-  .revowned { font:11px var(--mono); color:var(--dim); margin-bottom:9px; }
-  .revowned code { background:var(--elevated); border-radius:4px; padding:1px 5px; }
-  .revbrief { font-size:13.5px; line-height:1.6; color:var(--text); }
-  .revbrief h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint);
-                 margin:14px 0 5px; font-weight:600; }
-  .revbrief > :first-child { margin-top:0; }
-  .revbrief p { margin:0 0 9px; }
-  .revbrief code { font:12px var(--mono); background:var(--elevated); border-radius:4px; padding:1px 5px; }
   .revempty { color:var(--faint); font-size:13px; padding:10px 2px; }
   /* A CLEARED QUEUE is the best moment this product has, so it is drawn like one and then says the
      honest next thing — usually that another repo has ten (SKEIN-154, §8.5). Quiet: no colour but
@@ -887,8 +756,6 @@
   .revcompose textarea { width:100%; background:var(--panel); color:var(--text); resize:vertical;
                          border:1px solid var(--border-2); border-radius:var(--radius-sm);
                          padding:8px 10px; font:13px var(--ui); line-height:1.5; }
-  .revanswer { margin-top:10px; padding:9px 11px; background:var(--panel); border-radius:var(--radius-sm);
-               border-left:2px solid var(--accent); font-size:13px; line-height:1.6; }
   .revfold { cursor:pointer; user-select:none; }
   .revfold:hover .dim { color:var(--text); }
   /* THE STACK — the rail is drawn, so "fifteen deep" is a length you see, not a count you read. */
@@ -935,7 +802,6 @@
                     background:color-mix(in srgb,var(--waiting) 14%,transparent);
                     border-radius:3px; padding:0 5px; }
   .stackhint { font:11px var(--mono); color:var(--faint); padding:4px 10px 6px 44px; }
-  .revanswer > :first-child { margin-top:0; } .revanswer > :last-child { margin-bottom:0; }
   .txwrap { height:100%; overflow-y:auto; padding:14px 18px 28px; }
   /* The record's name and the search row are one pinned block: the conversation scrolls under it. */
   .txtop { position:sticky; top:-14px; z-index:2; margin:-14px -18px 10px; background:var(--inset);
@@ -1269,13 +1135,6 @@
   .set-txt { display:flex; flex-direction:column; gap:3px; min-width:0; }
   .set-title { font-size:13px; color:var(--text); }
   .set-row .desc, .set-field .desc { color:var(--faint); font-size:11.5px; line-height:1.45; }
-  /* The one place a settings description raises its voice: the composition in docs/pr-review.md
-     §13, which a person builds by choosing "approve" and would otherwise never be told about.
-     `--waiting` rather than `--attn`: nothing is broken, and a red line here would read as a fault
-     to be cleared rather than as a consequence that was chosen. */
-  .set-field .desc.warnline { color:var(--text-2); border-left:2px solid var(--waiting);
-      padding:6px 0 6px 9px; background:color-mix(in srgb,var(--waiting) 7%,transparent); }
-  .set-field .desc.warnline b { color:var(--text); }
   .set-field { display:flex; flex-direction:column; gap:7px; padding:14px 0; cursor:default;
                border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent); }
   .set-field input, .set-field select { width:100%; }
@@ -1715,6 +1574,7 @@
     .revline { grid-template-columns:14px minmax(0,1fr) auto; row-gap:2px; padding:6px 8px; }
     .revline > .revnum { display:none; }
     .revline > .gist { grid-column:2 / -1; grid-row:2; }
+    .revline > .tcell:nth-last-child(2) { grid-column:auto; }
     .rail { grid-template-columns:auto; }
     .rail .size, .rail .who { display:none; }
   }
@@ -1733,8 +1593,8 @@
     .gauges.on { flex-direction:row; flex-wrap:nowrap; gap:12px; overflow:hidden; margin:-6px 0 10px; }
     .ga { grid-template-columns:auto auto; gap:4px; flex:none; }
     .ga .gbar { display:none; }
-    #loginban, #trainban { flex-wrap:nowrap; }
-    #loginban .banbody > span, #trainban .trainlead { min-width:0; overflow:hidden; text-overflow:ellipsis;
+    #loginban { flex-wrap:nowrap; }
+    #loginban .banbody > span { min-width:0; overflow:hidden; text-overflow:ellipsis;
                                                       white-space:nowrap; flex:0 1 auto; }
     header { gap:10px; row-gap:8px; margin-bottom:12px; }
     .wrap { padding:14px 12px 40px; }
@@ -2070,12 +1930,6 @@
             <div class="set-head">Set it up once<span class="sub">a GitHub App is the whole of it — every token a box gets is minted from this one key</span></div>
             <div class="set-desc">One credential, and skein derives the rest: a write token scoped to a box's own repository, and a read-only one covering everything you installed the App on — both minted per box, valid an hour, renewed while the box runs. Nothing below is needed on this path.</div>
             <label class="set-field narrow"><span class="set-title">GitHub App ID</span><span class="desc">Mints a write token for a box's own repo and a read-only one for the repos you install it on. Key at <code>~/.skein/github-app.pem</code>. <details><summary>how to create one</summary>the App that mints every credential a box gets — a write token for its own repository, and a read-only one covering whatever you install the App on, both lasting an hour. Installing it on another repo is the only thing needed to make that repo readable; there is no second token to mint or keep in step. Create one with <b>Contents: write</b>, <b>Pull requests: write</b>, <b>Issues: write</b> (what lets a box comment on a PR), <b>Checks: read</b> and <b>Actions: read</b> (what lets a box see whether CI passed), install it on the repos skein manages, and put its private key at <code>~/.skein/github-app.pem</code>. The id is not a credential; the key never leaves the host and is only ever read by <code>openssl</code>.</details></span><input id="set-ghappid" placeholder="(no App — nothing is scoped)" autocomplete="off" spellcheck="false" /></label>
-            <!-- Whose identity a pull-request review acts with (SKEIN-516). Words approved by the owner on
-                 SKEIN-516, verbatim; "app" hands a review no token at all until an App is configured. -->
-            <label class="set-field narrow"><span class="set-title">Reviews act as</span><select id="set-review-identity" onchange="renderReviewIdentityNote()"><option value="me">you (your GitHub token)</option><option value="app">the skein GitHub App (team installs)</option></select></label>
-            <!-- Owner-approved on SKEIN-516, verbatim. Shown by `renderReviewIdentityNote` from the server's
-                 `app_ready`, which is the same `gitgate::app_credentials()` a review's credential is chosen by. -->
-            <p class="set-note warn" id="set-review-identity-note" hidden>Reviews act as the skein App, but no App is set up — nothing will be posted, except in repositories where you stored a token.</p>
             <div class="set-credrow"><button type="button" class="kbtn" onclick="probeGit()" id="gq-probe">Test credentials</button><span class="desc" id="gq-probe-out"></span></div>
             <div id="gq-probe-rows"></div>
 
@@ -2182,10 +2036,10 @@
             <label class="set-row"><span class="set-txt"><span class="set-title">Confirm before Destroy</span><span class="desc">clone-mode boxes lose unpushed commits</span></span><input type="checkbox" id="set-confirmdestroy" class="switch"></label>
             <label class="set-row"><span class="set-txt"><span class="set-title">AI enrichment <span class="pill"></span></span><span class="set-envnote" data-held="ai_enrichment" hidden></span><span class="desc">Rationed Haiku calls on your Claude subscription (no API key) summarise boxes with no journal, and hold back a "proceed?" that is really a decision. <details><summary>why it is off by default</summary>spends <b>rationed Haiku calls on your Claude subscription</b> — no API key — to do two things the free signals can't. A box with no journal gets a one-line summary of what it just did or is asking (marked in its <b>Session</b> tab, never mixed in with what the box actually said). And <b>▸ Continue N</b> gains a second opinion: a box the heuristic thinks is a routine "shall I proceed?" is <i>held back</i> if the model reads it as a real decision. The gate can only ever add a hold, never grant a continue — a flaky or missing answer errs toward asking you. Off by default because skein runs inside a box where <code>claude</code> is logged in, so these calls share the same rate-limit window as the fleet doing your real work; when on it's lazy, on demand, and cached per turn-end — never a per-tick sweep.</details></span></span><input type="checkbox" id="set-ai" class="switch"></label>
             <p class="set-note" id="set-ainote"></p>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Read pull requests — master switch</span><span class="set-envnote" data-held="review_summaries" hidden></span><span class="desc">Summarise each PR in the review queue, so most of it can be read from the row. Off, skein reads no pull request in any repo, even one you ask for; on, each repo's <b>Read ahead</b> (on its card) decides what it reads without being asked. <details><summary>why this one is on</summary>It spends on the opposite terms to AI enrichment above, which is why the defaults differ. Enrichment runs unasked over a board that already tells you what you need. A summary is only ever produced for a PR <b>already in your queue</b>, at most <b>once per head commit</b>, and cached — and without it the queue cannot do the job it exists for, which is to spare you reading thirty pull requests a day yourself. Turning it off is a supported state, not a broken one: every PR then reads <i>not summarised</i> and keeps your full attention. skein only ever lowers a PR's depth by having actually read it.</details></span></span><input type="checkbox" id="set-prai" class="switch"></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Module notes</span><span class="set-envnote" data-held="review_summaries" hidden></span><span class="desc">Lets the review pane write a standing note on a part of a repo when you press for one. Off, it writes none. Nothing is written unless you ask.</span></span><input type="checkbox" id="set-prai" class="switch"></label>
             <!-- The box plugin, fleet-wide (SKEIN-1058). Words approved by the owner on SKEIN-1057, verbatim. -->
             <label class="set-row"><span class="set-txt"><span class="set-title">skein in every agent's session</span><span class="set-envnote" data-held="box_plugin" hidden></span><span class="desc">Lets skein hold one command when a box is short of disk, memory or processes, and gives agents skein's own tools: their box's resources and largest processes, asking you a question, and requesting a package or a repo write. Off, agents get neither. Package and write requests still work from the shell, and a question for you has no other way in. A running agent keeps what it started with until its next session. <details><summary>what it does not do</summary>It never stops anything. The kernel's limits hold whether this is on or off. It is loaded from skein's own read-only build, so every box has the same one and no box can change or remove it. It is fleet-wide on purpose; there is no per-box setting.</details></span></span><input type="checkbox" id="set-boxplugin" class="switch"></label>
-            <label class="set-row"><span class="set-txt"><span class="set-title">Review model</span><span class="set-envnote" data-held="review_model" hidden></span><span class="desc">Which model reads and reviews pull requests — summaries, questions, drafted comments and the actual review. Empty keeps each call's own default: summaries on the cheap model, everything that writes on the stronger one.</span></span><input type="text" id="set-review-model" list="set-review-models" placeholder="skein's default" spellcheck="false"><datalist id="set-review-models"></datalist></label>
+            <label class="set-row"><span class="set-txt"><span class="set-title">Module notes model</span><span class="set-envnote" data-held="review_model" hidden></span><span class="desc">Which model writes module notes. Empty keeps skein's default.</span></span><input type="text" id="set-review-model" list="set-review-models" placeholder="skein's default" spellcheck="false"><datalist id="set-review-models"></datalist></label>
           </section>
           <section class="set-pane" data-pane="tracking">
             <p class="set-note" id="set-syncnote"></p>
@@ -3772,13 +3626,6 @@ const revSeen = new Map();
 // every summary read for it. NOT the same question as "what does the view name": leaving review for
 // a box names no repo at all, and that is not a repo switch.
 let revHeld = null;
-// What skein would do to each pull request in this repo, and what it could be told to do —
-// `{enabled, defined: [...], prs: {number: standing}}`.
-//
-// Read separately from the queue, and on purpose. The queue is what GitHub says and is cached for a
-// minute; this is skein's own answer about it, and it changes the instant somebody assigns a
-// workflow. Folded together, choosing a workflow would not show up until GitHub was read again.
-let revFlows = new Map();  // repo_id -> that repo's workflow state (or {error})
 let revStaleTimer = null;
 // How many times the pane has asked again for a queue that came back remembered rather than fresh.
 //
@@ -3791,104 +3638,6 @@ let revStaleTimer = null;
 // So it keeps asking, with growing gaps, and gives up out loud rather than silently.
 let revStaleTries = 0;
 const REV_STALE_TRIES = 5;
-let revSums = new Map();      // PR number -> summary, or "…" while one is in flight
-
-// **Repos whose readings-on-disk this load has actually heard about**, filled by
-// [`loadKnownSummaries`] and read by `revPumpSummaries`.
-//
-// The pump reads ahead for every row `revSums` does not hold, and "does not hold" is the same
-// question as "was never read" only once the bulk payload has landed. Before that it is the same
-// question as "the answer is still on its way", and those two have opposite right answers.
-//
-// `loadReview` starts `loadKnownSummaries` and `loadWorkflows` in that order and they answer in
-// whichever order the machine decides. `loadWorkflows` ends by pumping, deliberately: consent to
-// read ahead arrives on that payload, and a pump that ran before it found nothing it was allowed
-// to read and never asked again. That settled one order and opened the other. With the workflows
-// answer first the pump read every row on the queue; each read came back off disk over the stream
-// as a FULL reading; and the row shapes in the bulk payload were then dropped on arrival by
-// `loadKnownSummaries`'s own guard, which refuses to overwrite a full reading with a thinner one.
-// So the page spent one request and one full reading PER ROW where the single row-shaped payload
-// SKEIN-287 added was already on its way with all of them — measured against the six-row fixture in
-// `tests/ui/review.mjs`, where holding that payload open produced four `POST …/read` and no thin
-// reading at all. Which of the two responses landed first is the whole of it (SKEIN-704).
-//
-// The pump waits on THIS rather than on a duration. `loadKnownSummaries` records the repo whether
-// it answered or failed, so there is no order of events in which this stops the pump for good.
-let revKnownHeard = new Set();
-
-// **What skein is reading RIGHT NOW**, off `/api/review/reading`, keyed `repo#number` (SKEIN-333).
-//
-// The page used to keep this knowledge in `revSums` as the string "…", and that is precisely the
-// defect: "…" lived in the same map the queue refresh writes into, and the refresh overwrote it
-// with the reading on disk — so a row spent most of a 35-second model call displaying the OLD
-// answer, and the press looked like it had done nothing. Reported repeatedly, and finally as the
-// diagnosis rather than the symptom: "even if it is doing work, I am unable to see."
-//
-// It is a SEPARATE map for that reason. In-flight is not a kind of summary and must not live where
-// summaries are merged; nothing that merges readings may write here, and the row's gist is drawn
-// from here rather than from the absence of a summary.
-//
-// The server owns the truth (`review::readings`), so this survives a reload, a repo switch and a
-// second tab, and it carries skein's own background reads as well as pressed ones — the owner's
-// answer when asked: any read in flight shows.
-let revInFlight = new Map();  // repo#number -> { started_ms, asked }
-// Rows whose reading landed and that nobody has looked at since (SKEIN-333). Cleared by OPENING
-// the row, not by a timer — the owner's choice, so a read that landed while you were elsewhere is
-// still evident when you come back rather than having quietly aged out.
-let revUpdated = new Set();
-// **What that mark MEANS: a reading was REPLACED**, not "a reading arrived". The two are the same
-// thing only for somebody who was already looking at one, and the pane's own first fill is exactly
-// where they are not: `revFetchSummary` marked every row its `.finally` touched, so opening the
-// pane cold stamped "● updated" on every row the pump filled — a mark reading "this changed while
-// you were away" on rows nobody had ever seen, and nothing had changed and nobody was away. A mark
-// that fires on everything is the texture this page spends its whole design budget avoiding.
-//
-// A REAL reading is one with something to say. "…" is a press half a second old, `unread` is skein
-// saying it did not look, and `transient` is a failure to reach a reading rather than a reading —
-// replacing any of the three tells a reader nothing they were not already watching happen.
-function revHasReading(key) {
-  const s = revSums.get(key);
-  return !!(s && s !== "…" && !s.transient && s.depth !== "unread");
-}
-// How often the page asks WHAT is in flight. The elapsed seconds are counted locally from
-// `started_ms` (`tickInFlight`), so this is not the clock — it is only how quickly a read somebody
-// else started, or one that finished, shows up here. The owner's constraint: "for the timer I hope
-// you are counting locally and doing github request once in a while only or on refresh."
-const REV_INFLIGHT_POLL_MS = 4000;
-let revInFlightTimer = null;
-// Three at a time. Each summary is a `gh pr diff` plus one or two model calls on the SAME
-// subscription the fleet is working on, so this is a deliberate throttle rather than a UI nicety —
-// thirty at once would take the rate-limit window away from the boxes doing the real work.
-const REV_SUM_PARALLEL = 3;
-// **And the width for a read somebody PRESSED, which is a different number for a different
-// reason** (SKEIN-353). The two must never be read as one: `REV_SUM_PARALLEL` above is a throttle
-// on skein's own initiative, and the owner's rule is that his own presses have none — "Limit is
-// only for automatic stuff, manually I can invoke as many as I want", and again, on this code,
-// "I thought the 2 slots read is for you to automatically do, not when I ask for it. If I ask for
-// it, then it is unlimited."
-//
-// This is therefore NOT a budget and NOT a throttle on the person. It is a guard against one
-// specific consequence: a large simultaneous burst trips GitHub's SECONDARY rate limit, which
-// `src/github.rs` answers with a flat fifteen-minute hold on every GitHub read for the whole fleet.
-// That is the whole and only reason the number is not infinity, and the owner chose ten knowing it.
-//
-// What the old shared width cost, measured on his fleet while he waited half an hour for one
-// result: three reads pinned at three (#716, #718, #726) ran past their own 180-second budget and
-// never ended, so neither stack could advance a single step. A ceiling on something asked for turns
-// one slow answer into no answers.
-const REV_ASKED_PARALLEL = 10;
-let revSumBusy = 0;
-
-// The day's reading budget lives on the SERVER, and only there (`review::over_budget`). The page
-// used to keep its own — six unasked readings per repo — and it was wrong twice over: it counted
-// requests rather than model calls, so a reload spent the whole allowance on free cache hits and
-// every row past the sixth went unread for ever; and every approve reloaded the pane, which handed
-// out a fresh six. A budget the client holds is a budget any client action can refill. What is left
-// here is REV_SUM_PARALLEL, which is a throttle on the burst and not a limit on the total.
-//
-// The one-hour settle gate is gone with it: the server stopped applying it (`prq::settled` is no
-// longer consulted by `review::worth_reading`) when re-anchoring by line text made a reading of a
-// moving head worth having, so a copy of the rule here would only refuse rows skein itself reads.
 
 // The badge on the review button. Polled slowly and never as part of the 2s fleet tick: each count
 // is three `gh` round trips per repo, and this is a number you act on within minutes, not seconds.
@@ -3915,9 +3664,6 @@ function pollReviewCounts() {
   }).catch(() => {});
 }
 function renderRevBadge() {
-  // Same poll, same moment: the train's stops arrive on the counts the badge is drawn from, so the
-  // banner costs no request of its own and can never disagree with the badge about what is known.
-  renderTrainBanner();
   const btn = document.getElementById("revbtn");
   if (!btn) return;
   const total = revCounts.reduce((n, c) => n + (c.needs_you || 0), 0);
@@ -3941,38 +3687,6 @@ function renderRevBadge() {
     ...(unasked.length ? ["", "not looked at:"] : []),
     ...unasked.map(c => `  ${c.repo_id}: ${c.skipped}`),
   ].join("\n");
-}
-// The merge train's stops, as a ROW above the app like #healthban — prepended to body's flex
-// column so it pushes the app down rather than covering the tab bar it is interrupting. A stopped
-// PR is a decision only a person can make, and the repo's segment is the one click that opens it.
-// An entry from an older server carries no `stopped` field at all; that reads as "nothing
-// stopped", never as an error.
-function renderTrainBanner() {
-  const stops = revCounts.filter(c => (c.stopped || []).length);
-  let ban = document.getElementById("trainban");
-  if (!stops.length) { ban?.remove(); banForget("trainban"); return; }
-  if (!ban) {
-    ban = document.createElement("div"); ban.id = "trainban";
-    const said = document.createElement("span"); said.className = "banbody";
-    ban.append(said);
-    document.body.prepend(ban);
-  }
-  ban.querySelector(".banbody").innerHTML = [
-    `<span class="trainlead">merge train stopped —</span>`,
-    // Reasons kept to their first sentence: the row must say enough to decide whether to look now,
-    // and no more — the full story is one click away in the review pane.
-    ...stops.map(c => `<button type="button" class="trainrepo" onclick="openReview(${esc(JSON.stringify(c.repo_id))})">${esc(c.repo_id)}: ${
-      c.stopped.map(s => `#${esc(s.number)} (${esc(String(s.why || "needs you").split(".")[0])})`).join(" · ")
-    }</button>`),
-    // Stops with the engine switched off are a different sentence: nothing will retry these, or
-    // move anything else, until somebody resumes. Known from payloads already fetched — this
-    // banner never earns a request of its own.
-    ...(revTrainPaused()
-      ? [`<span class="trainlead">· and workflows are paused — nothing will act until resumed</span>`]
-      : []),
-  ].join("");
-  // Hidden only if every stopped pull request on it was hidden: another one stopping shows it.
-  banDismissable(ban, "trainban", trainProblems(stops));
 }
 
 function openReview(repoId) {
@@ -4052,124 +3766,12 @@ function revMergeQueues(m) {
   };
 }
 
-// **Ask what is in flight.** Cheap by construction — `review::readings` is an in-memory map, no
-// disk and no GitHub — which is what lets this run on a timer at all while the queue behind it
-// stays on its 60s micro-cache (SKEIN-333).
-//
-// It reschedules ITSELF rather than running off a bare `setInterval`, so a pane nobody is looking
-// at stops asking, and two opens cannot leave two timers running.
-function revPollInFlight() {
-  if (revInFlightTimer) { clearTimeout(revInFlightTimer); revInFlightTimer = null; }
-  if (!view || view.mode !== "review") return;
-  fetch("/api/review/reading")
-    .then(r => r.ok ? r.json() : [])
-    .then(list => {
-      if (!view || view.mode !== "review") return;
-      const was = revInFlight;
-      revInFlight = new Map();
-      for (const r of list || []) revInFlight.set(`${r.repo_id}#${r.number}`, r);
-      // **The server has confirmed this reading is running**, which is what lets the branch below
-      // settle a wait when it stops (SKEIN-366). Without this mark the two would race: a press
-      // registers its own optimistic in-flight entry on the frame it happens, and a poll landing
-      // before the server had begun the reading would find the key "gone" and settle a read that
-      // has not started.
-      for (const [key, w] of revReadWaits) if (revInFlight.has(key)) w.seen = true;
-      // **A reading that was in flight and is not any more has LANDED.** That is the moment the row
-      // has something new to say, and the moment the page must fetch what it says: the result went
-      // to disk, not to the browser that asked, and a background read has no browser at all. Marked
-      // rather than announced with a toast, because the reader may be three rows away.
-      let landed = false;
-      for (const [key, r] of was) {
-        if (revInFlight.has(key)) continue;
-        landed = true;
-        // Asked BEFORE the delete below, and only then marked: the mark means a reading was
-        // replaced, and `revSums` is the only thing that knows whether there was one to replace.
-        // Dropping first and marking unconditionally is the same defect as the pump's, one line
-        // apart — a row skein read for the first time is not a row that changed while you were
-        // away.
-        if (revHasReading(key)) revUpdated.add(key);
-        // Drop what the page holds so the row re-reads it: the copy in `revSums` is the reading
-        // this one REPLACED. Only for a row nobody is mid-sentence in — `revSums` is what an open
-        // panel draws from.
-        revSums.delete(key);
-        const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
-        revFetchHeld(repo, number);
-        // **And if this page was waiting for that reading on the stream, it is not coming**
-        // (SKEIN-366). The stream is one connection and a client that falls behind it is told, not
-        // backfilled — so an event can be lost to a reconnect or a lagged subscriber, and a promise
-        // nobody settles is a stack run that never advances and a button that never comes back.
-        // `revFetchHeld` above is already fetching what the reading wrote, so this settles the
-        // bookkeeping and deliberately writes nothing over it.
-        //
-        // Only for a wait the server was seen holding: an unseen one may simply not have begun.
-        if (revReadWaits.get(key)?.seen) revReadSettle(key, null, "");
-      }
-      if (landed || was.size !== revInFlight.size) renderReview();
-      tickInFlight();
-    })
-    .catch(() => {})
-    .finally(() => {
-      if (!view || view.mode !== "review") return;
-      revInFlightTimer = setTimeout(revPollInFlight, REV_INFLIGHT_POLL_MS);
-    });
-}
-
-// The reading skein has just finished, off disk. `held=1` is a request to REMEMBER — it can never
-// spend a model call — which is what makes it safe to fire the moment a read lands, including a
-// read the pump started that nobody asked for.
-function revFetchHeld(repo, number) {
-  const key = repo + "#" + number;
-  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/summary?held=1`)
-    .then(r => r.ok ? r.json() : null)
-    .then(full => {
-      if (!full) return;
-      // Never over a reading that arrived while this was in flight, and never over a row that has
-      // gone back into flight since — a fresh press outranks a disk read every time.
-      if (revInFlight.has(key)) return;
-      const now = revSums.get(key);
-      if (now && now !== "…" && !now.thin) return;
-      revSums.set(key, full);
-      renderReviewNow();
-    })
-    .catch(() => {});
-}
-
-// **The counter ticks LOCALLY**, from the `started_ms` the server reported once — the owner's
-// constraint, in their words: "for the timer I hope you are counting locally and doing github
-// request once in a while only or on refresh."
-//
-// It rewrites text in place and never re-renders the pane. A row that repainted once a second
-// would take the caret out of a half-typed comment beside it (§6 rule 2), which is the same reason
-// `tickAges` works this way — and it carries its own class rather than reusing `.age`, because
-// `tickAges` rewrites EVERY `.age` in the document from `data-secs` and a borrowed class is how
-// the review rail's age column came to show "?" for ever (`tests/ui/rail.mjs` holds that line).
-function tickInFlight() {
-  for (const el of document.querySelectorAll(".revflight-secs")) {
-    const started = Number(el.dataset.started || 0);
-    if (!started) continue;
-    el.textContent = revElapsed(Date.now() - started);
-  }
-}
-setInterval(tickInFlight, 1000);
-
-// Elapsed, spelled the way somebody waiting reads it: seconds until a minute, then minutes and
-// seconds. Never "0s" — a reading that has just begun has still begun.
-function revElapsed(ms) {
-  const secs = Math.max(1, Math.round(ms / 1000));
-  if (secs < 60) return `${secs}s`;
-  const m = Math.floor(secs / 60), r = secs % 60;
-  return r ? `${m}m ${r}s` : `${m}m`;
-}
-
 function loadReview(force) {
   // Whatever is already known, on screen before the request goes out.
   revQueue = revSeen.get("*") || null;
   // A load somebody ASKED for starts the chase again: pressing refresh after giving up should not
   // inherit the exhausted counter and give up immediately.
   if (force) revStaleTries = 0;
-  // Whatever else this load does, start asking what is in flight — a reading somebody started
-  // before this page existed is still running, and the row must say so (SKEIN-333).
-  revPollInFlight();
   revLoading = true; renderReview();
   fetch(`/api/review${force ? "?force=1" : ""}`).then(async r => {
     const text = await r.text();
@@ -4179,29 +3781,8 @@ function loadReview(force) {
     revLoading = false;
     if (!revHeld) return;   // you left review while this was in flight
     const q = revMergeQueues(m);
-    // A summary is keyed to a head commit; when the branch moves, the old one describes code that
-    // is no longer there. Dropping it here is what makes a re-review actually get re-read.
-    for (const pr of q.prs || []) {
-      const held = revSums.get(rk(pr));
-      if (!held || held === "…") continue;
-      // A row that could not be REACHED is not a reading at all — asking again is the whole point,
-      // and this is the moment to allow it.
-      if (held.transient) { revSums.delete(rk(pr)); continue; }
-      // A reading of a commit that is no longer the head is KEPT, and marked. It used to be deleted
-      // here, which is what made the pump read the PR again on its own: a branch pushed to five
-      // times was read five times and none of those readings survived to be compared against.
-      //
-      // Keeping it is only safe because the row says so loudly — "AI may only add scrutiny, never
-      // remove it", and a stale reading shown as current would remove it. Re-reading is a click.
-      if (held.head_sha !== pr.head_sha) held.stale = true;
-    }
     revDecided.clear();   // the fresh rows carry their own truth; the in-place marks retire
     revQueue = q; revSeen.set("*", q); renderReview();
-    // **What skein already knows, before anything is asked for.** One request per repo, no model
-    // calls, no rules — see `loadKnownSummaries`. The pump runs after it, so it only ever asks for
-    // readings that do not exist yet.
-    for (const qq of q.queues) loadKnownSummaries(qq.repo_id);
-    loadWorkflows();
     // `fresh: false` means the server handed over its remembered copy and went to fetch the real
     // one. Ask again shortly — by then it is a cache hit, not another wait. Once: if the second ask
     // is still stale the fetch is genuinely slow, and hammering it would not make it faster.
@@ -4718,21 +4299,10 @@ function revRenderPane(force) {
       body += `<div class="cired">${red} of ${shown.length} are red — read it as one broken pipeline, not ${red} broken pull requests. Each row still says its own checks when opened.
         <button type="button" class="revchip" onclick="revSnoozeRed()" title="each returns on its own when its author pushes">set the red ones aside until they move</button></div>`;
     }
-    // A chip must be true of a MINORITY of rows — the design's own test, applied at render time
-    // because the model's tripwire flags turned out to fire on most rows ("behaviour" on 80% of a
-    // live queue), and four chips per row squeezed every title into an ellipsis. A kind worn by
-    // more than a third of the visible queue is texture, not signal: it leaves the collapsed rows
-    // (the expanded brief still carries everything), and what survives is capped at two.
-    revCommonChips = (() => {
-      const freq = new Map();
-      for (const p of shown) {
-        const s2 = revSums.get(rk(p));
-        const kinds = new Set((s2 && s2 !== "…" ? (s2.flags || []) : []));
-        if (revMoved(p)) kinds.add("moved");
-        for (const k of kinds) freq.set(k, (freq.get(k) || 0) + 1);
-      }
-      return new Set([...freq].filter(([, n]) => shown.length >= 3 && n > shown.length / 3).map(([k]) => k));
-    })();
+    // A chip must be true of a MINORITY of rows: when a whole wave of heads moved, the wave is the
+    // story, so `moved` leaves the collapsed rows once more than a third of the queue wears it.
+    revCommonChips = shown.length >= 3 && shown.filter(revMoved).length > shown.length / 3
+      ? new Set(["moved"]) : new Set();
     // Dependent chains collapse into one row each; their members never appear loose anywhere —
     // fifteen scattered rows that are one change is the wrong-review generator this exists for.
     // A live search dissolves the stacks: their aggregation hides exactly the row the searcher is
@@ -4768,24 +4338,17 @@ function revRenderPane(force) {
       // take a PR out of the lane its readiness put it in — AI adds scrutiny, never removes it. A
       // wrong promotion costs a glance; a wrong demotion costs a missed regression.
       //
-      // A stack takes the band of the step you would actually open, for the same reason it takes
-      // that step's AGE: both are questions about the next decision, not about the tip. It used to
-      // be a flat 1 — "unread" — which made the band incomparable across the two kinds of entry:
-      // a stack whose next step skein had read and flagged sank below every loose row, and one
-      // whose next step was routine floated above them. That also broke the order SKEIN-302 states,
-      // where unstacked pull requests sort by age BETWEEN the stacks.
+      // A stack sorts by the step you would actually open: its age is a question about the next
+      // decision, not about the tip.
       const entries = [
-        ...loose.map(p => ({ band: revReadBand(p), at: sortAt(p), key: rk(p), make: () => revRow(p) })),
+        ...loose.map(p => ({ at: sortAt(p), key: rk(p), make: () => revRow(p) })),
         ...laneStacks.map(st => {
           const next = revStackNext(st) || st.steps[0];
-          return { band: revReadBand(next), at: sortAt(next), key: revStackKey(st),
-                   make: () => revStackRow(st) };
+          return { at: sortAt(next), key: revStackKey(st), make: () => revStackRow(st) };
         }),
-      ].sort((a, b) => (lane === "yours" && a.band !== b.band)
-        ? a.band - b.band
-        : lane === "yours"
-          ? String(a.at).localeCompare(String(b.at))
-          : String(b.at).localeCompare(String(a.at)));
+      ].sort((a, b) => lane === "yours"
+        ? String(a.at).localeCompare(String(b.at))
+        : String(b.at).localeCompare(String(a.at)));
       // "N decisions from M pull requests": a stack is one entry point and several decisions in a
       // forced order — the heading says both, which is also how the badge (counting PRs) and the
       // pane (counting starts) stop disagreeing.
@@ -4826,8 +4389,6 @@ function revRenderPane(force) {
         onkeydown="if (event.key === 'Escape') { event.stopPropagation(); if (this.value) revSearchSet(''); else this.blur(); }">
       <span class="revspacer"></span>
       ${revScopeRepo() ? `<button type="button" class="revchip${revModsOpen ? " on" : ""}" onclick="toggleMods()">${revModsCount()}</button>` : ""}
-      <button type="button" class="revchip${revEdit ? " on" : ""}" onclick="toggleWorkflowEditor()">workflows</button>
-      ${revReadChip()}
       ${revQueue && revQueue.fresh === false
         ? `<span class="revage" title="These repos are showing the pull requests skein last read; it is fetching their current lists. The others are current — one slow repo does not stale the rest.">${
             esc((revQueue.staleRepos || []).map(r => `${r.repo_id} read ${revAgo(r.as_of)}`).join(", "))} · ${
@@ -4836,7 +4397,7 @@ function revRenderPane(force) {
               : "refreshing"}</span>`
         : ""}
       <button type="button" class="revchip" onclick="loadReview(true)">${revLoading ? "refreshing…" : "refresh"}</button>
-    </div>${revModsHtml()}${revEditHtml()}${body}</div>`;
+    </div>${revModsHtml()}${body}</div>`;
   revFlash = "";   // the hand-off flash is one render's worth of saying so, not a state
 }
 
@@ -4980,19 +4541,12 @@ function writeModule(path) {
 // The answer to a press on the notes panel, painted NOW — while the panel is still what the reader
 // is looking at (SKEIN-422).
 //
-// Same defect and same shape as `revComposePaint` (SKEIN-416), which this is the third instance of:
 // `writeModule` ended both its arms in `renderReview`, and §6 rule 2 holds that render while the
 // pane owns a caret or a live selection. So "writing…" could sit on the chip after the note had
 // landed, and the row's state dot stayed on the old answer until the reader's hands moved.
 // `loadModules` is here too rather than only in the arm that calls it: `toggleMods` opens the panel
 // on "looking at the repo…", and that sentence is replaced by the list on exactly the same render.
 // That press already forces, so painting its answer takes no caret the press had not taken.
-//
-// **What "still on screen" means here, and why it is not the composer's test.** `revComposePaint`
-// compares `revComposing === c` because a composer is an object a press captures. A module note has
-// no such object — every chip in the panel is drawn from `revMods`, and the answer changes the
-// whole panel — so the thing to ask about is the PANEL, and the panel is on screen when two things
-// hold:
 //
 // `revModsOpen` is that question: `revModsHtml` returns "" when it is false, so with the panel shut
 // there is no element anywhere on the page that this answer would change, and forcing a render
@@ -5038,1050 +4592,12 @@ function revModsHtml() {
   </div>`;
 }
 
-// Summaries are fetched for the lane you are working — Needs you — and nowhere else. A PR you have
-// already decided on does not need explaining, and one you set aside explicitly does not either.
-// Nothing is fetched at all when AI is off: the answer would be the same "unread" thirty times over,
-// and the pane says it once instead.
-// Every reading skein already holds for this repo, in one request.
-//
-// This is the fix for "I can only see 2 PRs with summaries while before there were a bunch". The
-// pane used to discover an existing reading only by asking for one pull request at a time, through
-// the same call that COMPUTES one — so every limit meant to bound spending also bounded remembering:
-// a draft's reading was hidden, an unsettled branch's was hidden, a row past the sixth was hidden
-// because the loop stops when the allowance is gone. None of those are reasons to forget something
-// skein has already paid for.
-//
-// Reading from disk is free, so this asks for all of it at once and applies no rules. The pump then
-// asks for what is MISSING, and keeps every limit it had.
-function loadKnownSummaries(id) {
-  // What this page knows about the disk is in flight again, so read-ahead waits for it (SKEIN-704).
-  revKnownHeard.delete(id);
-  // **`?rows=1`: the row shape.** A collapsed row draws the line, the flags, the depth and whether a
-  // review is drafted — and the payload was sending the whole brief, the signals, the ownership and
-  // the entire drafted review for every pull request in the repo. Measured on the owner's fleet
-  // (SKEIN-287): 153,381 bytes for thirty-nine readings, reproduced locally at 155,167 against
-  // 12,055 for the same set. The prose comes back when a row is opened, one row at a time, off disk
-  // (`revLoadReading`).
-  //
-  // It is not only the bytes. That response occupies one of the browser's per-origin connections
-  // for as long as it takes, so everything the reader presses meanwhile queues behind it — which is
-  // how a four-millisecond disk read came to look like minutes (SKEIN-286).
-  fetch(`/api/repos/${encodeURIComponent(id)}/review/summaries?rows=1`)
-    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-    .then(known => {
-      // Recorded before the guard below, because it is a fact about the request rather than about
-      // the pane: this load has heard what is on disk for this repo, whether or not anyone is
-      // looking at the answer.
-      revKnownHeard.add(id);
-      if (!revHeld) return;
-      for (const [number, s] of Object.entries(known || {})) {
-        s.thin = true;   // the page's own mark: this reading knows less than the one on disk
-        const key = id + "#" + Number(number);
-        // A row that has already fetched its prose is never replaced by the thin shape for the same
-        // head: the thin one knows strictly less about the same reading, and overwriting would
-        // empty an expanded row behind the reader.
-        // **A row being read RIGHT NOW is never written to.** This is the defect the owner reported
-        // again and again as "reread doesn't produce a new review": the guards below were written
-        // to skip rows holding real readings, and treated the in-flight marker as worthless data
-        // safe to replace — so this refresh, which fires every few seconds, put the OLD reading
-        // back four seconds into a thirty-five-second model call and left it there. The press was
-        // working the whole time and had nothing on screen to show for it (SKEIN-333).
-        //
-        // First, and on its own line, because it is not a refinement of the two guards under it:
-        // those ask "is what the page holds better than what disk says", and this asks a different
-        // question — is skein still buying the answer.
-        if (revInFlight.has(key)) continue;
-        const has = revSums.get(key);
-        if (has && has !== "…" && !has.thin && has.head_sha === s.head_sha) continue;
-        // A reading the page already has for THIS head is not replaced, whole: it may be one that
-        // has just landed from a forced re-read, and the copy on disk is the older answer.
-        //
-        // It used to be replaced in PART — the page's reading kept, the disk's `critique` and
-        // `has_critique` grafted onto it — because `/review/:n/summary` answered a bare summary and
-        // a row read by the pump therefore wore no chip however many reviews were drafted in the
-        // same model call (SKEIN-243). The route answers `review::known_at` now (SKEIN-236), so
-        // every reading carries the draft that was made with it and the graft has nothing left to
-        // add. It is gone rather than left harmless, because two places deciding what "the draft at
-        // THIS head" means is how they come to disagree.
-        const held = revSums.get(key);
-        if (held && held !== "…" && !held.stale && !held.transient) continue;
-        // A reading replaced here is a DIFFERENT reading, and this merge cannot say which queue it
-        // was built from — the fact rides on `review::ReadingDone`, and nothing on this route
-        // carries it. So the note goes with the reading it was about rather than being inherited by
-        // the one taking its place: silence means "not known", and a page that let a remembered
-        // queue's mark slide onto somebody else's reading would be making the claim up.
-        revReadFrom.delete(key);
-        revSums.set(key, s);
-      }
-      renderReview();
-      // Only now. Anything still missing is genuinely unread, which is what the limits are for.
-      revPumpSummaries();
-    })
-    // A failure is an answer for this purpose: the page will not learn what is on disk by waiting
-    // longer, and a pump held shut for ever is worse than one that reads a row a second time.
-    .catch(() => { revKnownHeard.add(id); if (revHeld) revPumpSummaries(); });
-}
-
-// The prose behind a thinned row, fetched when the row is opened (SKEIN-287).
-//
-// **`?held=1`, which is a request to REMEMBER and never to analyse.** The route's default computes
-// — it is the read button's route — and expanding a row must not be able to spend a model call, on
-// any head, at any hour of the budget. `held=1` answers `review::held`, which is `review::known`
-// for one pull request: the reading on disk, the drafted review beside it, and the `stale` mark
-// when what skein holds is of an earlier commit. That last case is why this is not a plain
-// re-fetch of the summary route — its cache lookup is keyed on the current head, so a deliberately
-// kept older reading would come back unread.
-//
-// In flight the row keeps the thin reading it already has, so the line it was showing does not
-// blink; it gains `waiting`, which is what `revDetail` draws its "…" from.
-function revLoadReading(repo, number) {
-  const key = repo + "#" + number;
-  // A reading is being bought for this row; the copy on disk is the one it replaces (SKEIN-333).
-  if (revInFlight.has(key)) return;
-  const s = revSums.get(key);
-  if (!s || s === "…" || !s.thin || s.waiting) return;
-  s.waiting = true;
-  fetch(`/api/repos/${encodeURIComponent(repo)}/review/${number}/summary?held=1`)
-    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-    .then(full => {
-      if (!revHeld) return;
-      // Only if the row has not moved on: a forced re-read landing while this was in flight is the
-      // newer answer, and a reading off disk must never overwrite one somebody just paid for.
-      const now = revSums.get(key);
-      if (now && now !== "…" && !now.thin) return;
-      revSums.set(key, full);
-      renderReviewNow();
-    })
-    .catch(e => {
-      if (!revHeld) return;
-      const now = revSums.get(key);
-      // The row keeps its line and stops claiming a fetch is coming. `waiting` is cleared rather
-      // than left set, or the row would sit on "…" for ever with nothing to retry it: opening the
-      // row again asks again.
-      if (now && now !== "…") { now.waiting = false; now.prose_failed = String(e.message || e).split("\n")[0]; }
-      renderReviewNow();
-    });
-}
-
-// What workflows exist, and what each pull request's is doing. Cheap: it reads the cached queue and
-// skein's own files, and touches GitHub only when the queue cache has aged out.
-function loadWorkflows() {
-  if (!revHeld || !revQueue) return;
-  for (const qq of revQueue.queues || []) {
-    const id = qq.repo_id;
-    fetch(`/api/repos/${encodeURIComponent(id)}/workflows`)
-      .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-      .then(w => {
-        if (!revHeld) return;
-        // The payload names the fleet switch too; keeping `revFlowsOn` on the freshest answer is
-        // what lets the train panel and banner say "paused" without a request of their own.
-        if (w.enabled !== undefined) { revFlowsOn = !!w.enabled; revFlowsHeld = w.held || null; }
-        revFlows.set(id, w);
-        renderReview();
-        // This payload is where `read_prs` arrives, and the pump reads nothing in a repo whose
-        // consent it has not seen (`revReadsAhead`). Without this the ORDER decides: the queue and
-        // the known readings land first, the pump runs against an empty `revFlows`, finds nothing
-        // it is allowed to read, and never asks again — the whole feature switched off by a race.
-        revPumpSummaries();
-      })
-      // A workflow file with a typo in it answers 502 here, and the row says so — see `revFlowBox`.
-      .catch(e => { if (revHeld) { revFlows.set(id, { error: String(e.message || e).split("\n")[0] }); renderReview(); } });
-  }
-}
-
-// Put a workflow on one pull request, take it off, or let the rules decide again.
-function revSetWorkflow(repo, number, choice) {
-  // Three answers, not two: a name, the empty string (excluded by hand — no rule may claim it), and
-  // "let the rules decide", which forgets the choice. See `prwork::Carries`.
-  const body = choice === "__rules" ? { unassign: true } : { name: choice };
-  revWorkflowPost(repo, number, body);
-}
-
-// Let a stopped workflow run again. Deliberately not bundled with the picker: a person clearing a
-// stop is saying "I fixed it", not "change what governs this".
-function revClearStop(repo, number) { revWorkflowPost(repo, number, { clear_stop: true }); }
-
-function revWorkflowPost(id, number, body) {
-  if (!id) return;
-  fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/workflow`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  })
-    .then(r => r.json())
-    .then(d => { if (!d.ok) notice(d.error || "that did not stick"); loadWorkflows(); })
-    .catch(e => notice(`that did not stick: ${failText(e)}`));
-}
-
-// Whether skein reads this repo's pull requests on its own.
-//
-// Per repo, off until somebody says so, and shown where the queue is rather than in a settings page:
-// this is the switch that decides whether skein spends model calls on its own, and the person
-// deciding is looking at the queue it would spend them on.
-//
-// "On its own" covers BOTH readers — the ten-minute background pass and this pane's own pump — and
-// nothing else. It used to cover only the background one, so the OFF branch of the sentence below
-// was false: open the pane and every row was read anyway, and charged (SKEIN-242). It is one rule
-// now, enforced at the model call (`review::unasked_scope`), and the sentence is true again.
-// The repos this view is speaking about, and which of them have answered about read-ahead.
-//
-// `read_prs` is per-repo consent and stays per-repo. What was wrong (SKEIN-282) was not the shape
-// of the consent but the shape of the CONTROL: it only existed in a view narrowed to one repo, so
-// on the merged queue — where every repo on the owner's fleet had it off — the pane showed a queue
-// nothing would ever be read in and offered nothing that would change that, unless you already
-// knew to narrow first. A control you have to know about before you can find it is a control the
-// person who needs it does not have.
-function revReadScope() {
-  const one = revScopeRepo();
-  const ids = one ? [one] : ((revQueue && revQueue.queues) || []).map(q => q.repo_id);
-  const known = ids.filter(id => (revFlows.get(id) || {}).read_prs !== undefined);
-  return { known, on: known.filter(id => revFlows.get(id).read_prs) };
-}
-
-function revReadChip() {
-  const { known, on } = revReadScope();
-  if (!known.length) return "";
-  const all = on.length === known.length;
-  // One repo — the narrowed view, and the sentence can name it.
-  if (known.length === 1) {
-    return `<button type="button" class="revchip${all ? " on" : ""}"
-      title="${all
-        ? "skein reads this repo on its own: the pull requests somebody asked you to review, and the ones you opened. One unit of the day's budget each, and nothing else here is read."
-        : "skein reads nothing here on its own. Press read it on any row — a read you ask for is never refused."}"
-      onclick="revSetReadingFor(${esc(JSON.stringify(known[0]))}, ${!all})">read ahead${all ? " · on" : ""}</button>`;
-  }
-  // The whole fleet. The COUNT is the point: "0 of 9" is the pane saying, on the screen you are
-  // already looking at, that nothing here will ever be read on its own — which is the thing the
-  // narrowed-only chip could not say. It is still per-repo consent underneath; this presses it
-  // once for each, and says how many it is about to change.
-  const off = known.length - on.length;
-  return `<button type="button" class="revchip${all ? " on" : ""}"
-    title="${all
-      ? `skein reads all ${known.length} of these repos on its own: the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each. Press to switch every one off.`
-      : `skein reads nothing on its own in ${off} of these ${known.length} repos, so those rows stay unread however long you leave this open. Press to switch read-ahead on for all ${known.length} — the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each. A read you ask for is never counted.`}"
-    onclick="revSetReadingAll(${!all})">read ahead · ${on.length} of ${known.length}</button>`;
-}
-
-// **One repo, and the only place this consent is posted.** Every affordance for it — the head
-// chip in either form, and the unread row's own sentence — is a caller, so there is one rule for
-// what switching it on means and one place a refusal is reported from.
-//
-// It takes the repo rather than reading the view, which is what let the control exist only where
-// the view happened to be narrowed (SKEIN-282). A row knows its own repo; the head chip knows the
-// ones it is counting.
-function revSetReadingFor(id, on) {
-  if (!id) return Promise.resolve(false);
-  return fetch(`/api/repos/${encodeURIComponent(id)}/reading`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on }),
-  })
-    .then(r => r.json())
-    .then(d => {
-      if (!d.ok) { notice(d.error || "that did not stick"); return false; }
-      toast(on
-        ? `skein will read the pull requests waiting on you in ${id}, and the ones you opened`
-        : `skein will not read anything in ${id} unless you ask`);
-      // `loadWorkflows` carries the new answer back, and pumps: switching read-ahead ON fills the
-      // repo in from the pane you are looking at, rather than at the next background tick.
-      loadWorkflows();
-      return true;
-    })
-    .catch(e => { notice(`that did not stick: ${failText(e)}`); return false; });
-}
-
-// Every repo the merged queue is showing, in one press.
-//
-// Not a fleet-wide setting: it is the per-repo consent, posted once per repo, and the pane says so
-// by counting. A repo that refuses is reported by `revSetReadingFor` on its own, and the ones that
-// took still took — a partial answer is the honest one here, and the chip's own count is what says
-// where it got to.
-function revSetReadingAll(on) {
-  const { known } = revReadScope();
-  const want = known.filter(id => !!(revFlows.get(id) || {}).read_prs !== on);
-  if (!want.length) return;
-  toast(on
-    ? `switching read-ahead on for ${want.length} repo${want.length === 1 ? "" : "s"}`
-    : `switching read-ahead off for ${want.length} repo${want.length === 1 ? "" : "s"}`);
-  for (const id of want) revSetReadingFor(id, on);
-}
-
-// ---------- the workflow editor ----------
-//
-// Workflows merge pull requests, so the thing that writes one has two jobs: make the vocabulary
-// visible — every word skein knows, offered rather than remembered — and make it impossible to
-// build a workflow the parser will refuse. Both come from the same tables the parser reads, served
-// by `/api/workflows`, because a picker with its own idea of the vocabulary is a workflow somebody
-// builds in the UI and cannot save.
-let revEdit = null;        // { workflow: [...] } while open, null while closed
-let revVocab = null;       // { conditions: [Word], actions: [Word] }
-let revEditSaying = "";    // the server's last refusal, shown as it came
-
-function toggleWorkflowEditor() {
-  if (revEdit) { revEdit = null; renderReview(); return; }
-  fetch("/api/workflows")
-    .then(r => r.json())
-    .then(d => {
-      revVocab = { conditions: d.conditions || [], actions: d.actions || [] };
-      // A file skein cannot read is NOT loaded into the editor as an empty list. Somebody who has
-      // not seen what is there cannot mean to replace it, and saving would do exactly that.
-      revEditSaying = d.error || "";
-      revEdit = d.error ? null : { workflow: d.workflow || [] };
-      if (d.error) toast("the workflow file has a problem — fix it before editing here");
-      renderReview();
-    })
-    .catch(e => notice(`could not read the workflows: ${failText(e)}`));
-}
-
-// Every word, from the server, so the page never invents one.
-const revWords = kind => (revVocab && revVocab[kind]) || [];
-
-// One condition or action, as a kind and — where the word takes one — its argument.
-//
-// `where` is the path to the thing being edited: the workflow, the step (-1 for the workflow's own
-// rule) and the position (-1 for a step's action). Passing a path rather than binding a closure is
-// what lets these be plain inline handlers, which is how the rest of this page is written.
-function revAtom(kind, value, where) {
-  const words = revWords(kind);
-  const [head, ...rest] = String(value || "").split(":");
-  const arg = rest.join(":");
-  // A word whose argument is part of the word itself (`update-branch:rebase`) is offered whole.
-  const whole = words.filter(w => !w.arg && w.spelling.includes(":"));
-  const simple = words.filter(w => !w.arg && !w.spelling.includes(":"));
-  const taking = words.filter(w => w.arg);
-  const opt = (v, label, on) => `<option value="${esc(v)}"${on ? " selected" : ""}>${esc(label)}</option>`;
-  const chosen = whole.find(w => w.spelling === value) ? value : head;
-  const picker = `<select aria-label="${kind === "conditions" ? "Condition" : "Action"}"
-      onchange="revEditWord(${esc(JSON.stringify(where))}, this.value)">${
-    [...simple.map(w => opt(w.kind, w.kind, chosen === w.kind)),
-     ...whole.map(w => opt(w.spelling, w.spelling, chosen === w.spelling)),
-     ...taking.map(w => opt(w.kind, `${w.kind}:…`, chosen === w.kind))].join("")
-  }</select>`;
-  const word = taking.find(w => w.kind === head);
-  if (!word) return picker;
-  // A closed set is offered as a set. Free text gets a box with the argument's name in it, so
-  // `add-label:` shows "name" rather than an empty rectangle nobody knows what to type into.
-  const box = word.choices && word.choices.length
-    ? `<select aria-label="Value" onchange="revEditArg(${esc(JSON.stringify(where))}, this.value)">${
-        word.choices.map(c => opt(c, c, arg === c)).join("")}</select>`
-    : `<input aria-label="Value" placeholder="${esc(word.arg)}" value="${esc(arg)}"
-         onchange="revEditArg(${esc(JSON.stringify(where))}, this.value)">`;
-  return picker + box;
-}
-
-// Where in the file a path points. `w.s.c` — workflow, step (-1 = the workflow's own rule),
-// condition (-1 = the step's action).
-function revAt(where) {
-  const [w, st, c] = String(where).split(".").map(Number);
-  const flow = revEdit.workflow[w];
-  return { flow, st, c, list: st < 0 ? flow.matches : flow.steps[st].when };
-}
-
-function revEditWord(where, kind) {
-  const { flow, st, c, list } = revAt(where);
-  // Changing the kind drops the old argument rather than carrying it: `label:ci` becoming
-  // `checks:ci` is not a thing anybody meant, and it would not parse.
-  const word = revWords(c < 0 ? "actions" : "conditions").find(x => x.kind === kind || x.spelling === kind);
-  const next = word && word.arg
-    ? `${word.kind}:${(word.choices && word.choices[0]) || ""}`
-    : (word ? word.spelling.replace(/<.*>/, "") : kind);
-  if (c < 0) flow.steps[st].do = next; else list[c] = next;
-  renderReview();
-}
-
-// **No re-render.** Changing a value does not change the SHAPE of the form: the box already shows
-// what was typed, and redrawing it would throw away the caret — and, worse, lose the very click that
-// caused the blur that fired this. That is not hypothetical: it is why the first attempt at "type a
-// name, then press + step" added no step. Only structural changes redraw.
-function revEditArg(where, arg) {
-  const { flow, st, c, list } = revAt(where);
-  const at = c < 0 ? flow.steps[st].do : list[c];
-  const head = String(at).split(":")[0];
-  const next = `${head}:${arg}`;
-  if (c < 0) flow.steps[st].do = next; else list[c] = next;
-}
-
-function revEditAddCond(w, st) {
-  const flow = revEdit.workflow[w];
-  (st < 0 ? flow.matches : flow.steps[st].when).push("approved");
-  renderReview();
-}
-function revEditDelCond(w, st, c) {
-  const flow = revEdit.workflow[w];
-  (st < 0 ? flow.matches : flow.steps[st].when).splice(c, 1);
-  renderReview();
-}
-function revEditAddStep(w) {
-  revEdit.workflow[w].steps.push({ when: ["approved"], do: "flag:look at this" });
-  renderReview();
-}
-function revEditDelStep(w, st) { revEdit.workflow[w].steps.splice(st, 1); renderReview(); }
-// Order is not decoration: the FIRST step that applies is the one that happens, so moving a step is
-// changing what the workflow does.
-function revEditMoveStep(w, st, by) {
-  const steps = revEdit.workflow[w].steps;
-  const to = st + by;
-  if (to < 0 || to >= steps.length) return;
-  [steps[st], steps[to]] = [steps[to], steps[st]];
-  renderReview();
-}
-function revEditAddFlow() {
-  revEdit.workflow.push({ name: `workflow-${revEdit.workflow.length + 1}`, matches: [], steps: [] });
-  renderReview();
-}
-// One at a time — `Workflow::serial` (SKEIN-248). No initialiser beside it in `revEditAddFlow`, and
-// that is deliberate rather than an omission: `WrittenFlow::serial` is `#[serde(default)]` and is
-// always serialised, so a third statement of "a new workflow is not a train" would be a fact kept
-// in three places and testable in none. What was missing was never the field — it was this.
-function revEditSerial(w, on) { revEdit.workflow[w].serial = !!on; renderReview(); }
-function revEditDelFlow(w) { revEdit.workflow.splice(w, 1); renderReview(); }
-// Same: the input holds the name, so redrawing it would only take the caret away — see `revEditArg`.
-function revEditName(w, name) { revEdit.workflow[w].name = name; }
-
-function revEditSave() {
-  fetch("/api/workflows", {
-    method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workflow: revEdit.workflow }),
-  })
-    .then(r => r.json())
-    .then(d => {
-      // The answer can land after the editor was closed, and setting `revEdit` then would open it
-      // again — so the next press of "workflows", meant to open it, closed it (SKEIN-1271). The
-      // save happened either way; what an answer may not do is reopen what the person closed. A
-      // refusal with the editor shut is said in a notice, because `revEditSaying` with no editor
-      // reads as "the workflow file could not be read", which is not what went wrong.
-      const open = revEdit !== null;
-      if (open) revEditSaying = d.ok ? "" : (d.error || "that did not save");
-      if (d.ok) {
-        if (open) revEdit = { workflow: d.workflow || [] };   // what skein will read back, not what was sent
-        toast("workflows saved");
-        loadWorkflows();
-      } else if (!open) {
-        notice(`workflows not saved: ${d.error || "that did not save"}`);
-      }
-      renderReview();
-    })
-    .catch(e => notice(`workflows not saved: ${failText(e)}`));
-}
-
-function revEditHtml() {
-  if (!revEdit) {
-    return revEditSaying
-      ? `<div class="revmods"><div class="revfail"><b>the workflow file could not be read</b>
-          <div>${esc(revEditSaying)}</div>
-          <div class="dim">Nothing is running, and this editor will not save over a file it could not show you.</div>
-        </div></div>`
-      : "";
-  }
-  const flows = revEdit.workflow.map((flow, w) => {
-    const rule = (flow.matches || []).map((c, i) => `<span class="revstep-atom">${revAtom("conditions", c, `${w}.-1.${i}`)}
-        <button type="button" class="revx" title="remove" onclick="revEditDelCond(${w}, -1, ${i})">×</button></span>`).join("");
-    const steps = (flow.steps || []).map((st, i) => `<div class="revstep">
-        <span class="revstep-n">${i + 1}</span>
-        <div class="revstep-body">
-          <div class="revstep-line"><span class="revstep-lbl">when</span>${
-            (st.when || []).map((c, ci) => `<span class="revstep-atom">${revAtom("conditions", c, `${w}.${i}.${ci}`)}
-              <button type="button" class="revx" title="remove" onclick="revEditDelCond(${w}, ${i}, ${ci})">×</button></span>`).join("")
-          }<button type="button" class="revchip" onclick="revEditAddCond(${w}, ${i})">+ and</button>
-          ${(st.when || []).length ? "" : `<span class="dim">anything</span>`}</div>
-          <div class="revstep-line"><span class="revstep-lbl">do</span>${revAtom("actions", st.do, `${w}.${i}.-1`)}</div>
-        </div>
-        <div class="revstep-move">
-          <button type="button" class="revx" title="earlier" onclick="revEditMoveStep(${w}, ${i}, -1)">↑</button>
-          <button type="button" class="revx" title="later" onclick="revEditMoveStep(${w}, ${i}, 1)">↓</button>
-          <button type="button" class="revx" title="remove step" onclick="revEditDelStep(${w}, ${i})">×</button>
-        </div>
-      </div>`).join("");
-    // **One at a time** — `Workflow::serial`, and the whole of what makes a merge train a train
-    // (SKEIN-248). It rode the editor's payload and had no control anywhere in the page, so a train
-    // could not be built here, or un-set: existing ones survived only because the editor round-trips
-    // the object opaquely. Named for what it DOES rather than for the field, because "serial" is
-    // the file's word and "one at a time" is the reader's.
-    const serial = !!flow.serial;
-    return `<div class="revflow-edit">
-      <div class="revflow-edit-head">
-        <input aria-label="Workflow name" value="${esc(flow.name || "")}" onchange="revEditName(${w}, this.value)">
-        <button type="button" class="revchip${serial ? " on" : ""}" onclick="revEditSerial(${w}, ${!serial})"
-          title="${serial
-            ? "a merge train: this workflow's pull requests act oldest-first, one per pass, and everyone behind the front waits. A stopped front is passed over rather than blocking the rest."
-            : "every pull request carrying this workflow acts in the same pass — which means each merge re-runs CI on all of its siblings. Switch on for a merge train: oldest first, one at a time."}"
-          >one at a time${serial ? " · on" : ""}</button>
-        <span class="revspacer"></span>
-        <button type="button" class="revchip" onclick="revEditDelFlow(${w})">delete workflow</button>
-      </div>
-      <div class="revstep-line"><span class="revstep-lbl">runs on</span>${rule}
-        <button type="button" class="revchip" onclick="revEditAddCond(${w}, -1)">+ rule</button>
-        ${(flow.matches || []).length ? "" : `<span class="dim">nothing on its own — assign it to a pull request</span>`}</div>
-      ${steps}
-      <button type="button" class="revchip" onclick="revEditAddStep(${w})">+ step</button>
-    </div>`;
-  }).join("");
-  // Said where the steps are, not in a settings page: the first step that applies is the one that
-  // happens, and somebody dragging a step up is changing the workflow's meaning.
-  //
-  // The train panel rides at the top of the same pane: the person editing what the train DOES and
-  // the person watching what it IS DOING are the same person, arriving by the same button.
-  return `<div class="revmods">
-    ${revTrainHtml()}
-    <div class="dim">The first step whose conditions all hold is the one that happens, one per pass.</div>
-    ${flows}
-    ${revEditSaying ? `<div class="revfail"><b>not saved</b><div>${esc(revEditSaying)}</div></div>` : ""}
-    <div class="revflow-edit-foot">
-      <button type="button" class="revchip" onclick="revEditAddFlow()">+ workflow</button>
-      <span class="revspacer"></span>
-      <button type="button" class="revchip go" onclick="revEditSave()">save</button>
-    </div>
-  </div>`;
-}
-
-// ---------- the merge train, watched ----------
-//
-// The owner is automating merges and asked for exactly two things: "I need to know exactly what is
-// it working on, which step is it on, status of previous steps" — and "I should be able to pause it
-// or resume it at any point". So the workflows pane opens with this panel: the engine's one switch
-// with its one button, and per repo each serial workflow's train — the front PR with its step
-// spelled out, the whole line in train order, every stop with its reason and the same
-// let-it-run-again button the row has, and each PR's journal of what already happened.
-//
-// Drawn from what the pane already fetches: `revFlows`, one GET /api/repos/:id/workflows per repo,
-// whose payload a new-enough server extends with `trains` per repo and `journal` per PR. An older
-// server sends neither, and the panel says what standing alone can — no crash, no invented front.
-let revTrainOpen = new Set();   // "repo#number" whose journal timeline is unfolded in the panel
-// The fleet's workflow switch as the server last SAID it — from GET /api/workflows after a
-// pause/resume, or from the per-repo payloads as they land. null = never heard. The pause button
-// paints from this, never from its own click.
-let revFlowsOn = null;
-// The variable holding the fleet's switch off, when one is (`$SKEIN_PR_WORKFLOWS=off`). Resume
-// cannot get past it, so the panel names it instead of offering the press.
-let revFlowsHeld = null;
-
-// Is the switch known to be off? Read from what is already on hand, never a request of its own:
-// the train banner asks this on every counts poll.
-function revTrainPaused() {
-  if (revFlowsOn !== null) return !revFlowsOn;
-  for (const f of revFlows.values()) if (f && f.enabled !== undefined) return f.enabled === false;
-  return false;
-}
-
-// Pause or resume everything. One fleet-wide switch (`pr_workflows`) rather than per-train levers:
-// the engine re-reads it every sweep and there is no mid-step to interrupt, so flipping it takes
-// effect at once. The POST carries ONLY the flipped field — /api/settings merges — and the repaint
-// comes from re-reading GET /api/workflows: the panel shows what the server says the switch is,
-// never what the click hoped.
-function revTrainToggle(on) {
-  fetch("/api/settings", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pr_workflows: !!on }),
-  })
-    .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-    .then(() => fetch("/api/workflows"))
-    .then(r => r.json())
-    .then(d => {
-      revFlowsOn = !!d.enabled;
-      revFlowsHeld = d.held || null;
-      toast(revFlowsOn ? "workflows resumed"
-        : on && revFlowsHeld ? `still paused: $${revFlowsHeld}=off holds it — remove it where skein-server starts`
-        : "workflows paused — nothing will act");
-      loadWorkflows();          // the per-repo payloads carry `enabled` too; keep them agreeing
-      renderReview();
-    })
-    .catch(e => toast(String(e.message || e).split("\n")[0]));
-}
-
-// A number in the panel is one click into that pull request's row in the queue — the same open the
-// banner's repo click uses, plus the row expansion the row's own click would do.
-function revTrainGo(id, number) {
-  openReview(id);
-  const key = id + "#" + number;
-  if (!revOpen.has(key)) toggleRevRow(key);
-}
-
-function revTrainLog(key) {
-  if (!revTrainOpen.delete(key)) revTrainOpen.add(key);
-  renderReviewNow();
-}
-
-// `#123`, clickable. Same esc-into-onclick pattern as the banner's repo button.
-function revTrainNumBtn(id, n) {
-  return `<button type="button" class="trainnum" onclick="revTrainGo(${esc(JSON.stringify(id))}, ${Number(n)})" title="open #${Number(n)} in the queue">#${Number(n)}</button>`;
-}
-
-// The queue's title for a PR, when the queue has it loaded; the panel must not fetch for one.
-function revTrainTitle(id, n) {
-  const pr = ((revQueue && revQueue.prs) || []).find(p => p.repo_id === id && p.number === Number(n));
-  return (pr && pr.title) || "";
-}
-
-// When, in the queue's own relative vocabulary — `revAge` is the pane's age helper, and the
-// journal's epoch stamp only needs dressing as an ISO date to use it.
-function revTrainWhen(ms) {
-  return revAge(new Date(ms || 0).toISOString()).label || "now";
-}
-
-// One pull request's timeline, oldest first exactly as the server sends it. A "cleared" entry is a
-// person's act — the hand that let the train move again — and reads as one.
-function revTrainJournal(log) {
-  if (!log || !log.length) return `<div class="revtrain-log"><span class="dim">no history recorded yet</span></div>`;
-  return `<div class="revtrain-log">${log.map(e => `<div class="${esc(e.kind)}">
-      <span class="when">${esc(revTrainWhen(e.at_ms))}</span>
-      <span class="kind">${esc(e.kind === "cleared" ? "cleared by hand" : e.kind)}</span>
-      <span>${esc(e.what || "")}</span>
-    </div>`).join("")}</div>`;
-}
-
-// An older server sends no `trains`. Standing still says which pull requests each workflow carries,
-// and the train's own order is lowest-number-first — so the panel degrades to that list, claiming
-// no front it was not told (no `front` key at all, which is how `revTrainLine` knows not to guess).
-function revTrainsFromStanding(prs) {
-  const byFlow = new Map();
-  for (const [n, st] of Object.entries(prs || {})) {
-    if (!st || !st.workflow) continue;
-    // A HELD pull request keeps its `workflow` on purpose — the row must still say which workflow
-    // somebody chose — and is deliberately excluded from ACTING (`Carries::acting` against
-    // `Carries::name`), so the tick skips it. Drawn as a car it would be a promise of an act that
-    // will never be taken, and if it held the lowest number it would be drawn as the front while
-    // the tick's front was somebody else (SKEIN-279/326). This is the page's own fallback for a
-    // server that sends no `trains`; the route makes the same exclusion.
-    if (st.holding) continue;
-    if (!byFlow.has(st.workflow)) byFlow.set(st.workflow, []);
-    byFlow.get(st.workflow).push(Number(n));
-  }
-  return [...byFlow.entries()].map(([flow, line]) => ({
-    flow,
-    line: line.sort((a, b) => a - b),
-    stopped: line.filter(n => (prs[n] || {}).stopped).map(n => ({ number: n, why: prs[n].stopped })),
-  }));
-}
-
-// One train: what it is working on NOW, spelled out, then every car in order.
-function revTrainLine(id, tr, f) {
-  const prs = f.prs || {};
-  const st = n => prs[n] || { workflow: "", how: "", next: "", step: 0, stopped: "" };
-  const journalOf = n => st(n).journal || (f.journals || {})[n];
-  const front = "front" in tr ? tr.front : undefined;
-  const fs = front == null ? null : st(front);
-  const title = n => { const s = revTrainTitle(id, n); return s ? `<span class="revtrain-title">${esc(s)}</span>` : ""; };
-  // Three honest now-lines: a front (its step, from the same standing the row shows), a train
-  // whose every PR is stopped (the server said `front: null`), and an older server that never said
-  // (no `front` key — the panel claims nothing it was not told).
-  const now = front === undefined
-    ? ""
-    : front === null
-      ? `<div class="revtrain-now dim">nobody can move — the line is empty or everyone in it is stopped</div>`
-      : `<div class="revtrain-now">now: ${revTrainNumBtn(id, front)} ${title(front)} — ${
-          fs.next ? `step ${fs.step} — <code>${esc(fs.next)}</code>` : `waiting — nothing applies right now`}</div>`;
-  const stopsBy = new Map((tr.stopped || []).map(s => [Number(s.number), s.why]));
-  const cars = (tr.line || []).map((n, i) => {
-    const s = st(n);
-    const key = id + "#" + n;
-    const why = stopsBy.has(Number(n)) ? stopsBy.get(Number(n)) : s.stopped;
-    const doing = why ? `stopped — ${why}` : s.next ? String(s.next).split(":")[0] : "waiting";
-    const open = revTrainOpen.has(key);
-    return `<div class="revtrain-car${n === front ? " front" : ""}${why ? " stopped" : ""}">
-        <span class="revtrain-pos">${i + 1}</span>
-        ${revTrainNumBtn(id, n)}${n === front ? `<span class="revtag flow">front</span>` : ""}
-        ${title(n)}
-        <span class="revtrain-doing">${esc(doing)}</span>
-        ${why ? `<button type="button" class="revchip" onclick="revClearStop(${esc(JSON.stringify(id))}, ${Number(n)})">let it run again</button>` : ""}
-        <button type="button" class="revchip${open ? " on" : ""}" onclick="revTrainLog(${esc(JSON.stringify(key))})">history</button>
-      </div>${open ? revTrainJournal(journalOf(n)) : ""}`;
-  }).join("");
-  return `<div class="revtrain-flow">${esc(tr.flow)}</div>${now}${cars}`;
-}
-
-// One repo's trains. Nothing to show — no serial workflow carrying anything — is no section.
-function revTrainRepo(id, f) {
-  const trains = (f.trains !== undefined ? f.trains || [] : revTrainsFromStanding(f.prs))
-    .filter(tr => (tr.line || []).length);
-  if (!trains.length) return "";
-  return `<div class="revtrain-repo"><h5>${esc(id)}</h5>${trains.map(tr => revTrainLine(id, tr, f)).join("")}</div>`;
-}
-
-// The panel itself. Empty when no repo has a train to show — the editor is then the whole pane.
-function revTrainHtml() {
-  const sections = [...revFlows.entries()]
-    .filter(([, f]) => f && !f.error)
-    .map(([id, f]) => revTrainRepo(id, f))
-    .filter(Boolean);
-  if (!sections.length) return "";
-  const paused = revTrainPaused();
-  return `<div class="revtrain${paused ? " off" : ""}">
-    <div class="revtrain-state">
-      <span>merge train — ${paused ? "paused" : "running"}</span>
-      ${paused && revFlowsHeld
-        ? `<span class="revtrain-off">held off by <code>$${esc(revFlowsHeld)}</code> — nothing will act</span>`
-        : `<button type="button" class="revchip${paused ? " go" : ""}" onclick="revTrainToggle(${paused})">${paused ? "resume" : "pause"}</button>
-      ${paused ? `<span class="revtrain-off">paused — nothing will act</span>` : ""}`}
-    </div>
-    <div class="revtrain-body">${sections.join("")}</div>
-  </div>`;
-}
-
-// What this pull request's workflow is, in one word for the collapsed line.
-function revFlowChip(pr) {
-  const flows = revFlows.get(pr.repo_id);
-  const st = flows && flows.prs && flows.prs[pr.number];
-  if (!st || !st.workflow) return "";
-  if (st.stopped) {
-    return `<span class="revtag stopped" title="${esc(st.stopped)}">${esc(st.workflow)} · stopped</span>`;
-  }
-  // The verb only — "add-label", "merge" — because the row is scanned and the argument is detail.
-  const doing = st.next ? String(st.next).split(":")[0] : "";
-  // A held workflow has no next step and is not idle either (SKEIN-326): "nothing to do right now"
-  // on the hover of a pull request whose workflow is waiting on its own conditions is the same
-  // wrong sentence the expanded row used to print, one surface up.
-  const title = st.next ? `step ${st.step}: ${st.next}` : st.holding || "nothing to do right now";
-  return `<span class="revtag flow" title="${esc(title)}">${esc(st.workflow)}${doing ? ` · ${esc(doing)}` : ""}</span>`;
-}
-
-// Does skein read this repo's pull requests on its own? The owner's per-repo consent — off until
-// they switch it on, the "read ahead" chip beside the queue (`revReadChip`), `repos::Repo::read_prs`
-// on disk — carried on the workflows payload the pane already fetches for every repo in the queue
-// (`loadWorkflows`, answered by `api_workflows` in `src/bin/skein-server/workflows.rs`).
-//
-// Not answered yet, or the fetch failed, reads as OFF. The server refuses either way
-// (`review::unasked_scope`), so asking would buy nothing but a refusal painted on every row; and
-// `loadWorkflows` pumps again the moment an answer lands, so "off" here is never the last word.
-function revReadsAhead(id) {
-  const flows = revFlows.get(id);
-  return !!(flows && flows.read_prs);
-}
-
-// Is this a pull request skein reads on ITS OWN? The page's copy of `review::worth_reading` over
-// `review::worth_a_visit`, and the server is the authority: it asks the same question at the model
-// call, so a copy that drifts can only make the pane ask for a refusal — never spend anything the
-// server would not have spent.
-//
-// Two ways in, and being **mentioned** is not one of them — somebody talking about you is not a
-// request to read (SKEIN-242, which is how a mention came to cost the day's budget):
-//
-//   * somebody asked you to review it, personally or through a team, and it is your move;
-//   * **you opened it**, which puts it in the waiting lane and nowhere else (the `author == login`
-//     arm of the lane `if` in `build_pr`, `src/prq/node.rs`). This is SKEIN-277: the server has
-//     read and drafted authored rows since f69c611, on ONE merged model call, but the pane's own
-//     pump still said `lane === "needs-you"` — so the owner's own stack filled in only when the
-//     ten-minute background tick reached it, never from having the pane open in front of them.
-//
-// **Drafts are never read unasked**, whichever lane and whoever wrote them. A draft is the author
-// saying it is not finished, and spending a model call to describe something nobody has proposed
-// yet is the clearest case of work that was not asked for. The button in the expanded row still
-// reads one on request — the rule is about what happens on its own, not about what you can have.
-function revSkeinsToRead(p) {
-  if (p.draft) return false;
-  const rs = new Set((p.reasons || []).map(r => typeof r === "string" ? r : "team"));
-  const yours = rs.has("author");
-  const asked = rs.has("reviewer") || rs.has("reviewed") || rs.has("team");
-  if (p.lane === "needs-you") return asked || yours;
-  if (p.lane === "waiting") return yours;
-  // not-ready is its author still changing the answer; archived is you saying it will not move.
-  return false;
-}
-
-// Fill in the readings skein is allowed to make on its own.
-//
-// **The whole rule, in one sentence: if you pressed it, it is free and unconditional; if skein
-// decided to read it, that happens only in a repo you switched read-ahead on for, and it is
-// counted against the day.** This pump is the second half of that sentence — it is skein's
-// initiative, not yours, however present you are — so it obeys the same scope and pays from the
-// same ledger as the ten-minute background pass. Anything you touch is the first half: expanding a
-// row (`toggleRevRow`, `asked`), "read it" and "re-read" (`force`), none of them scoped and none of
-// them counted.
-function revPumpSummaries() {
-  if (!revQueue || !revQueue.ai) return;
-  // `revKnownHeard` first: skein reads ahead only where it has already heard what it holds
-  // (SKEIN-704). Nothing is lost by waiting: `loadKnownSummaries` pumps the moment its answer
-  // lands, so a row that really is unread is asked for in the same turn as it was before.
-  const want = (revQueue.prs || [])
-    .filter(p => revKnownHeard.has(p.repo_id) && revReadsAhead(p.repo_id)
-                 && revSkeinsToRead(p) && !revSums.has(rk(p)));
-  // Three at a time, and no total: the total is the server's, spent where the model call is
-  // (`review::over_budget`), and a row it refuses comes back saying so with a button — which is
-  // worth vastly more than a row the page silently never asked about.
-  while (revSumBusy < REV_SUM_PARALLEL && want.length) {
-    const p = want.shift();
-    revFetchSummary(p.repo_id, p.number);
-  }
-}
-
-// Ask for a reading. `how` says WHO is asking, which is the whole boundary the day's budget draws
-// (`review::Trigger`): "force" is a person pressing re-read — ignore the cached answer AND do not
-// budget it; "asked" is a person revealing they want this one — a cache hit is still welcome, but
-// the ceiling on skein's own initiative does not apply, per the owner: "Limit is only for automatic
-// stuff, manually I can invoke as many as I want." Anything else is the pump, which pays.
-//
-// The marker travels on the URL because the server defaults the safe way round: a request without
-// it is treated as unasked, so forgetting it gates a button rather than un-gating a sweep.
-function revFetchSummary(id, number, how) {
-  // The repo the ROW belongs to, passed by the row itself — never the one the view happens to
-  // name. The merged queue holds every repo at once, so there is no "current repo" to fall back
-  // on, which is what used to send the pump to `/api/repos/undefined/…`.
-  if (!id || !revHeld) return;
-  // "here" is "read it here instead" (SKEIN-818): a forced read, outside the pull request's box.
-  const force = how === "force" || how === true || how === "here";
-  // **`redraft=1`: read it again, and draft a NEW review from that reading** (SKEIN-293, the
-  // owner's "go with one control"). It implies a forced read — a cached reading returns from
-  // `review::visit` before anything is drafted, so a redraft honouring the cache would be a press
-  // that did nothing — and it outranks `held=1`, so a press that asked for a new reading is never
-  // quietly downgraded into a disk read.
-  //
-  // **Nothing is warned about first, and this sentence used to say there was** (SKEIN-564): it read
-  // "a reader who has just been warned and said yes", which is a claim about a SAFETY interaction —
-  // we ask before destroying your work — and the page contradicted it in the same file.
-  // `revReadAgainPress` has no confirm step and says why it does not: skein stores no review, so a
-  // re-read has nothing of the reader's to throw away. A confirmation described but never shown is
-  // worse than one that was never promised, because it is trusted.
-  //
-  // This is where "re-read" stopped being the weaker of two buttons. On a row that already had a
-  // draft it used to fall through to the cheap two-stage summary path — different prompt, weaker
-  // model — because a draft check said no to a head it had already drafted, while "review the
-  // code" was one merged call on the stronger model. Same press, two qualities of reading, and
-  // neither label said so. Both the check and the drafting are gone (skein stores no review), so
-  // there is one press buying one reading; `?redraft=1` is what is left of the distinction, and it
-  // now means only `review::Review::Always` — read it even where skein would not read unasked.
-  const q = how === "here" ? "?redraft=1&here=1" : force ? "?redraft=1" : how === "asked" ? "?asked=1" : "";
-  const key = id + "#" + number;
-  // **A second read of the same row, started before the first landed** (SKEIN-366). `revReadWaits`
-  // is keyed by pull request, so the entry about to be written would replace an outstanding one and
-  // leave its promise unresolved for ever — and `revStackPump` books a step in that promise's
-  // `.finally`, so an orphan is a stack run that stops advancing with a "stop" control that never
-  // goes away. Settled here rather than refused: the press still buys the reading it asked for,
-  // exactly as it did when each read carried its own request. Writes nothing over `revSums`, so the
-  // question two lines below still has the reading it is asking about.
-  revReadSettle(key, null, "");
-  // Was there a reading here to REPLACE? Read now, because the next line writes "…" over it — and
-  // the answer is the whole meaning of the "● updated" mark this request will leave behind
-  // (`revHasReading`).
-  const replacing = revHasReading(key);
-  // How long this one takes, so the stack read can say how long the REST will (SKEIN-337). Measured
-  // rather than assumed: the only honest source for "~10m" is what reads have actually cost on this
-  // fleet, on this model, today.
-  //
-  // **What counts as a measurement is `computed`** — the server's own word for "a model call
-  // happened" (`review::Summary::computed`) — and not `force`, which is who asked. Those came apart
-  // in both directions and each way was wrong. A first press of "read all 18" on a fresh page is
-  // eighteen forced reads that have taught the estimate nothing yet, so the press that most needs a
-  // number is the one that has none; and a forced read the server answers off disk returns in
-  // milliseconds, so counting it would drag the median toward a speed no model call ever runs at.
-  // The measurement is taken where the answer lands (`revReadSettle`), which is no longer here.
-  const startedAt = Date.now();
-  revSumBusy++;
-  // **In flight from this instant**, not from whenever the poll next runs. The server is the
-  // authority on what is being read (`/api/review/reading`) and the poll will confirm this within
-  // `REV_INFLIGHT_POLL_MS`, but a press must show its counter on the frame it happens — four
-  // silent seconds is exactly the gap the reader reads as "nothing happened" (SKEIN-333).
-  //
-  // `started_ms` is this browser's clock, and the server's reply carries its own; they differ by
-  // whatever the two clocks differ by, which is a second at worst on one machine and does not
-  // matter for a number rounded to seconds.
-  if (!revInFlight.has(key)) revInFlight.set(key, { repo_id: id, number, started_ms: Date.now(), asked: true });
-  revSums.set(key, "…");
-  // A person pressing "read it" / "re-read" gets the "…" now; the PUMP's own reads keep the
-  // deferral, because a row filling itself in behind a half-typed comment is exactly the
-  // background render §6 rule 2 protects against. `how` already draws that line for the budget.
-  if (force || how === "asked") renderReviewNow(); else renderReview();
-  // **The reading is STARTED here, and lands on the stream** (SKEIN-366).
-  //
-  // This used to be one `fetch` held open for the whole model call. That is a browser connection
-  // held for tens of seconds, and browsers allow six per origin over HTTP/1.1 — which is all the
-  // cockpit speaks (`curl --http2` against it still answers `HTTP/1.1 200 OK`). `REV_ASKED_PARALLEL`
-  // is ten, so ONE pressed stack read took every connection the page had, and everything else it
-  // does — the image upload, the health tick, the queue refresh, a second stack's progress — sat in
-  // the browser's own queue behind a 35-second model call. Measured in a real browser against a
-  // build of `d48a4ce`: an unrelated `GET /api/health` from this page took 12 ms with three
-  // readings in flight, 12,814 ms with six, and 34,438 ms with ten.
-  //
-  // **The width is not the fix and must not become it.** A read the owner asks for is not rationed
-  // — his instruction, twice — and a smaller number moves the cliff rather than removing it. What
-  // changed is where the answer travels: this POST returns in milliseconds, and the reading itself
-  // arrives on the one `EventSource` the page already holds (`connect`, `reading`). Ten readings
-  // now cost one connection between them, so the number of connections this page holds does not
-  // grow with the number of readings in flight — which is the invariant, and what the test asserts.
-  //
-  // Returned so a caller reading a whole stack can wait for this one before starting the next
-  // (`revStackPump`). Every other caller ignores it, as they did before.
-  const waiting = new Promise(resolve => revReadWaits.set(key, {
-    id, number, key, force, replacing, startedAt, resolve,
-    // Has the SERVER said it is reading this? `revPollInFlight` sets it, and only a wait that has
-    // been seen may be settled by that poll noticing the reading is gone — see `revReadSettle`.
-    seen: false,
-  }));
-  fetch(`/api/repos/${encodeURIComponent(id)}/review/${number}/read${q}`, { method: "POST" })
-    .then(async r => { if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`); })
-    // The START failed, which is a different thing from a reading that failed — and the row must
-    // say so either way rather than sitting on "…" for ever.
-    .catch(e => revReadSettle(key, null, String(e.message || e).split("\n")[0]));
-  return waiting;
-}
-
-// Readings this page is waiting for, keyed `repo#number` — see `revFetchSummary`.
-//
-// It is what makes a reading's ANSWER separable from the request that asked for one: the request is
-// over in milliseconds and this holds the promise the caller is waiting on until the stream, or the
-// in-flight poll, says what happened.
-let revReadWaits = new Map();
-
-// **Which queue a landed reading was built from**, keyed `repo#number` — the `as_of` stamp when it
-// was a remembered one, absent when it was fresh or when this page never heard.
-//
-// `review::ReadingDone` carries the same distinction `x-skein-queue` draws on the request-shaped
-// route, and it is here because a reading built from a remembered queue is the one case where
-// `Known::stale` cannot be trusted to be the whole answer: `stale` is computed by comparing the
-// reading's head against the head the QUEUE holds, so a queue that has not asked GitHub since
-// before the branch moved reports a stale reading as current. Absent is not a claim of freshness —
-// see `revReadSettle`, which only writes what it was told.
-let revReadFrom = new Map();
-
-// A reading that arrived with nobody waiting for it — see `revReadSettle`, which is its only
-// caller. True when it was applied.
-//
-// It writes the answer and nothing else: no `revSumBusy`, no promise, no "● updated". Those belong
-// to a press, and this is the case where the press's bookkeeping has already been done by whatever
-// settled its wait.
-//
-// The two refusals are `revFetchHeld`'s, for `revFetchHeld`'s reasons — this is the same act, with
-// the answer arriving rather than being fetched. A row being read RIGHT NOW is never written to
-// (SKEIN-333): a landed answer is the older one the instant somebody presses again. And a row
-// already holding a real reading keeps it — "…", an `unread` row and a `transient` failure are each
-// weaker than an answer, and a thin row knows strictly less about the same one.
-function revApplyLanded(key, s) {
-  if (!revHeld || !s) return false;
-  if (revInFlight.has(key)) return false;
-  const now = revSums.get(key);
-  if (now && now !== "…" && !now.thin && !now.transient && now.depth !== "unread") return false;
-  revSums.set(key, s);
-  return true;
-}
-
-// A reading this page asked for has landed. The one place its answer is applied.
-//
-// `s` is the summary (the same body `/review/:n/summary` answers with), or null; `error` is the
-// sentence to show when there is no summary. Both absent means "it ended and this page did not hear
-// how" — the poll's recovery path, where `revFetchHeld` is already fetching what is on disk, so
-// this settles the bookkeeping and writes nothing over it.
-//
-// `from` is `{queue, as_of}` off `review::ReadingDone` when the stream delivered it, and undefined
-// on every other path. Undefined means UNKNOWN and leaves whatever is remembered alone: a poll
-// recovering a reading it did not watch arrive must not be able to say it came from a fresh queue.
-//
-// Guarded by the map for its BOOKKEEPING: a reading nobody here is waiting for must not
-// double-count `revSumBusy`, resolve a promise twice, or advance a stack run twice — which is what
-// makes settling idempotent when the stream and the poll race.
-//
-// **That guard used to take the reading itself with it, and that is how one went missing**
-// (SKEIN-766). It read "not this page's to apply, and the in-flight poll already brings those in",
-// and the second half is untrue of the case that matters. The poll brings in what is on DISK
-// (`revFetchHeld`), and a reading whose ownership could not be consulted is served and deliberately
-// never written down (`review::ownership` answers `Unreadable`, and `review::summarise` stores only
-// when `ownership_unknown` is empty) — so for those there is nothing to bring in, and `?held=1`
-// answers that skein holds no reading of this pull request yet.
-//
-// And the poll is what takes the wait away. `revPollInFlight` settles a wait the moment the server
-// stops listing the reading, and the server stops listing it BEFORE it announces the answer:
-// `api_review_read` drops the reading's registration when the read returns and calls
-// `announce_reading` afterwards. So under load the frame carrying the answer landed a moment after
-// the poll had closed the door, found no wait, and was dropped — leaving the row holding the poll's
-// "not read", which is the opposite of what had just happened, permanently. Measured as one reading
-// of ten missing with the server reporting nothing in flight: 1 of 12 four-lane single-core runs, 0
-// of 12 unloaded (SKEIN-754, SKEIN-766).
-//
-// So the fallback no longer outranks the thing it is a fallback for.
-function revReadSettle(key, s, error, from) {
-  const w = revReadWaits.get(key);
-  // Nobody waiting means no bookkeeping to do — but there may still be an answer to apply.
-  // `revApplyLanded` says whether it took it, so the provenance below is written for the readings
-  // that actually landed and for no others (SKEIN-239's rule; `tests/ui/provenance.mjs` case 5).
-  if (!w && !revApplyLanded(key, s)) return;
-  if (from && from.queue) {
-    if (from.queue === "remembered") revReadFrom.set(key, from.as_of || "");
-    else revReadFrom.delete(key);
-  }
-  if (!w) { renderReview(); return; }
-  revReadWaits.delete(key);
-  revSumBusy--;
-  if (revHeld) {
-    if (s) {
-      revSums.set(key, s);
-    } else if (error) {
-      // A failed reading is not "nothing to see here". It becomes an unread summary carrying the
-      // reason, exactly as the server's own failures do — the page must not be a place where a
-      // network error looks like a clear PR.
-      // `transient`: this is a failure to REACH the reading, not a reading. It has to be visible
-      // but must not become the permanent answer for that row. The pump skips anything already in
-      // `revSums`, so without this the row showed a transport error for ever and nothing ever
-      // asked again. Dropped on the next queue load, which is where the stale-head drop lives.
-      // Carries the head it was asked about, like a real reading does. Without it the entry is
-      // dropped by the stale-head rule — by ACCIDENT, because it happens to have no head to
-      // compare — and the rule that is supposed to govern this ("a failure to reach is not an
-      // answer") would be dead code that nothing could test.
-      revSums.set(key, {
-        number: w.number, depth: "unread", line: "", detail: "", flags: [], yours: [], others: 0,
-        transient: true,
-        head_sha: ((revQueue && revQueue.prs || []).find(p => p.repo_id === w.id && p.number === w.number) || {}).head_sha,
-        unread_because: "skein could not reach its own summary for this PR: " + error,
-      });
-    }
-  }
-  // **What counts as a measurement is `computed`** — the server's own word for "a model call
-  // happened" — and not `force`, which is who asked. A forced read the server answers off disk
-  // returns in milliseconds, and counting it would drag the median toward a speed no model call
-  // ever runs at.
-  if (s && s.computed) revNoteReadMs(Date.now() - w.startedAt);
-  // Out of flight the moment the answer is here. Left to the poll, the row would keep its counter
-  // for up to `REV_INFLIGHT_POLL_MS` after the reading it was waiting for had arrived — a spinner
-  // over a finished answer, which is the same lie as a stale answer over a running one, told the
-  // other way round.
-  revInFlight.delete(key);
-  // Landed, and nobody has looked at it yet. Cleared by opening the row (`toggleRevRow`) — never by
-  // a timer, so a reading that finished while the reader was elsewhere is still evident when they
-  // come back. Only where this read REPLACED a reading (`replacing`, captured before the "…" went
-  // in): a row skein is filling in for the first time has nothing to come back to and nothing to
-  // compare, and marking it made the pane's cold open a wall of "● updated".
-  if (w.replacing) revUpdated.add(key);
-  renderReview();
-  revPumpSummaries();
-  w.resolve(error ? { ok: false, error } : { ok: true });
-}
-
-// One reading, off the live stream. The shape is `review::ReadingDone`.
-//
-// Separate from the stream plumbing that receives it because this is review's rule, not the
-// stream's: which readings this page may apply, and what a reading with no summary means.
-function revReadArrived(d) {
-  if (!d || !d.repo_id || !d.number) return;
-  revReadSettle(`${d.repo_id}#${d.number}`, d.summary || null, d.error || "",
-    { queue: d.queue || "", as_of: d.as_of || "" });
-}
-
-// **The one control** (SKEIN-293, the owner's "go with one control"). Read it again, and draft a new
-// review from that reading — always both halves, which is what the two old buttons only sometimes
-// each did.
-//
-// It goes straight away. There is nothing on this page a re-read can now destroy — the vetting
-// panel that held a reader's kept/dropped decisions is gone, and a reading replacing a reading
-// costs them nothing. Making somebody confirm something that costs them nothing is how a
-// confirmation becomes noise and stops being read.
-function revReadAgainPress(repo, number) {
-  revFetchSummary(repo, number, "force");
-}
-
-// **A reading landed here and you have not looked at it yet** (SKEIN-333).
-//
-// It clears when the row is OPENED, never on a timer — the owner's choice. A stamp that ages out
-// on its own is no use for the case it exists to serve: a read takes most of a minute, so the
-// reader is somewhere else when it lands, and "updated 90 seconds ago, fading" is a mark designed
-// to be missed by exactly the person it is for.
-//
-// Deliberately not a count and not a diff of the two readings: the row's own line already says
-// what skein now thinks, and the only thing this adds is that it CHANGED while you were away.
-function revUpdatedChip(pr) {
-  if (!revUpdated.has(rk(pr))) return "";
-  // A row already open is a row being looked at, so there is nothing to come back to.
-  if (revOpen.has(rk(pr))) return "";
-  return `<span class="revtag updated" title="skein finished reading this while you were elsewhere — open the row and this mark clears">● updated</span>`;
-}
-
 // The name of the act, as the control that sends it is labelled. NOT `revReceiptHtml`'s map, which
 // is the past tense of an act that HAPPENED ("merged", "changes requested") and reads as a lie in
 // front of a refusal — "merged refused" says the opposite of what took place. Anything missing
 // falls through to the kind itself, which is already the word the wire uses.
 const REV_ACT_NAME = { approve: "approve", "request-changes": "request changes", comment: "comment",
-                       archive: "set aside", merge: "merge", reread: "re-read" };
+                       archive: "set aside", merge: "merge" };
 
 // **An act on this row was refused, and the row says so** (SKEIN-385). The receipt carrying the
 // reason, `try again` and the link to GitHub lives in the row's own strip — which is inside the
@@ -6106,85 +4622,8 @@ function revRefusedChip(pr) {
 open the row for the whole answer, and for try again">✗ ${esc(did)} refused</span>`;
 }
 
-// Read this one, from the collapsed line (SKEIN-228).
-//
-// Re-analysis existed only behind the fold, as `re-read` among eight other chips — which the owner
-// read as its not existing at all, and from the outside that is the same thing. So it comes out to
-// the line, and it is RATIONED the way every mark on this row is rationed: a control on every row
-// is a texture, and most rows do not need one because the pump reads the lane for you.
-//
-// The three states that do need one, and nothing else:
-//   * a reading of an EARLIER commit — the row already says "read before the latest commits", and
-//     re-analysing is the answer to that sentence (law 1: never state a problem without its move);
-//   * the day's automatic budget spent — the refusal invites exactly this press;
-//   * unread with nothing coming — a draft, a lane the pump does not read, or a reading that
-//     failed. A row in flight says "reading it…" and offers nothing, because it is already coming.
-//
-// **What it says about cost is nothing, and that is a change.** It used to end "a reading you ask
-// for is never counted against the day's budget" — true of the BUDGET, and read on a control as
-// "this is free". It is not: the press downloads the diff and spends a model call that takes most
-// of a minute. The ceiling is on skein's own initiative (`review::Trigger`) and a reader pressing
-// here is not spending against it, which is worth knowing exactly once, in the one place the budget
-// is the subject — the panel that says the day's automatic reading has stopped (`revDetail`). The
-// owner's call, having been offered the alternative: fix the wording, leave the control alone, and
-// do not print a duration on a button.
-// **Does this pull request want reading again, and why** — the one question every read control on
-// the row is asking, asked once (SKEIN-372). It used to be asked twice: `revReadAgain` decided it
-// for the line, and `revDetail`'s branches decided it again for the body, so an expanded row could
-// draw two doors to the same act. Now the line asks this, and the strip below draws its own control
-// only when the answer is "no" — because when it is anything else, the body already carries the
-// move beside the sentence that explains it, which is where law 1 wants it.
-function revWantsRead(pr) {
-  const s = revSums.get(rk(pr));
-  if (s === "…") return "";
-  if (!s) return "unread";
-  if (s.stale) return "stale";
-  if (s.depth === "unread") return "unread";
-  return "";
-}
-
-function revReadAgain(pr, open) {
-  const s = revSums.get(rk(pr));
-  if (s === "…") return "";
-  // The line's control is the COLLAPSED row's: SKEIN-371 put it there so buying the missing half
-  // would not require opening the row. An open row draws the same act in its body, beside the
-  // sentence that says why it is needed, so drawing it here as well is the two-doors defect.
-  // `open` is passed rather than read from `revOpen`, because a step inside a stack is opened by
-  // `revStackStep` and the caller is the only one that knows which of the two it is.
-  if (open) return "";
-  const stale = s && s !== "…" && s.stale;
-  const unread = !s || (s !== "…" && s.depth === "unread");
-  // A third state used to be decided here — read, and no review came back (SKEIN-371) — and it is
-  // gone with the field that was its only evidence. See the note where `revNoReviewCameBack` was.
-  if (!stale && !unread) return "";
-  // A row the pump is about to read anyway offers nothing: the control would be gone a second
-  // later, which is a flicker rather than an affordance. "About to be read" is the PUMP's own
-  // question, asked of the pump — not a second copy of its rule, which is how this line came to
-  // promise a reading that never arrived for a repo with read-ahead switched off (SKEIN-242) and
-  // to offer a button on a pull request of yours the pump now reads (SKEIN-277).
-  const coming = !s && revQueue && revQueue.ai
-    && revReadsAhead(pr.repo_id) && revSkeinsToRead(pr);
-  if (coming) return "";
-  return `<button type="button" class="revread" title="${esc(stale
-      ? "read this again, against the commit that is there now"
-      : "have skein read this one")}"
-    onclick="event.stopPropagation(); revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">${
-    stale ? "re-read" : "read it"}</button>`;
-}
-
 function revRow(pr) {
   const open = revOpen.has(rk(pr));
-  const s = revSums.get(rk(pr));
-  // The tripwire marks ride on the collapsed line, because they are the reason to stop scrolling.
-  // A chip must be true of a minority of rows AND change what you do. The reason chips failed
-  // both and are gone; a flag kind the whole queue wears this render (revCommonChips) is dropped
-  // too, and what survives is capped at two so the title keeps its column — the expanded brief
-  // still lists every flag. The moved chip obeys the same rule: when a whole wave of heads moved,
-  // the wave is the story, and the stale-reading note in the gist still marks each row.
-  const rawFlags = (s && s !== "…" ? (s.flags || []) : []).filter(f => !revCommonChips.has(f));
-  const flags = rawFlags.slice(0, 2)
-    .map(f => `<span class="revtag flag">${esc(f)}</span>`).join("")
-    + (rawFlags.length > 2 ? `<span class="revtag flag" title="${esc(rawFlags.slice(2).join(", "))}">+${rawFlags.length - 2}</span>` : "");
   // WHY this row needs you, in words, on the collapsed line (SKEIN-300/302). It is exempt from the
   // minority rule the other chips obey, and deliberately: that rule is about marks which compete
   // with the title for attention, and this is the row's reason for being in the list at all. It is
@@ -6196,12 +4635,11 @@ function revRow(pr) {
   const whyTag = why ? `<span class="revwhy">${esc(why)}</span>` : "";
   const chips = `${revRefusedChip(pr)}${whyTag}${pr.draft ? `<span class="revtag draft">draft</span>` : ""}${
     revMoved(pr) && !revCommonChips.has("moved") ? `<span class="revtag moved" title="you decided on an earlier commit — this is back with you because the branch moved">new commits</span>` : ""
-  }${revUpdatedChip(pr)}${revFlowChip(pr)}${flags}${revReadAgain(pr, open)}`;
+  }`;
   const line = `<div class="revline" onclick="toggleRevRow(${esc(JSON.stringify(rk(pr)))})">
       <span class="mv ${revMove(pr)}" title="${esc(REV_MOVE_WORDS[revMove(pr)] || "")}"></span>
       <span class="revnum" title="${esc(pr.repo_id || "")}">#${pr.number}</span>
       <span class="tcell"><span class="revtitle">${esc(pr.title || "")}</span>${chips}</span>
-      ${revGist(s, rk(pr), open)}
       ${revRail(pr)}
     </div>`;
   // data-rk is the repaint hook: SKEIN-162 marks a row done in place, and a row you cannot find
@@ -6224,17 +4662,6 @@ function revRow(pr) {
 function revWaitedSince(p) {
   const moved = p.my_review && p.my_review !== "none" && !p.review_is_current;
   return (moved && p.committed_at) || p.updated_at || "";
-}
-
-// The most expensive artefact in the product is a reading, and an unused judgement is a cost with
-// no return: a tripwire flag lifts a row (band 0), the unread hold the middle (band 1), and a
-// routine verdict sinks (band 2) — always inside the lane readiness chose, per the module's own
-// rule that AI only adds scrutiny.
-function revReadBand(p) {
-  const s = revSums.get(rk(p));
-  if (!s || s === "…" || s.depth === "unread") return 1;
-  if ((s.flags || []).length) return 0;
-  return 2;
 }
 
 // Does this row answer the search? Substring, case-insensitive, over everything a person remembers
@@ -6308,9 +4735,7 @@ function revRail(pr) {
 
 // **The one order, asked once.** The lane decides which clock a row is on, and both the sort and
 // the column it is audited by read it from here — because "how long has this waited" computed twice
-// is how the two came apart in the first place (`review::waited_since`, whose doc already says
-// "Do not invent a second order here", mirrors `revWaitedSince` field for field; the column was the
-// third implementation and the only one that disagreed).
+// is how the two came apart in the first place.
 //
 // Your move is how long it has been waiting on YOU: a head that landed after your approval is the
 // moment it came back, and a comment since then does not restart it. Every other lane is recency —
@@ -6320,9 +4745,7 @@ function revRail(pr) {
 // Asked of `moveOf` rather than of the lane (SKEIN-302), because the list is what the column
 // audits and the list mixes both roles now. On a pull request you opened, `revWaitedSince` falls
 // through to `updated_at` — your own PR has no request time, and the last touch is the comment or
-// the review that put it back in your hands. That fallthrough is why this stays one function:
-// `review::waited_since` mirrors it field for field to decide what skein reads ahead, and a second
-// clock invented here would be the third implementation of an order that already came apart once.
+// the review that put it back in your hands. That fallthrough is why this stays one function.
 function revSortAt(p) {
   return moveOf(p) === "yours" ? revWaitedSince(p) : (p.updated_at || "");
 }
@@ -6355,72 +4778,6 @@ function revAge(iso) {
     : d * 24 >= 1 ? `${Math.round(d * 24)}h`
     : `${Math.max(1, Math.round(d * 1440))}m`;
   return { label, old: d > 3 };
-}
-
-// The gist cell — what this PR is, on the line you actually scan at thirty a day. It is NEVER
-// empty: the module's rule is that AI only adds scrutiny, so "skein read this and it is routine"
-// and "skein never looked at this" must not render alike — and the empty string was exactly that,
-// on 23 of 29 live rows. All four states are one row high, which is the other half of the
-// contract: a summary landing may change this cell's text, never any row's position.
-function revGist(s, key, open) {
-  // **Being read right now**, and it outranks every other thing this cell could say — including a
-  // perfectly good reading, which is exactly the case that was broken: the row went on showing the
-  // OLD line for most of a 35-second call and the press looked inert (SKEIN-333).
-  //
-  // The old line is kept, DIMMED and labelled, rather than blanked. The owner's choice, and the
-  // right one: a row that empties itself has thrown away the only thing it knew in exchange for
-  // saying it is busy, and a reader scanning the list loses their place.
-  //
-  // **The chrome is as short as it can be said**, because every character of it is taken off the
-  // line it is supposed to be protecting. It used to read "reading again…" whenever there was an
-  // old line — which is to say precisely when the cell could least afford six more characters —
-  // and the word earned nothing: an old line sitting beside a running counter IS the "again", and
-  // it carries "the reading being replaced" on its own title. Measured in the real 256px column
-  // (`measure-gist.mjs`): 124.8px of the old reading before, 159.3px after.
-  const r = key && revInFlight.get(key);
-  if (r) {
-    const had = s && s !== "…" && s.depth !== "unread" && (s.line || "");
-    return `<span class="gist reading">
-      <span class="revflight">⟳ reading…
-        <span class="revflight-secs" data-started="${Number(r.started_ms) || 0}">${
-          revElapsed(Date.now() - (Number(r.started_ms) || Date.now()))}</span>${
-        r.asked === false ? `<span class="revflight-who" title="skein started this one itself — you did not press for it">skein's own</span>` : ""}</span>${
-      had ? `<span class="revflight-was" title="the reading being replaced">${esc(had)}</span>` : ""}
-    </span>`;
-  }
-  if (!s) return `<span class="gist unknown">not read</span>`;
-  if (s === "…") return `<span class="gist reading">reading it…</span>`;
-  // **The failure is stated at whichever surface can hold it, and at one of them at a time**
-  // (SKEIN-400). An open row drew `unread_because` three times over: cut to this column's width
-  // here, in full again thirty pixels below in `revDetail`'s "Not summarised — …" beside the button
-  // that acts on it, and a third time as this span's own `title`, repeating the text it sat on.
-  // That is the two-doors defect `revReadAgain` already refuses on this same line — "an open row
-  // draws the same act in its body, so drawing it here as well" — one field along: the sentence
-  // rather than the button. `open` is threaded from the caller for the same reason it is threaded
-  // there, and only from the two callers that draw a body: a step inside a stack is opened by
-  // `revStackStep`, and nothing here can tell which of the two it is.
-  //
-  // **Open**, the body has the whole sentence and the move, so this cell steps back to the state
-  // mark alone — still `not read`, still `.gist.unknown`'s dotted "stated absence" underline, so
-  // the row reads down the column exactly as its neighbours do and the §10 rule that nothing may
-  // change a row's height is untouched (it is one nowrap run either way).
-  //
-  // **Collapsed**, this cell is the only place the sentence is, and the title is not a second copy
-  // of it in any sense a reader would recognise: `ai::Unread::say` writes 150–250 characters whose
-  // CURE is at the end — "It is on the PATH of the process running skein-server… or set
-  // SKEIN_CLAUDE_BIN to its full path" — and about 45 of them fit a 256px column. An error cut
-  // there keeps its complaint and loses its fix, so hover is what makes the rest reachable without
-  // opening the row. That is this page's one job for a `title`: say what the visible text could
-  // not, as `.mv` does for a glyph, `.revnum` for the repo behind a bare number, and the `+N` chip
-  // for the flags it hid.
-  if (s.depth === "unread") {
-    return open
-      ? `<span class="gist unknown">not read</span>`
-      : `<span class="gist unknown" title="${esc(s.unread_because || "")}">not read — ${esc(s.unread_because || "")}</span>`;
-  }
-  // A reading of an earlier commit says so where you scan, not only when expanded — the whole risk
-  // of keeping it is that it gets mistaken for a reading of what is there now.
-  return `<span class="gist${s.stale ? " stale" : ""}">${s.stale ? "read before the latest commits — " : ""}${esc(s.line || "")}</span>`;
 }
 
 // `revrowacts` on the row's own control strip: an expanded row grew sections with `.revacts` of
@@ -6489,33 +4846,19 @@ function revBody(pr) {
     </div>
     ${revApprovals(pr)}
     ${revConversation(pr)}
-    ${revDetail(pr)}
     <div class="revacts revrowacts">${revPending.has(rk(pr))
-      // **One read control, and the drafted review shows itself** (SKEIN-335). There was a second
-      // button here — "review the code…" — and the owner's report was the whole of the case:
-      // "reread the code and review the code are still 2 different buttons (they do the same
-      // thing, why are they different?)".
-      //
-      // They did not do the same thing, which is worse: one spent a model call and took 35
-      // seconds, the other read a drafted review off disk for free and generated nothing. Nothing
-      // on screen said which, and both were verbs. On a pull request with no draft the second
-      // opened an empty panel, so the honest reading of it was "the button is broken".
-      //
       // SKEIN-162: an act on this row is held, in flight, landed or refused — the strip you
       // pressed IS where that story shows, not a toast in the opposite corner.
       ? revReceiptHtml(rk(pr), revPending.get(rk(pr)))
       : `${revVerdictHtml(pr)}
       ${link(pr.url, "read on GitHub", 'class="revchip" target="_blank" rel="noopener"')}
-      <button type="button" class="revchip" onclick="revCompose(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'ask')">ask…</button>
       <span class="revspacer"></span>
       <button type="button" class="revchip" onclick="openNewBoxFor(${esc(JSON.stringify(pr.repo_id))}, ${esc(JSON.stringify(pr.head_ref || ""))})">box on this branch</button>
       ${pr.snoozed
         ? `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, '')" title="it would come back on its own at the author's next push">bring back now</button>`
         : `<button type="button" class="revchip" onclick="revSnooze(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(pr.head_sha || ""))})" title="out of the queue until the author pushes — the push is what brings it back">until it moves</button>
-      <button type="button" class="revchip" onclick="archivePr(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}
-      ${revWantsRead(pr) ? "" : `<button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>`}`}
+      <button type="button" class="revchip" onclick="archivePr(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${archived ? "false" : "true"})">${archived ? "bring back" : "set aside"}</button>`}`}
     </div>
-    ${revFlowBox(pr)}
     ${revComposeHtml(pr)}
   </div>`;
 }
@@ -6655,228 +4998,6 @@ function revConversation(pr) {
   return `<div class="revconv">${commentsBlock}</div>`;
 }
 
-// The expanded half: the brief when there is one, and an unmissable statement when there is not.
-//
-// A PR skein has not read must never render as an empty, calm space — that reads as "nothing here",
-// which is the one thing it must not mean. So the absence is drawn as loudly as the presence.
-function revDetail(pr) {
-  const s = revSums.get(rk(pr));
-  if (!s) {
-    // Which reason, because three different ones land here and only one of them is a setting to
-    // change. "Not read yet" alone reads as a failure on a draft that skein is deliberately leaving
-    // alone, and as a limit on a fleet where the feature is simply switched off.
-    const why = revQueue && !revQueue.ai
-      ? " Reading PRs is switched off — turn \"Read pull requests\" back on in Settings → Boxes. Until then every PR stays at full attention."
-      : pr.draft
-        ? " It is a draft, so skein leaves it alone until it is marked ready."
-        // Which of the two scope rules left it unread, because they have different answers: one is
-        // a switch on this repo, the other is what skein reads at all on its own. "Nothing has
-        // asked for this one yet" was the whole of what this said, on a row that would never be
-        // read however long you waited (SKEIN-242).
-        // And the switch it names is RIGHT HERE (SKEIN-282). This sentence named a control that
-        // existed only in a view narrowed to one repo, so on the merged queue it told the reader
-        // about something they could not reach from where they were standing — law 1's failure
-        // one step removed: the move was stated but not offered.
-        : !revReadsAhead(pr.repo_id)
-          ? ` skein does not read ${esc(pr.repo_id)} on its own — <button type="button" class="revchip" onclick="revSetReadingFor(${
-              esc(JSON.stringify(pr.repo_id))}, true)" title="the pull requests somebody asked you to review, and the ones you opened, one unit of the day's budget each — nothing else here is read">read ahead in ${
-              esc(pr.repo_id)}</button> or read this one now.`
-          : !revSkeinsToRead(pr)
-            ? " skein reads what somebody asked you to review and what you opened; this one is neither."
-            // No settle clause any more: the hour is gone from the server, so the page must not
-            // claim a branch is being waited on when nothing is waiting.
-            : " Nothing has asked for this one yet.";
-    return `<div class="revnosum">Not read yet.${why}${revQueue && !revQueue.ai ? ""
-      : ` <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it</button>`}</div>`;
-  }
-  if (s === "…") return `<div class="revnosum">reading it…</div>`;
-  // **A row shape cannot draw a brief** (SKEIN-287). The queue payload carries the line, the flags
-  // and whether a review is drafted; the prose, the signals and the ownership are fetched when the
-  // row opens (`revLoadReading`). Drawing the brief from a thin reading would print "yours: none"
-  // and "no signals" as FACTS about a pull request skein has read and attributed — the exact
-  // failure §8.6 exists to prevent, one field along.
-  //
-  // Not "reading it…", because nothing is being read: skein has the answer and the page is
-  // fetching it off disk. An unread row falls through — its reason (`unread_because`,
-  // `budget_stopped`) rides on the row shape and is the whole of what there is to say.
-  if (s.thin && s.depth !== "unread") {
-    return `<div class="revnosum">${s.prose_failed
-      ? `The brief could not be fetched — ${esc(s.prose_failed)} Close the row and open it again to retry.`
-      : `<span class="dim">fetching the brief…</span>`}</div>`;
-  }
-  // The day's AUTOMATIC budget is spent, and that is the one refusal with a move in it: a read you
-  // ask for is never budgeted (`review::Trigger::Asked`), so the button is the answer rather than a
-  // footnote — the owner's ask, verbatim: "When limit is hit, surface and ask me to manually trigger
-  // these. Limit is only for automatic stuff, manually I can invoke as many as I want."
-  if (s.depth === "unread" && s.budget_stopped) {
-    return `<div class="revnosum budget"><b>skein stopped reading for today.</b>
-      ${esc(s.unread_because || "")}
-      <div class="revacts"><button type="button" class="revchip go" onclick="revFetchSummary(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'asked')">read this one now</button>
-      <span class="dim">a read you ask for is never counted against the day</span></div></div>`;
-  }
-  // **The one row where the reader is actually stuck was the one with no move in it** (SKEIN-392).
-  // Both neighbours carry a control — the budget panel above offers "read this one now", "Not read
-  // yet" below offers "read it" — and this branch, reached only when skein TRIED and could not,
-  // ended "Read this one yourself.". That is what a person is given after waiting for a reading,
-  // and it told them to give up while the collapsed row was still drawing them a button
-  // (`revReadAgain` counts depth === "unread"): the pane and the row disagreeing about whether
-  // there was anything left to do. §law 1 — never a statement without the move it implies.
-  // **Its box did not answer in time, and skein stopped there** (SKEIN-818). The owner's wording,
-  // and the owner's decision: spending the budget again is the reader's call, so the row offers
-  // both ways on — the box again, or here instead — and presses neither by itself.
-  if (s.depth === "unread" && s.stopped_at_box) return `<div class="revnosum boxslow">Not read — ${esc(s.unread_because || "")}
-    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button>
-      <button type="button" class="revchip" onclick="revFetchSummary(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, 'here')">read it here instead</button></div></div>`;
-  if (s.depth === "unread") return `<div class="revnosum">Not summarised — ${esc(s.unread_because || "")}
-    <div class="revacts"><button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div></div>`;
-  // What this is a reading OF. Kept deliberately (see `loadReview`), so it has to be unmistakable
-  // about which code it describes — and the way out is right here rather than somewhere else.
-  // `not_reread` (SKEIN-444) makes this the same sentence with the missing half filled in: skein
-  // did not merely fail to read the newest commit — nobody has asked it to. A round runs when the
-  // author re-requests your review on GitHub, or when you press this button. That is a different
-  // thing to tell somebody, and leaving it out would make a deliberate choice read as neglect. The
-  // way out is the same button either way, because asking is exactly what it is for.
-  const stale = s.stale
-    ? `<div class="revstale">${s.not_reread
-        ? `<b>${esc(s.not_reread)}</b> The reading below is of
-           <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>.`
-        : `<b>This was read before the latest commits.</b> It describes
-           <code>${esc(String(s.head_sha || "").slice(0, 7))}</code>, and the branch has moved since.`}
-        <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
-    : "";
-  // **The reading was built from a queue skein remembered**, so the line above cannot be trusted to
-  // be the whole answer. `stale` is "this reading's head is not the head the QUEUE holds" — and a
-  // queue handed over from disk while a fresh one is being fetched (`prq::Queue::fresh`) holds
-  // whatever head it held when it was written. A branch that moved since is a stale reading that
-  // reports itself current, which is the one direction that rule must not fail in.
-  //
-  // Drawn only where `stale` is silent: where it has already fired, the reader has the stronger
-  // sentence and the same way out, and a hedge under it would be arguing with it. Drawn at all
-  // because it is rare — the remembered queue is the fallback path, not the usual one — so this is
-  // a note that means something on the row it appears on rather than a disclaimer on every row.
-  //
-  // The move it implies is the queue's, not the reading's: reading again would spend a model call
-  // and ask the same remembered queue. `loadReview(true)` is the one that asks GitHub.
-  const from = revReadFrom.get(rk(pr));
-  const blind = !s.stale && from !== undefined
-    ? `<div class="revstale blind"><b>This was read against a queue skein remembered${
-        from ? `, taken ${esc(revAgo(from))}` : ""}.</b> GitHub was not asked, so skein cannot say
-        whether the branch has moved since — a reading of an earlier commit would not be marked.
-        <button type="button" class="revchip" onclick="loadReview(true)">ask GitHub now</button></div>`
-    : "";
-  // **This reading did not run in its box** (SKEIN-799). The server composes the whole sentence
-  // (`review::Summary::read_outside_box`) and this draws it verbatim, for the reason that field's
-  // own doc gives: the second half is about whether a sweep spoke for the reading, and `swept`
-  // reaches this page only when it is TRUE — a page composing that half itself could not tell "no
-  // sweep accounted for it" from "this skein is too old to say".
-  //
-  // **The open row and not the collapsed gist** — SKEIN-400's one-surface rule, which the `gist`
-  // above is already written to: a sentence this long in a 256px column keeps its complaint and
-  // loses everything after it, and drawing it in both places is the defect that rule was written
-  // for. The body is where the reader is when they are deciding what this reading is worth.
-  //
-  // The move is the same one `stale` offers and for the same reason — nothing here is fixable by
-  // reading harder, and the box may well be back — so the statement is not left without one
-  // (SKEIN-392, one field along).
-  const outside = s.read_outside_box
-    ? `<div class="revstale outsidebox"><b>${esc(s.read_outside_box)}</b>
-        <button type="button" class="revchip" onclick="revReadAgainPress(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">read it again</button></div>`
-    : "";
-  // **This review would have posted and could not** (SKEIN-516): it acts as the skein App, and
-  // there was no App token to act with. The server composes the sentence
-  // (`review::Summary::not_posted`, from `review::asking::Refused`) and this draws it verbatim, in
-  // the same notice as the two above — the brief below is still the reading, and this is what did
-  // not happen with it. No button: the way out is in Settings → GitHub & keys, not in reading again.
-  const notPosted = s.not_posted
-    ? `<div class="revstale notposted"><b>${esc(s.not_posted)}</b></div>`
-    : "";
-  // Three ways, exactly as `review::Ownership` answers (SKEIN-117): attributed, could-not-look,
-  // or the repo has no CODEOWNERS. Silence is the right rendering for the third and the WRONG one
-  // for the second — an empty `yours` used to draw as nothing either way, so a brief written
-  // while skein could not read the repo looked like a brief about a repo nobody owns. The
-  // not-kept half is said too, because it is the reader's answer to "then why is it still
-  // offering to read this one": the server deliberately does not cache a blind reading.
-  const owned = s.ownership_unknown
-    ? `<div class="revowned">skein could not read this repo to see which of this is yours — ${
-        esc(s.ownership_unknown)}. The whole change is in scope below, and this reading is not being kept.</div>`
-    : (s.yours || []).length
-    ? `<div class="revowned">yours: ${(s.yours || []).map(p => `<code>${esc(p)}</code>`).join(" ")}${
-        s.others ? ` <span class="dim">· and ${s.others} path${s.others === 1 ? "" : "s"} you do not own</span>` : ""}</div>`
-    : "";
-  // Kept visually apart from the brief on purpose: "the diff says so" and "a model thinks so" are
-  // different kinds of claim, and collapsing them into one paragraph would make the weaker one
-  // borrow the authority of the stronger.
-  const signals = (s.signals || []).length
-    ? `<div class="revsignals"><b>found in the diff</b>${(s.signals || []).map(g =>
-        `<div><span class="revtag flag">${esc(g.kind)}</span> ${esc(g.what)} <span class="dim">${esc(g.file)}</span></div>`).join("")}</div>`
-    : "";
-  const detail = s.detail
-    ? `<div class="revbrief">${marked.parse(s.detail)}</div>`
-    : `<div class="revbrief"><p>${esc(s.line || "")}</p></div>`;
-  return stale + blind + outside + notPosted + owned + signals + detail;
-}
-
-// What governs this pull request, what it would do next, and how to change either.
-//
-// Everything here is about a thing that acts on its own, so it says three things a person needs
-// before they can trust it: what it WOULD do (the same evaluator the tick uses, so the preview
-// cannot disagree with what happens), who decided it should — a rule or you — and how to stop it.
-function revFlowBox(pr) {
-  const flows = revFlows.get(pr.repo_id);
-  if (!flows) return "";
-  if (flows.error) {
-    // A workflow file with a typo in it loads none of them, deliberately (half an automation is
-    // worse than none), and the pull request is the place somebody will notice.
-    return `<div class="revflow"><b>Workflows are not running.</b> ${esc(flows.error)}</div>`;
-  }
-  const defined = flows.defined || [];
-  const st = (flows.prs || {})[pr.number]
-    || { workflow: "", how: "none", next: "", step: 0, stopped: "", holding: "" };
-  const chosen = st.how === "assigned" ? st.workflow : st.how === "excluded" ? "" : "__rules";
-  const options = [
-    `<option value="__rules"${chosen === "__rules" ? " selected" : ""}>let the rules decide</option>`,
-    ...defined.map(f => `<option value="${esc(f.name)}"${chosen === f.name ? " selected" : ""}>${esc(f.name)}</option>`),
-    `<option value=""${st.how === "excluded" ? " selected" : ""}>no workflow — leave this one alone</option>`,
-  ].join("");
-
-  // Where it stands, in a sentence rather than a badge: this is the part somebody reads when they
-  // are deciding whether to let it run.
-  const where = st.stopped
-    ? `<div class="revflow-stop"><b>Stopped.</b> ${esc(st.stopped)}
-        <button type="button" class="revchip" onclick="revClearStop(${esc(JSON.stringify(pr.repo_id))}, ${pr.number})">let it run again</button></div>`
-    : !st.workflow
-      ? `<div class="dim">Nothing governs this pull request${st.how === "excluded" ? " — you left it out" : ""}.</div>`
-      // **HELD** (SKEIN-279/326): somebody put a workflow on this pull request and the workflow's
-      // own `matches` are not true yet. The row fell through to "waiting for something to change"
-      // — true, and wrong in the way that matters: it reads as a clock running when none is, and
-      // it does not say what is missing. The sentence the server builds names the unmet conditions
-      // as the FILE spells them, so it can be checked against the workflow somebody is reading.
-      //
-      // Drawn in the "not a stop" register, deliberately: no button, nothing to clear, and neither
-      // amber nor red. Nothing has failed and nothing is waiting on a clock — this is a workflow
-      // doing exactly what it was configured to do, and the owner is reading this pane as a dry run
-      // with the train switched off. "Put it on the train, it goes when it is approved" is now
-      // literally what happens, and this is the line that says so.
-      : st.holding
-        ? `<div class="revflow-holding">${esc(st.holding)}</div>`
-      : st.next
-        ? `<div>Next: <code>${esc(st.next)}</code> <span class="dim">(step ${st.step}${
-            st.how === "matched" ? `, from ${esc(st.workflow)}'s own rule` : ""})</span></div>`
-        : `<div class="dim">Nothing to do right now — ${esc(st.workflow)} is waiting for something to change.</div>`;
-
-  // Said once, here, rather than on every row: with the switch off none of this acts, and a person
-  // reading "next: merge" deserves to know whether that is a plan or a prediction.
-  const off = flows.enabled === false && st.workflow
-    ? `<div class="revflow-off">Workflows are switched off for this fleet, so nothing will happen on its own.</div>`
-    : "";
-
-  return `<div class="revflow">
-    <div class="revflow-head"><span>workflow</span>
-      <select aria-label="Workflow for this pull request" onchange="revSetWorkflow(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, this.value)">${options}</select>
-    </div>${where}${off}
-  </div>`;
-}
-
 // The composer: one box for the three things that need words. `ask` stays private; the other two
 // post under your name, which is why the button that sends them says so.
 let revComposing = null;   // { repo, number, kind, text, answer, busy }
@@ -6898,39 +5019,22 @@ let revFlash = "";             // the key whose row flashes once this render: a 
 let revChord = "";             // "g" while a g-chord waits for its second key (the meaning lives in shortcutFor)
 let revLastActKey = "";        // the last act revHold held — what a queue-mode u takes back
 
-// What you typed survives a reload. Reported live on PR 577: notes were written, a draft came
-// back, the page was reloaded — and both were gone, because the composer was pure page state.
-// Saved per (repo, PR, kind) on every keystroke and every draft, restored on reopen, cleared only
-// when the thing is actually posted.
+// What you typed survives a reload. Reported live on PR 577: notes were written, the page was
+// reloaded, and they were gone, because the composer was pure page state. Saved per (repo, PR,
+// kind) on every keystroke, restored on reopen, cleared only when the thing is actually posted.
 function revComposeStore(c) { return `skein.revdraft.${c.repo}#${c.number}.${c.kind}`; }
-/// Save one composer's words — **the composer the save is FOR, not the one on screen** (SKEIN-841).
-///
-/// `c` defaults to the open composer, which is what a keystroke means: `oninput` is the box the
-/// reader is typing in. An answer means the other thing. `revAsk` and `revDraft` capture `c` at the
-/// press, and this read the global instead, so an answer that landed after the reader had opened
-/// another composer was written onto an object nothing on the page referenced any more and saved
-/// nowhere — while the composer they had switched TO had its draft written under its own key, at a
-/// moment it had not asked for. Re-opening the ask then restored the pre-answer copy below, so a
-/// model call the reader had paid for was gone with nothing said. The deferral of the PAINT is
-/// right and is untouched (see `revComposePaint`): an answer nobody is looking at must not take a
-/// caret, and it must still be KEPT.
+/// Save the words in the composer the reader is typing in.
 function revComposeSave(c = revComposing) {
   if (!c) return;
-  // `outside` and `draftedFrom` too (SKEIN-819): the line saying an answer or a draft came from
-  // outside its box has to survive a reload exactly as the text it is about does, or a reload is a
-  // way to lose the warning and keep the words it warns about.
   try {
-    localStorage.setItem(revComposeStore(c), JSON.stringify({
-      text: c.text, answer: c.answer, outside: c.outside || "", draftedFrom: c.draftedFrom || "",
-    }));
+    localStorage.setItem(revComposeStore(c), JSON.stringify({ text: c.text }));
   } catch {}
 }
 function revCompose(repo, number, kind) {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(revComposeStore({ repo, number, kind })) || "null"); } catch {}
   revComposing = {
-    repo, number, kind, text: (saved && saved.text) || "", answer: (saved && saved.answer) || "",
-    outside: (saved && saved.outside) || "", draftedFrom: (saved && saved.draftedFrom) || "", busy: false,
+    repo, number, kind, text: (saved && saved.text) || "", busy: false,
   };
   renderReviewNow();
   setTimeout(() => document.getElementById("rev-compose")?.focus(), 30);
@@ -6940,26 +5044,15 @@ function revComposeClose() { revComposing = null; renderReviewNow(); }
 function revComposeHtml(pr) {
   const c = revComposing;
   if (!c || c.number !== pr.number || c.repo !== pr.repo_id) return "";
-  const asking = c.kind === "ask";
-  const label = asking ? "Ask about this PR — the answer stays between you and skein."
-    : c.kind === "comment" ? "Comment — posted to GitHub under your name."
+  const label = c.kind === "comment" ? "Comment — posted to GitHub under your name."
     : "Request changes — posted to GitHub under your name, and moves this out of your lane.";
   return `<div class="revcompose">
     <div class="revcl">${esc(label)}</div>
-    ${!asking && c.outside ? `<div class="revstale outsidebox"><b>Drafted outside its box — ${esc(c.outside)}. It did not have its earlier reading of this change, so check every claim about the code before you post it.</b>
-      <button type="button" class="revchip" onclick="revDraftAgain(${pr.number})"${c.busy ? " disabled" : ""}>draft again</button></div>` : ""}
-    <textarea id="rev-compose" rows="4" placeholder="${asking ? "what do you want to know?" : "rough notes are fine — skein can draft from them"}"
-      oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
-    ${c.answer && c.outside ? `<div class="revstale outsidebox"><b>Answered outside its box — ${esc(c.outside)}. It did not have its earlier reading of this pull request, so this answer comes from your question and the code alone.</b>
-      <button type="button" class="revchip" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>ask again</button></div>` : ""}
-    ${c.answer ? `<div class="revanswer">${marked.parse(c.answer)}</div>` : ""}
+    <textarea id="rev-compose" rows="4" oninput="revComposing.text = this.value; revComposeSave()" onkeydown="revComposeKey(event)">${esc(c.text)}</textarea>
     <div class="revacts">
-      ${asking
-        ? `<button type="button" class="revchip go" onclick="revAsk(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "thinking…" : "ask"}</button>`
-        : `<button type="button" class="revchip" onclick="revDraft(${pr.number})"${c.busy ? " disabled" : ""}>${c.busy ? "drafting…" : "draft with skein"}</button>
-           <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>`}
+      <button type="button" class="revchip go" onclick="revAct(${esc(JSON.stringify(pr.repo_id))}, ${pr.number}, ${esc(JSON.stringify(c.kind))})"${c.busy ? " disabled" : ""}>post to GitHub</button>
       <button type="button" class="revchip" onclick="revComposeClose()">cancel</button>
-      <span class="dim revkeys">${glyph(asking ? "⌘↵ asks · Esc closes" : "⌘↵ posts · Esc closes — your words are kept")}</span>
+      <span class="dim revkeys">${glyph("⌘↵ posts · Esc closes — your words are kept")}</span>
     </div>
   </div>`;
 }
@@ -6968,7 +5061,7 @@ function revComposeHtml(pr) {
 ///
 /// The primary button is the one drawn `.go`: **post to GitHub** for a comment or a request for
 /// changes — the same `revAct` the chip calls, so the same 8-second undo receipt, not a shortcut
-/// past it — and **ask** for an ask. Esc is **cancel**, `revComposeClose`, which takes the composer
+/// past it. Esc is **cancel**, `revComposeClose`, which takes the composer
 /// off the screen and leaves the words where every keystroke already saved them, so reopening it
 /// brings them back. That is what the hint beside the buttons promises.
 ///
@@ -6991,77 +5084,7 @@ function revComposeKey(ev) {
   ev.stopPropagation();
   if (c.busy) return;
   if (close) { revComposeClose(); return; }
-  if (c.kind === "ask") revAsk(c.number);
-  else revAct(c.repo, c.number, c.kind);
-}
-
-/// Ask, privately. The answer replaces nothing and is posted nowhere.
-function revAsk(number) {
-  const c = revComposing;
-  if (!c || !c.text.trim()) { toast("ask something first"); return; }
-  c.busy = true; renderReviewNow();
-  revPost(c.repo, number, "ask", c.text).then(d => {
-    c.busy = false;
-    // `c`, named — not whatever composer is open by the time this runs (SKEIN-841).
-    // `outside` is the server's reason this answer did not come from the box (SKEIN-819) — empty,
-    // and so cleared, when it did, which is what makes "ask again" able to retire the line.
-    if (d.ok) { c.answer = d.text; c.outside = d.outside || ""; revComposeSave(c); } else toast(d.error || "no answer");
-    revComposePaint(c);
-  });
-}
-
-/// Draft into the box you are about to send. It replaces the notes rather than appending, because
-/// the notes were the input to it — and you can still edit every word before it goes.
-function revDraft(number) {
-  const c = revComposing;
-  if (!c || !c.text.trim()) { toast("say roughly what you want to tell them"); return; }
-  c.busy = true; renderReviewNow();
-  // The notes this draft is made FROM, kept so "draft again" drafts from them rather than from
-  // the draft that replaced them in the box (SKEIN-819).
-  const notes = c.text;
-  revPost(c.repo, number, "draft", c.text).then(d => {
-    c.busy = false;
-    // `c`, named — the identical shape, and the identical loss (SKEIN-841).
-    if (d.ok) {
-      c.text = d.text; c.outside = d.outside || ""; c.draftedFrom = notes;
-      revComposeSave(c);
-    } else toast(d.error || "could not draft");
-    revComposePaint(c);
-  });
-}
-
-/// "draft again", on the line that says a draft was written outside its box (SKEIN-819): the same
-/// press as "draft with skein", from the notes the draft was made from. What is in the box now is
-/// the draft itself, and drafting from a draft would be a model rewording its own words about a
-/// change it did not see.
-function revDraftAgain(number) {
-  const c = revComposing;
-  if (!c || c.busy) return;
-  if (c.draftedFrom) c.text = c.draftedFrom;
-  revDraft(number);
-}
-
-/// The answer to a composer's own press, painted NOW (SKEIN-416).
-///
-/// `revAsk` and `revDraft` both waited on `renderReview`, and §6 rule 2 holds that render while the
-/// pane owns a caret or a live selection — which is the composer's ordinary state, since the box
-/// the reader typed the question into is the box they are looking at while skein thinks. Pressing
-/// "draft with skein" then did nothing anybody could see for the length of a model call and,
-/// on success, for ever: `c.text` had the drafted review in it and only a render puts it in the
-/// textarea. Worse than invisible — the next keystroke's `oninput` writes the STALE box back over
-/// `c.text`, so the draft was silently thrown away by the reader carrying on typing.
-///
-/// `revPendingPaint` and `revRepaintRow` are surgical because a receipt has one element to swap; an
-/// answer changes the composer's box, its answer panel and its chips at once, so this is the whole
-/// pane and the caret's position is what it costs. That is the same trade `renderReviewNow`'s
-/// comment above spells out, and the reader asked for it.
-///
-/// **Forced only while this composer is still the one on screen.** `c` is captured at the press: by
-/// the time the answer lands the reader may have cancelled it, or opened another PR's composer, and
-/// nothing here is drawn any more. Forcing then would take a caret out of a box for an answer
-/// nobody is waiting to see, which is the harm rule 2 exists to prevent.
-function revComposePaint(c) {
-  if (revComposing === c) renderReviewNow(); else renderReview();
+  revAct(c.repo, c.number, c.kind);
 }
 
 function revPost(repo, number, kind, body, draftedAt) {
@@ -7086,7 +5109,7 @@ function revAct(repo, number, kind) {
   const key = repo + "#" + number;
   const pr = ((revQueue && revQueue.prs) || []).find(x => rk(x) === key) || {};
   // **The revision the reader is looking at, taken once** (SKEIN-365). The question below names it
-  // and the request sends it, out of the one value — so `prwork::merge_by_hand` refusing with "you
+  // and the request sends it, out of the one value — so `prq::merge_by_hand` refusing with "you
   // read abc1234, #41 is now at def5678" quotes back the sha the dialog put in front of the reader,
   // instead of one nothing on screen ever said.
   //
@@ -7502,20 +5525,6 @@ function revKey(action) {
       if (safe && typeof window !== "undefined" && window.open) window.open(safe, "_blank", "noopener");
       return;
     }
-    case "rev-reread": {
-      // The keyboard half of the row's read control. A stack head has no reading of its own — the
-      // steps do — so it reads the step the stack would start at, which is the row the selection
-      // means when it sits on a stack.
-      const st = revSel ? revStacks.get(revSel) : null;
-      const pr = st ? (revStackNext(st) || st.steps[0]) : revKeyPr(revSel);
-      if (!pr) return;
-      revFetchSummary(pr.repo_id, pr.number, "force");
-      // The keypress is invisible otherwise — the selected row may be off screen — so the toast
-      // says WHICH pull request is being read and nothing about what it costs: see `revReadAgain`
-      // on why "never counts against the day" left every control it was on.
-      toast(`reading #${pr.number} again`);
-      return;
-    }
     case "rev-approve":
       // Deliberate refusal, out loud (§6). A verdict is a press on the row's own control, where the
       // reading it is a verdict about is printed directly above it — never a keystroke on a list.
@@ -7703,11 +5712,6 @@ function toggleRevStack(key) {
 }
 function toggleStackStep(key) {
   revStackStep = revStackStep === key ? null : key;
-  // A step's body is `revBody`, the same expansion a loose row draws — so it needs the same prose,
-  // which the queue payload no longer carries (SKEIN-287).
-  if (revStackStep === key) {
-    revLoadReading(key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1)));
-  }
   renderReviewNow();
 }
 
@@ -7727,247 +5731,18 @@ function revStepNo(st, p) {
 // so a backslash continuation here is a truncated declaration in every suite that lifts it.
 const REV_UNROOTED_WHY = "the pull requests below this stack are not in your queue — merged, closed, or past the end of the search — so this is at least that deep, not exactly";
 
-// ── READING A WHOLE STACK (SKEIN-337) ─────────────────────────────────────────────────────────
-//
-// A stack is one change split across pull requests — the owner runs an 18-step one — and reading it
-// meant pressing the row's control eighteen times and waiting ~35 seconds after each. The per-step
-// control stays the default; this is a second, explicitly labelled one, which is what the owner
-// chose over replacing it: "read step 2" and "read all 18" are different sizes of decision and the
-// button should say which you are taking.
-
-// What a read has actually COST here, most recent last. The estimate on the button is derived from
-// this and from nothing else: a hardcoded "~35s" would be a claim about a model, a fleet and a
-// network that changes without telling anyone, and it would go on being printed after it stopped
-// being true. Eight is enough to be a median and short enough to follow a real change in speed.
-let revReadMs = [];
-function revNoteReadMs(ms) {
-  if (!(ms > 0)) return;
-  revReadMs.push(ms);
-  if (revReadMs.length > 8) revReadMs.shift();
-}
-
-// The median rather than the mean: one read that hit a retry or a cold cache should not move the
-// estimate for the other seventeen.
-function revReadTypicalMs() {
-  if (!revReadMs.length) return 0;
-  const sorted = [...revReadMs].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
-}
-
-// **No measurement, no estimate.** An empty string, not a guess — a page that has read nothing yet
-// has nothing to base a number on, and a number with nothing behind it is worse than no number,
-// because it will be believed.
-function revStackEstimate(n) {
-  const typical = revReadTypicalMs();
-  if (!typical || n < 1) return "";
-  const ms = Math.ceil(n / REV_SUM_PARALLEL) * typical;
-  return ms >= 90_000 ? ` · ~${Math.round(ms / 60_000)}m` : ` · ~${Math.round(ms / 1000)}s`;
-}
-
-// **Removed: the "no review — read again" affordance** (SKEIN-660; it was SKEIN-371's).
-//
-// What stood here was `revNoReviewCameBack` — true when skein held a reading of THIS commit, no
-// review of it, and a review HAD been bought here and had not come back — and with it go the three
-// surfaces it decided: the "noreview" answer `revWantsRead` used to give, the row control labelled
-// "no review — read again" carrying the reason in its tooltip, and the stack shortfall
-// "N read but with no review" in `revStackRunHtml`. `revStepNeedsReading` counted it too, so such a
-// step was re-read by "read all"; it no longer is.
-//
-// **It went because the wire has no field for it.** Its sole discriminator was `critique_because`,
-// and `Known` is a `Summary` and a `stale` flag (`src/review/summary.rs`) — neither names it, and
-// no server has sent it since the drafted review moved to GitHub (SKEIN-612). The branch could not
-// answer true on any real payload, so what was deleted was an affordance nothing could reach.
-//
-// **What that costs, decided with the cost in front of the owner.** A stack can no longer tell a
-// reviewed step from an unreviewed one. Read is read: nothing on a payload separates "a review came
-// back" from "a review was bought and failed" from "nobody ever asked for one". SKEIN-371 was a
-// real complaint — ten steps of a twenty-step stack counted as read with no review, and no retry
-// offered on any of them — and that failure mode did not stop existing; the page simply lost the
-// ability to say so. Saying it again is the SERVER's move first: a field on `Summary` recording
-// that a reading was bought and its review did not come back. Adding a client-side guess instead
-// would be this branch again, and it would be wrong the same way.
-
-// Is this step worth spending a model call on? Unread, or read against a commit that has moved, or
-// a reading that failed to be REACHED — and never one already in flight, which is somebody else's
-// purchase of the same thing. A reading whose REVIEW did not come back was a fourth answer here
-// until SKEIN-660; the note above says why it is not one any more.
-function revStepNeedsReading(p) {
-  const key = rk(p);
-  if (revInFlight.has(key)) return false;
-  const s = revSums.get(key);
-  if (!s || s === "…") return true;
-  return !!s.transient || s.depth === "unread" || s.head_sha !== p.head_sha;
-}
-
-// **A run per stack** (SKEIN-353). This was one global — *"one run at a time, and only the stack
-// that is open; two of them racing is not a state worth supporting"* — and that decision was wrong
-// twice over. The owner runs several stacks, and the code did not refuse the second press: it took
-// it, overwrote the global, and dropped whatever the first run still had to read. Reported as the
-// smaller half of the damage — "the ladder stack was running read all and when I clicked the read
-// all for other stack, I can't see the read all progress in ladder stack" — because a run whose
-// queue has been orphaned looks exactly like a run that finished quietly.
-//
-// Both halves came from the same line. `revStackRunHtml` draws a run only for the stack it belongs
-// to, so the first stack fell back to its "read all N" button; `revStackPump` read the global, so
-// nothing advanced the first run's `todo` ever again. What was already right, and is what makes
-// this fix small: the `.finally` closes over its own `r`, so the reads in flight when the second
-// press landed still finished and still booked against the run that started them.
-let revStackRuns = new Map();   // stack key -> its run
-
-function revStackReadAll(key) {
-  const st = revStacks.get(key);
-  if (!st) return;
-  // A run already going on THIS stack is left alone. The press cannot be seen while one is running
-  // — the row draws progress where the button was — so arriving here means a stale render, and
-  // replacing the run would be the exact silent abandonment this is fixing, one stack in.
-  const going = revStackRuns.get(key);
-  if (going && !going.stopped && (going.todo.length || going.running.size)) return;
-  const todo = st.steps.filter(revStepNeedsReading).map(p => ({
-    repo: p.repo_id, number: p.number, no: revStepNo(st, p), key: rk(p),
-  }));
-  if (!todo.length) { toast("every step of this stack already has a reading of its current commit"); return; }
-  revStackRuns.set(key, {
-    key, todo, running: new Map(), done: 0, total: todo.length,
-    started_ms: Date.now(), stopped: false,
-  });
-  revStackPump();
-  renderReviewNow();
-}
-
-// **Stopping does not undo.** Steps already read stay read — they were paid for and the readings are
-// on disk — so this only stops STARTING more. The ones in flight finish, because cancelling them
-// would spend the money and throw the answer away.
-function revStackStop(key) {
-  const r = revStackRuns.get(key);
-  if (!r) return;
-  r.stopped = true;
-  // The other runs keep their slots and carry on — stopping one stack is not stopping reading.
-  // Their pump has to be nudged, because the width this one just gave back is shared.
-  revStackPump();
-  renderReviewNow();
-}
-
-// Several at once, which is what the owner chose over one-at-a-time for the wall clock. The width is
-// `REV_SUM_PARALLEL` and deliberately the same number as the pane's own pump: the reason for that
-// throttle is not a UI nicety, it is that these reads share a rate limit with the boxes doing the
-// real work, and a stack read is exactly the burst that would take the window away from them.
-// **A press is not held to the read-ahead width, and `REV_SUM_PARALLEL` is not this function's
-// business** (SKEIN-353). That width of three governs skein's OWN initiative — `revPumpSummaries`
-// — and nothing a person pressed. The reads not ending is its own defect (SKEIN-350); the shared
-// width of three is what turned three stuck reads into two stalled queues.
-//
-// So a run reads at `REV_ASKED_PARALLEL` — see there for why that number exists at all and why it
-// is not `REV_SUM_PARALLEL` — and runs are INDEPENDENT of each other. They do not share a pipe: a
-// second stack the reader pressed does not queue behind the first, because both are things he
-// asked for and neither is skein deciding to spend his day.
-function revStackPump() {
-  for (const r of revStackRuns.values()) {
-    while (!r.stopped && r.running.size < REV_ASKED_PARALLEL && r.todo.length) {
-      const step = r.todo.shift();
-      r.running.set(step.key, step);
-      revFetchSummary(step.repo, step.number, "force").finally(() => {
-        // `r`, not a lookup: a run the reader has since stopped, or a stack that has left the
-        // queue, must still finish its own bookkeeping against itself rather than crediting a step
-        // to whatever is running now.
-        r.running.delete(step.key);
-        r.done++;
-        revStackPump();
-        renderReviewNow();
-      });
-    }
-  }
-}
-
-// What the stack row says while a run is going, and after it ends.
-//
-// It stays on screen when the run finishes rather than vanishing: the last thing a reader wants to
-// know about eighteen model calls is that they happened and how many landed, and a progress line
-// that disappears at 18 of 18 answers that question by removing it.
-function revStackRunHtml(st) {
-  const key = revStackKey(st);
-  const unread = st.steps.filter(revStepNeedsReading).length;
-  // A shortfall count stood here — "N read but with no review", SKEIN-371's number — and went with
-  // the branch that decided it (SKEIN-660). This line can say how many steps have no reading; it
-  // cannot say how many were read and came back without a review, because no payload says so.
-  const r = revStackRuns.get(key) || null;
-  if (!r) {
-    if (!unread) return `<div class="stackread dim">Every step has a reading of its current commit.</div>`;
-    const all = unread === st.steps.length;
-    return `<div class="stackread">
-      <button type="button" class="revchip" onclick="event.stopPropagation(); revStackReadAll(${esc(JSON.stringify(key))})">${
-        all ? `read all ${unread}` : `read the ${unread} not yet read`}${revStackEstimate(unread)}</button>
-      <span class="dim">${unread} model call${unread === 1 ? "" : "s"}, ${
-        Math.min(unread, REV_ASKED_PARALLEL)} at a time</span>
-    </div>`;
-  }
-  const live = [...r.running.values()];
-  // Over when nothing is running and there is nothing left to start — and a STOPPED run has
-  // nothing left to start whatever is still in its queue, which is the case that read as "still
-  // going" for ever: `stopped` never drains `todo`, so a run ended by the reader would otherwise
-  // sit on "⟳ reading stack…" with nothing in flight and nothing coming.
-  const over = !live.length && (!r.todo.length || r.stopped);
-  const steps = live.map(x => x.no).sort((a, b) => a - b);
-  return `<div class="stackread">
-    <span class="revflight">${over ? "✓" : "⟳"} ${
-      over ? (r.stopped ? "stopped" : "read the stack")
-           : `reading stack…`} ${r.done} of ${r.total} done
-      <span class="revflight-secs" data-started="${r.started_ms}">${revElapsed(Date.now() - r.started_ms)}</span></span>
-    ${live.length ? `<span class="dim">${live.length} running · step${steps.length === 1 ? "" : "s"} ${steps.join(", ")}</span>` : ""}
-    ${r.stopped && live.length ? `<span class="dim">stopping — ${live.length} still finishing</span>` : ""}
-    ${over && r.stopped && r.todo.length ? `<span class="dim">${r.todo.length} left unread — nothing was undone, the steps already read stay read</span>` : ""}
-    ${over || r.stopped ? "" : `<button type="button" class="revchip" onclick="event.stopPropagation(); revStackStop(${esc(JSON.stringify(key))})">stop</button>`}
-  </div>`;
-}
-
-// **What a stack's run says on its COLLAPSED row** (SKEIN-370). Empty when it has none.
-//
-// SKEIN-353 made the runs independent — two stacks read at once, each with its own queue, counter
-// and stop control — and left the progress exactly where it had always been: `revStackRunHtml`,
-// reached only from `revStackSteps`, which draws only for the stack that is OPEN. Opening is
-// exclusive (`toggleRevStack` sets `revOpen = new Set([key])` and clears `revStackOpenKey`,
-// docs/parity.md §3), so the owner's sentence was half answered — "the ladder stack was
-// running read all and when I clicked the read all for other stack, I can't see the read all
-// progress in ladder stack". The run survives now; it was simply off screen while he looked at the
-// other one, and the collapsed row said "you are at step 2 of 18 · review from the bottom" whether
-// or not eighteen model calls were in flight for it.
-//
-// **It leads the gist cell, and it is short.** That column is rationed (§4) and truncates from the
-// right, so the news has to be the part that survives. What it displaces is "review from the
-// bottom" — standing advice about where to start, not news — while "you are at step N of M" stays,
-// because a reader still has to know where they are.
-//
-// **It stays after the run ends**, the same rule the expanded line already has: the last thing
-// somebody wants to know about eighteen model calls is that they happened and how many landed, and
-// a progress line that vanishes at 18 of 18 answers that question by removing it.
-//
-// A stack with no run renders exactly what it rendered before — the empty string is the whole of
-// that promise, and `tests/ui/stackread.mjs` holds it.
-function revStackRunGist(st) {
-  const r = revStackRuns.get(revStackKey(st));
-  if (!r) return "";
-  // Over when nothing is running and there is nothing left to start — and a STOPPED run has
-  // nothing left to start whatever is still in its queue. Same test as `revStackRunHtml`, because
-  // two surfaces disagreeing about whether a run is going is worse than either being wrong.
-  const over = !r.running.size && (!r.todo.length || r.stopped);
-  return `<span class="revflight">${over ? "✓" : "⟳"} ${
-    over ? (r.stopped ? "stopped at" : "read") : "reading"} ${r.done} of ${r.total}</span> · `;
-}
-
 function revStackRow(st) {
   const key = revStackKey(st);
   const open = revStackOpenKey === key;
   const next = revStackNext(st);
-  // Drawn once and asked twice: the marker's presence is also what takes "review from the bottom"
-  // off the line, and computing it in two places is how the two come to disagree.
-  const running = revStackRunGist(st);
   const line = `<div class="revline" onclick="toggleRevStack(${esc(JSON.stringify(key))})">
       <span class="mv ${next ? "yours" : "done"}" title="${next ? "your move" : "every step is decided"}"></span>
       <span class="stackmark" title="${esc(st.repo_id)}">stack</span>
       <span class="tcell"><span class="revtitle">${esc(st.name)} — ${st.steps.length} pull requests, one change${
         st.forks.size ? `, branching` : ""}</span></span>
-      <span class="gist"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>${running}${next
+      <span class="gist"${st.rooted ? "" : ` title="${esc(REV_UNROOTED_WHY)}"`}>${next
         ? `you are at step ${revStepNo(st, next)} of ${st.steps.length}${
-            st.rooted ? "" : " skein can see"}${running ? "" : " · review from the bottom"}`
+            st.rooted ? "" : " skein can see"} · review from the bottom`
         : `every step is decided`}</span>
       ${revRail(next || st.steps[0])}
     </div>`;
@@ -8004,11 +5779,8 @@ function revStackSteps(st) {
     // step that starts a second branch says which step it left from, so a reader can see the tree in
     // a list without the list pretending to be a line.
     const from = st.branches.has(rk(p)) ? (st.depth.get(rk(p)) || 1) - 1 : 0;
-    // **The row's own cells, on a step** (SKEIN-352). `revGist` and `revRail` rather than anything
-    // written here: a step showing a summary in its own dialect is two renderings of one reading,
-    // and the second is the one that drifts. It is also what makes the stack read's "4 of 16 done"
-    // checkable — the four say what they found, the one in flight carries its counter, and the
-    // eleven left say `not read`.
+    // **The row's own cells, on a step** (SKEIN-352): `revRail` rather than anything written here,
+    // so a step and a row cannot drift apart.
     const mv = revStepMove(st, p);
     return `<div class="step${cls}${st.branches.has(rk(p)) ? " branch" : ""}${
       revSel === rk(p) ? " sel" : ""}" data-rk="${esc(rk(p))}" onclick="toggleStackStep(${esc(JSON.stringify(rk(p)))})">
@@ -8017,18 +5789,11 @@ function revStackSteps(st) {
         <span class="revnum" title="${esc(p.repo_id || "")}">#${p.number}</span>
         <span class="tcell"><span class="st">${esc(p.title || "")}</span>${from
           ? `<span class="revtag" title="two pull requests are based on step ${from}, so the stack branches there — each branch is still reviewed bottom-up">branches from step ${from}${st.rooted ? "" : "+"}</span>`
-          : ""}${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : ""}${
-          // **The retry, on the step itself** (SKEIN-371). A step whose review did not come back
-          // has to be buyable from where it is read, not by leaving the stack — and the same
-          // control covers the two states it always covered, which a step row never drew at all.
-          // `revReadAgain`, not a second control written here: one rule for when a read is offered.
-          revReadAgain(p, revStackStep === rk(p))}</span>
-        ${revGist(revSums.get(rk(p)), rk(p), revStackStep === rk(p))}
+          : ""}${note ? `<span class="misnamed">⟨${esc(note)}⟩</span>` : ""}</span>
         ${revRail(p)}
       </div>${revStackStep === rk(p) ? revBody(p) : ""}`;
   }).join("");
   return `<div class="steps">
-      ${revStackRunHtml(st)}
       <div class="stackhint">bottom-up: each diff is expressed against the one below it. The order here is the branch graph (base_ref), not the numbers in the titles.${
         st.rooted ? "" : " The steps below this stack are not in your queue, so the numbers say \u201cat least\u201d."}</div>
       ${rows}</div>`;
@@ -8045,9 +5810,6 @@ function toggleRevRow(key) {
     renderReviewNow();
     return;
   }
-  // Looking at it IS the acknowledgement (SKEIN-333). Cleared here rather than on a timer, so the
-  // mark survives however long the reader is away and goes the moment they arrive.
-  revUpdated.delete(key);
   // Exclusive (docs/parity.md §3): opening a row closes every other row and any open stack.
   revOpen = new Set([key]);
   revStackOpenKey = null;
@@ -8059,9 +5821,6 @@ function toggleRevRow(key) {
   renderReviewNow();
   // §6 focus rule 4: the expansion lands at ~25% of the viewport, actions visible.
   if (revpane && revpane.querySelector) revKeyShow(revpane.querySelector(`.revrow${revRkQuery(key)}`));
-  // The prose the row shape left behind — off disk, no model call.
-  const [repo, number] = [key.slice(0, key.lastIndexOf("#")), Number(key.slice(key.lastIndexOf("#") + 1))];
-  if (((revQueue && revQueue.prs) || []).some(p => rk(p) === key)) revLoadReading(repo, number);
 }
 
 // Set aside until the head moves (SKEIN-144) — the other instrument beside the archive: an
@@ -10599,18 +8358,6 @@ function gitCredRow(c) {
 // The pane's own status line. No single control can give this answer: the scope switch can be on
 // while nothing is scoped, which is precisely the state worth naming — and the one a switch drawn
 // "on" would otherwise misreport.
-// **"app" chosen with no App to act as** (SKEIN-516). The answer is the server's: `app_ready` in
-// `/api/fleet/git-grants` is `gitgate::app_credentials().is_ok()`, the very check
-// `review::asking::acting_credential` hands `choose_acting` — so this cannot say "no App" about a
-// fleet whose reviews would in fact act as one. Hidden until that payload has answered at all
-// (`app_ready` absent), rather than flashing the warning while it is in flight.
-function renderReviewIdentityNote() {
-  const note = document.getElementById("set-review-identity-note");
-  const chosen = document.getElementById("set-review-identity");
-  if (!note || !chosen) return;
-  note.hidden = !(chosen.value === "app" && gitLast.app_ready === false);
-}
-
 // **The GitHub App is missing a read it should have** (SKEIN-1344, the owner's decision of
 // 2026-10-26: the App setup requires Checks: read and Actions: read). The server learns it when a
 // token request naming them is refused and one without them is not, so pushing keeps working; this
@@ -10630,7 +8377,6 @@ function appReadsFor(slug) {
 }
 
 function renderGitState(d) {
-  renderReviewIdentityNote();
   const el = document.getElementById("set-gitstate");
   if (!el) return;
   const n = (d.credentials || []).filter(c => !c.problem && c.has_token).length;
@@ -11245,8 +8991,6 @@ function openSettings(pane = "repos") {
     document.getElementById("set-onedisk").checked = !!settings.fleet_one_disk;
     document.getElementById("set-gitscope").checked = !!settings.scope_git_to_repo;
     document.getElementById("set-ghappid").value = settings.github_app_id || "";
-    document.getElementById("set-review-identity").value = settings.review_identity === "app" ? "app" : "me";
-    renderReviewIdentityNote();
     document.getElementById("set-boxdisk").value = settings.box_disk_max || "";
     // `?? ""` rather than `|| ""`: 0 is a real setting here — the owner switching the age offer
     // off — and `||` would show them a blank box that reads back as the default.
@@ -11448,27 +9192,6 @@ function repoField(r, key, title, desc, placeholder) {
 // A picker, not a text field: the thing a repo needs is a whole connection — a gateway *and* the
 // token that mints at it — and only Work tracking knows which pairs exist. Typing a URL here could
 // only ever name half of one.
-// **The composition nobody chose in one place** — docs/pr-review.md §13. Auto-review with the
-// ceiling at `approve`, plus a merge train that claims this repo's pull requests, is skein
-// approving its own work and merging it with nobody in it. That is reachable on purpose; what it
-// came with is that it must not be reachable silently.
-//
-// Rendered from the two halves the PAGE can see — this repo's own switches — and it names
-// `skein doctor` for the half it cannot: whether any workflow in the fleet actually merges is a
-// fleet-level fact, and `prwork::the_loop_this_repo_has_built` is the authority on it. A page that
-// guessed at that would either cry wolf or stay quiet, and both are worse than pointing at the
-// thing that knows.
-//
-// It appears at the moment the decision is made — under the ceiling select, when "approve" is what
-// is chosen — rather than in a banner somewhere a person is not looking.
-function repoLoopWarning(r) {
-  if (!r.auto_review || r.auto_review_ceiling !== "approve") return "";
-  return `<div class="set-field"><span class="desc warnline">`
-    + `Approvals are unattended here. Where a merge train also claims this repo's pull requests, `
-    + `<b>an approval skein posts is what merges it</b> — nobody is in that loop. `
-    + `Run <code>skein doctor</code> to see whether one does.`
-    + `</span></div>`;
-}
 function repoSelect(r, key, title, desc, options) {
   // A boolean field arrives as true/false and its <option> values are strings; without this the
   // select falls back to its first option and silently misreports the stored setting.
@@ -11821,26 +9544,9 @@ function renderRepoList() {
             ? `which backlog this repo's boxes claim work from — set up under <b>Work tracking</b>${conn && !conn.ready ? `. <b>${esc(conn.label)}</b> isn't usable yet: it needs both a gateway URL and a token` : ""}`
             : "no connections configured yet — add one under <b>Work tracking</b> and it'll appear here",
           [["", "Not tracked"], ...conns.map(c => [c.id, c.ready ? c.label : `${c.label} (not usable yet)`])])
-      // The per-repo half of "may skein read pull requests" (docs/pr-review.md §10, layer 1), on the
-      // card beside the queue it reads from. It had been reachable only from a chip in the review
-      // pane. Posted to its own route (`revSetReadingFor`), which is the one place it is written.
-      + repoSelect(r, "read_prs", "Read ahead",
-          "let skein read this repo's pull requests on its own: the ones waiting on your review and the ones you opened, one unit of the day's budget each. Off, it reads one only when you ask. Needs <b>Read pull requests</b>, the master switch in Settings → Boxes",
-          [["false", "Off"], ["true", "On"]])
       + repoSelect(r, "review_queue", "Review queue",
           "list this repo's pull requests, and count the ones waiting on you. Turn it off for a repo whose PRs are none of your business — a fork, a scratch clone — and skein stops asking GitHub about it entirely",
           [["true", "On"], ["false", "Off"]])
-      // The reviewer engine's two switches, in the order they resolve: may it act here at all, and
-      // then how far. Separate rows because they answer different questions and one is a
-      // permission — folding them into a single four-value select would make "off" and "on but
-      // posting nothing" the same control, and they are not the same decision.
-      + repoSelect(r, "auto_review", "Automatic review",
-          "let skein review this repo's pull requests on its own — read them, and post what the ceiling below allows. Off everywhere by default; nothing turns it on by itself",
-          [["false", "Off"], ["true", "On"]])
-      + repoSelect(r, "auto_review_ceiling", "Unattended up to",
-          "how far automatic review may go without you. Anything past the ceiling is still read, and waits. <b>Comment</b> is where a repo starts: findings unattended, verdicts waiting",
-          [["none", "Nothing — read only"], ["comment", "Findings"], ["changes", "Findings and refusals"], ["approve", "Everything, including approvals"]])
-      + repoLoopWarning(r)
       + repoTokenRow(r)
       + repoKindsRow(r)
       + repoCacheRow(r)
@@ -11923,22 +9629,10 @@ function joinShareWarning(slug, chosen) {
 function saveRepoField(input) {
   const { id, key } = input.dataset;
   // Booleans on the wire. Sending the string "false" would deserialize-fail and the field would
-  // report saved while nothing changed — the worst shape a settings bug can take. A LIST rather
-  // than one name because the second such field arrived (`auto_review`) and a comparison that
-  // named one would have made the new one fail exactly that way, silently.
-  const BOOL_KEYS = ["review_queue", "auto_review", "read_prs"];
+  // report saved while nothing changed — the worst shape a settings bug can take.
+  const BOOL_KEYS = ["review_queue"];
   const raw = input.value.trim();
   const value = BOOL_KEYS.includes(key) ? raw === "true" : raw;
-  const saved = () => {
-    // Confirm at the field, not only in a toast: the toast is gone before you've read the next label.
-    const flag = document.querySelector(`[data-saved="${CSS.escape(id + "-" + key)}"]`);
-    if (flag) { flag.classList.add("on"); setTimeout(() => flag.classList.remove("on"), 1600); }
-  };
-  // Consent to read has its own route and its own writer, shared with the review pane's chip.
-  if (key === "read_prs") {
-    revSetReadingFor(id, value).then(ok => ok ? loadRepos().then(() => { renderRepoList(); saved(); }) : input.focus());
-    return;
-  }
   fetch(`/api/repos/${encodeURIComponent(id)}/settings`, {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ [key]: value }),
   })
@@ -12016,7 +9710,6 @@ function settingsPayload() {
     fleet_one_disk: document.getElementById("set-onedisk").checked,
     scope_git_to_repo: document.getElementById("set-gitscope").checked,
     github_app_id: document.getElementById("set-ghappid").value.trim(),
-    review_identity: document.getElementById("set-review-identity").value,
     box_disk_max: document.getElementById("set-boxdisk").value.trim(),
     // Blank means the same as 0, which the field says: skein says nothing about age at all. The
     // two provable sweeps beside it are unaffected either way.
@@ -13484,8 +11177,8 @@ function pickAttachment(folder) {
 
 // ---------- a warning at the top, hidden for a while (SKEIN-1244) ----------
 // The owner's ask: "the warning that come at the top should be dismissable, they can come back after
-// some time but there should be a way to dismiss them temporarily". All four rows take part —
-// #healthban, #loginban, #trainban and #staleban — and each one, once drawn, hands its row and the
+// some time but there should be a way to dismiss them temporarily". All three rows take part —
+// #healthban, #loginban and #staleban — and each one, once drawn, hands its row and the
 // problems it is showing to `banDismissable`, which gives it a ✕ and decides whether it is hidden.
 // What counts as the same problem, and for how long, is `cockpit/src/dismiss.mjs`; this is only the
 // storing and the drawing.
@@ -13707,16 +11400,6 @@ function connect() {
   // "Still here", and nothing else — no render, because nothing about the fleet changed. This is the
   // whole reason the staleness banner can mean "the server is gone" rather than "nothing happened".
   es.addEventListener("alive", () => { lastTickAt = Date.now(); });
-  // **A reading, on the connection the page already holds** (SKEIN-366). Not a fleet tick and not
-  // counted as one: `lastTickAt` is deliberately untouched, because a reading says nothing about
-  // whether the fleet producer is still turning, and letting it feed the staleness banner would
-  // make a busy review pane hide a dead board.
-  //
-  // This is the whole point of the change. A reading is a model call taking tens of seconds; on its
-  // own request it held one of the browser's six connections for that long, and ten at once
-  // (`REV_ASKED_PARALLEL`) starved everything else the cockpit does. Here, N readings cost nothing
-  // beyond this one stream.
-  es.addEventListener("reading", e => { try { revReadArrived(JSON.parse(e.data)); } catch {} });
   // Told rather than silently skipped: this tab stopped reading long enough to fall behind the
   // producer, so what it holds may be wrong in ways a delta cannot repair. Ask for the whole thing.
   es.addEventListener("behind", e => {
@@ -13860,7 +11543,7 @@ function loadHealth() {
 // There should be an easy way to do it. I just click something, a session opens I login there and
 // then it closes and everything else starts working."
 //
-// The "popup" is a ROW (the #healthban/#trainban rule: a banner pushes the app down, never covers
+// The "popup" is a ROW (the #healthban rule: a banner pushes the app down, never covers
 // it), and the "something to click" opens a one-shot terminal onto GET /api/login/:runtime/terminal
 // — a WebSocket the server bridges to a PTY running the interactive login. The terminal lives in
 // the modal stack (the #mbx pattern), NOT the dock: dock sessions belong to boxes, persist into
