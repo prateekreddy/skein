@@ -215,12 +215,10 @@ pub(crate) fn plant_refusal_for_test() {
 /// what `auth_refusal` reads and what the cockpit's login banner is driven by.
 #[cfg(test)]
 pub(crate) fn plant_refusal_saying(said: &str) {
-    remember_refusal(
-        &Unread::Refused {
-            code: "1".into(),
-            said: said.into(),
-        },
-    );
+    remember_refusal(&Unread::Refused {
+        code: "1".into(),
+        said: said.into(),
+    });
 }
 
 /// The same, dated — for the two rules in [`refusal_still_standing`], both of which are about WHEN
