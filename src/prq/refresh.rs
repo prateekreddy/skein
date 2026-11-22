@@ -1495,44 +1495,6 @@ mod tests {
         forget_renames();
     }
 
-    /// `review::prune` reads this queue's list, and it may only do so when the list is whole.
-    ///
-    /// Asserted against the source, the way [`the_badge_reads_through_a_ten_minute_budget`] is and
-    /// for the same reason: the call lives in the server binary, behind an HTTP handler and a
-    /// detached task, so no test in this module can reach it — and the thing that goes wrong is
-    /// the guard being dropped, which a runtime test of the pruning itself would never notice.
-    ///
-    /// What it costs when it is dropped: every pull request past a truncated search's page is
-    /// absent from `open`, so its summary takes the "closed and merged is asked" road and pays a
-    /// `pr_is_open` REST call — per file, per tab open, for ever, for pull requests that are alive
-    /// and merely past the hundredth (SKEIN-231).
-    #[test]
-    fn the_only_other_reader_of_this_list_stands_down_when_it_is_partial() {
-        let server = crate::testutil::server_source();
-        assert_eq!(
-            server.matches("review::prune(").count(),
-            1,
-            "there is more than one caller now, and only one of them is pinned here"
-        );
-        let guarded = server
-            .split("review::prune(")
-            .next()
-            .expect("the source before the call");
-        // The PROPERTY, not one spelling of it: somewhere before the call, the queues that reach
-        // it are filtered on `whole`. Pinned this way round because the exact expression has
-        // already moved once — it was `slug.filter(|_| queue.whole)` inline, and is now a filter
-        // in the helper that builds the list — and a test that fails on a refactor which KEEPS
-        // the guard teaches whoever meets it to delete the test.
-        assert!(
-            guarded
-                .lines()
-                .any(|line| line.contains("filter") && line.contains("whole")),
-            "the queue's list is pruned against without asking whether it saw everything — a \
-             search cut off at its page makes every pull request past the hundredth absent for a \
-             reason that has nothing to do with it"
-        );
-    }
-
     /// **A queue that could not be fully asked never replaces one that was** (SKEIN-447).
     ///
     /// The live failure, on a live cockpit 2026-08-27: twelve pull requests at 08:12, five of

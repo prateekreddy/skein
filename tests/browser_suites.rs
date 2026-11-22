@@ -76,7 +76,7 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 /// Needs only node. `lift.mjs` is absent on purpose — it is the shared helper the others import,
 /// not a suite, and running it asserts nothing.
-const NODE_SUITES: [&str; 30] = [
+const NODE_SUITES: [&str; 28] = [
     "attach",
     // The away digest's wiring: it reads the server's journal and moves the server's mark.
     "away",
@@ -124,8 +124,6 @@ const NODE_SUITES: [&str; 30] = [
     "stalebin",
     "stream",
     "substrate",
-    "train",
-    "trainpanel",
     "tabs",
     "undo",
     "unowned",

@@ -1035,7 +1035,7 @@ mod tests {
         // makes this fixable — "somewhere in your config" would leave the user no better off than
         // the silence it replaced.
         assert!(
-            why.contains("line 3") && why.contains("expected u32"),
+            why.contains("line 3") && why.contains("expected a boolean"),
             "the complaint must locate the failure, not just name the file: {why}"
         );
 
