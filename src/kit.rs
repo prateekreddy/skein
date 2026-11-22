@@ -732,7 +732,10 @@ mod tests {
         fs::create_dir_all(theirs.join("data")).unwrap();
         let old = theirs.join(".claude");
         ensure_store(&old).unwrap();
-        assert!(old.join("skein").is_dir(), "a folder of theirs read as a store");
+        assert!(
+            old.join("skein").is_dir(),
+            "a folder of theirs read as a store"
+        );
     }
 
     /// **A box whose store moved under it follows it to `store/data`, and the shared home is

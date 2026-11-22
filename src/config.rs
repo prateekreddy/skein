@@ -1214,7 +1214,10 @@ mod tests {
         .unwrap();
 
         assert!(config_error().is_none(), "{:?}", config_error());
-        assert!(!load_config().confirm_destroy, "the config's settings were lost");
+        assert!(
+            !load_config().confirm_destroy,
+            "the config's settings were lost"
+        );
         let repos = crate::repos::load_repos();
         assert_eq!(repos.len(), 1, "the repo list was read as empty");
         assert_eq!(repos[0].sync_connection, "kept");
