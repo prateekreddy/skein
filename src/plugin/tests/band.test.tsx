@@ -59,6 +59,12 @@ function engine(on: On, w: World) {
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__skein__${e.name}` } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  // What the engine draws when the plugin passes the band on.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
   on('fs.read', (_, e) => {
     if (e.path === `${STATE}/signals/resources.json`) return { value: w.signal }
     if (e.path.endsWith('/.claude-plugin/plugin.json')) return { value: '{"version":"9.8.7"}' }
@@ -102,9 +108,10 @@ const BAND = {
 const TYPED = (args: string) =>
   ({ command: 'skein', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } }) as const
 
-async function line($: Engine): Promise<string | null> {
+/** What the band draws: skein's line, or `engine` where skein passed it on and drew nothing. */
+async function line($: Engine): Promise<string | undefined> {
   const ui = await $.ui.mount(BAND)
-  const text = (await ui.find({ type: 'Text', text: /waiting on you/ }))?.text ?? null
+  const text = (await ui.find({ type: 'Text' }))?.text
   await ui.unmount()
 
   return text
@@ -112,7 +119,7 @@ async function line($: Engine): Promise<string | null> {
 
 // What would make it fail: the count or the words drawn from anything but what waits, such as a
 // granted request counted. Watched: with the `state` filter taken out of `waiting`, the granted
-// package request made this line say 4.
+// package request made this line say 5.
 test('the band is one line: the count, where to go, and what waits in a few words', async ($, on) => {
   const w = world({
     signal: signal(30, [diskAsk('hold-1')], [{ component: 'claude-code', new: '2.1.320', restart_requested: false }]),
@@ -129,7 +136,7 @@ test('nothing waiting draws nothing, and a disk ask the agent can clear is not w
   const w = world({ signal: signal(30, [diskAsk('')]), requests: [pkg('p1', 'granted')] })
   await started(on, w, $)
 
-  expect(await line($)).toBe(null)
+  expect(await line($)).toBe('engine')
 })
 
 // What would make it fail: an old signal file believed. Watched: with the staleness check removed
@@ -138,7 +145,7 @@ test('a signal file skein stopped writing asks nothing', async ($, on) => {
   const w = world({ signal: signal(301, [diskAsk('hold-1')]) })
   await started(on, w, $)
 
-  expect(await line($)).toBe(null)
+  expect(await line($)).toBe('engine')
 })
 
 // What would make it fail: a band drawn in a session outside a skein box.
@@ -146,7 +153,7 @@ test("outside a skein box the band is the engine's", async ($, on) => {
   const w = world({ env: { SKEIN_BOX: 'web-main' }, requests: [question('q1')] })
   await started(on, w, $)
 
-  expect(await line($)).toBe(null)
+  expect(await line($)).toBe('engine')
 })
 
 // What would make it fail: the look after a turn dropped, so a new request waits a minute unseen.
@@ -155,13 +162,13 @@ test('the line follows the requests after a turn of the main loop, not of a suba
   // The engine, beneath: a turn's end answers with its text.
   on('turn.complete', (_, e) => ({ text: e.answer }))
   const clock = await started(on, w, $)
-  expect(await line($)).toBe(null)
+  expect(await line($)).toBe('engine')
   const turn = { reason: 'answer', answer: 'done', durationMs: 1, isAborted: false } as const
 
   w.requests = [question('q1')]
   await $.turn.complete({ ...turn, turnId: 't1', agentId: 'a1' })
   await clock.settle()
-  expect(await line($)).toBe(null)
+  expect(await line($)).toBe('engine')
 
   await $.turn.complete({ ...turn, turnId: 't2' })
   await clock.settle()

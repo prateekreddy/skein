@@ -6,10 +6,7 @@
 // what skein answers for them. `tests/plugin_lanes.rs`
 // (`both_doors_of_lane_list_give_the_contracts_answer`) writes the records under a directory
 // written here as `/fixture`, with the lane root at `/fixture/lanes`, and holds both doors to this
-// answer. Then `agents-panel.test.tsx` hands the
-// command line's answer to the panel and holds it to the lanes in it: lane `a` is drawn, and lane
-// `b`, from a newer skein, is not. So a change at either door that the other does not share fails
-// one of the two.
+// answer, so a change at either door that the other does not share fails.
 //
 // Read by the Rust test as JSON: everything after `LANE_CONTRACT = ` must stay JSON.
 
