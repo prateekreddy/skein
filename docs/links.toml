@@ -38,9 +38,11 @@
 ".claude/settings.local.json" = "somebody else's: a box's own settings file, named as where the kit puts skein's subagent cache default; the kit writes it in each box's checkout at runtime and `.gitignore` keeps it out of this tree (SKEIN-1048, SKEIN-1218)."
 
 ["docs/parity.md"]
+"src/review/summary.rs" = "past tense: where the summary type lived when this cut was made; the review engine has since been removed."
 "src/fleet-agent.py" = "past tense: the sentence says this file is deleted (SKEIN-573) and lists what went with it."
 
 ["docs/recovery-survey.md"]
+"src/reviewbox.rs" = "past tense: one of the files a guard was removed from, before the review box itself was deleted."
 "src/bin/skein-server.rs" = "past tense: the survey (2026-09-09) names the six refusal paths it found in this file as Offender 1, before SKEIN-1103 split it into `src/bin/skein-server/`. Its `path:line` citations of the same file are declared historical in `docs/line-cites.toml`; this is the plain mention beside them."
 "src/fleet.rs" = "past tense: rows and notes the survey measured in this file before SKEIN-934 split it, one sentence saying so in as many words, and the SKEIN-756 guards that were gone before the pass. Its line citations are historical in `docs/line-cites.toml`."
 "src/health.rs" = "past tense: a cell recording where the survey looked for a panic site on the day it was measured, before SKEIN-1099 made it `src/health/`. Restating it against the directory would claim a search nobody ran."
@@ -66,3 +68,10 @@
 
 ["tests/ui/README.md"]
 "tests/server.rs" = "past tense: the Files-tab defect this suite was written for, when `tests/server.rs` was one green file that could not see it. SKEIN-1118 split it into `tests/server/`."
+
+["docs/decisions/review-engine-removed.md"]
+"src/bin/skein-server/workflows.rs" = "past tense: the record of what the review engine and merge train removal took out, kept so the code can be found again in git."
+"src/reviewbox.rs" = "past tense: the record of what the review engine and merge train removal took out, kept so the code can be found again in git."
+"src/owed.rs" = "past tense: the record of what the review engine and merge train removal took out, kept so the code can be found again in git."
+"docs/pr-review.md" = "past tense: the record of what the review engine and merge train removal took out, kept so the code can be found again in git."
+"docs/pr-workflow.md" = "past tense: the record of what the review engine and merge train removal took out, kept so the code can be found again in git."

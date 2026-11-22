@@ -35,6 +35,7 @@ not deleted: a reversed decision says what replaced it and why.
 |---|---|
 | [versions-roll-out-when-idle.md](versions-roll-out-when-idle.md) | agent CLIs and Rust toolchains are known versions, rolled out by the owner and applied to a box when it is idle |
 | [warden-or-prompt.md](warden-or-prompt.md) | a privileged host act is done by a warden that can, or the person is prompted |
+| [review-engine-removed.md](review-engine-removed.md) | what left with the merge train and AI review engine, and where to find it |
 | [one-identity.md](one-identity.md) | what skein does on GitHub it does as you, never as a second actor |
 | [install-is-one-sandbox-command.md](install-is-one-sandbox-command.md) | the install is one file handed to `sbx`, with nothing built or run on the host |
 | [pr-summary-calibration.md](pr-summary-calibration.md) | the depth of a pull request summary, and saying what was not read |
