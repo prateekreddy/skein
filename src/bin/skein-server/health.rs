@@ -119,6 +119,9 @@ const USAGE_MAX_AGE: Duration = Duration::from_secs(3600);
 /// and is then answered from the newer reading.
 static USAGE_SCAN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// How recent a reading has to be for the background tick to leave it alone.
+const USAGE_JUST_READ: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A reading of the fleet's usage, written into every box as that box's own spend before it is
 /// handed on (SKEIN-1384). A box whose file could not be written is said on stderr and does not
 /// cost the caller its reading.
@@ -135,13 +138,15 @@ fn told(
 
 /// The fleet's usage, read once every [`USAGE_MAX_AGE`] behind [`USAGE_SCAN`]: the owner's "once in
 /// a while", so each box's own spend is at most that old with nobody watching (SKEIN-1384). Never
-/// returns.
+/// returns. A reading under [`USAGE_JUST_READ`] old is kept: the first tick fires at start, and a
+/// scan queued behind a request that just read the fleet would only repeat it, then overwrite
+/// whatever has been stored since it began.
 pub(super) async fn warm_usage() {
     let mut tick = tokio::time::interval(USAGE_MAX_AGE);
     loop {
         tick.tick().await;
         let _one_at_a_time = USAGE_SCAN.lock().await;
-        match tokio::task::spawn_blocking(|| told(skein::usage::refresh())).await {
+        match tokio::task::spawn_blocking(|| told(skein::usage::report(USAGE_JUST_READ))).await {
             Ok(Err(e)) => eprintln!("skein: usage reading: {e}"),
             Err(e) => eprintln!("skein: usage reading did not run: {e}"),
             Ok(Ok(_)) => {}
