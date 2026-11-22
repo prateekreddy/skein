@@ -564,7 +564,7 @@ fn report_with(runtime_updates: impl FnOnce() -> Vec<crate::fleet::RuntimeUpdate
              One build can reach the VM's memory, and with no swap the kernel picks a victim by \
              badness rather than by blame",
             "skein save, then skein resize 26g   (prints the host commands that rebuild the sandbox; it \
-             changes nothing itself. Settings → Fleet → Memory applies at the next create)",
+             changes nothing itself. Settings → Fleet → Memory, at the next create, does the same)",
         )
         .destroys(),
     };
