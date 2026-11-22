@@ -943,12 +943,12 @@ pub(super) async fn api_review_act(
                 // Neither is asked of GitHub, deliberately: the live head is what the merge is
                 // being checked AGAINST, and deriving the expectation from the same place would
                 // make it agree with itself and guard nothing. When both are empty the merge is
-                // refused rather than defaulted — `prwork::merge_by_hand` says so in words.
+                // refused rather than defaulted — `prq::merge_by_hand` says so in words.
                 let seen = match req.drafted_at.trim().is_empty() {
                     false => req.drafted_at.clone(),
                     true => skein::prq::remembered_head(&id, number).unwrap_or_default(),
                 };
-                skein::prwork::merge_by_hand(&slug, number, &seen)?
+                skein::prq::merge_by_hand(&slug, number, &seen)?
             }
             (None, "ask") => {
                 let composed = skein::review::ask(&repo, &slug, &queued()?, &req.body)?;

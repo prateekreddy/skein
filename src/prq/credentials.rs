@@ -259,7 +259,7 @@ pub fn forget_renames() {
 /// "not known" — and the empty string is never what gets remembered, because a body with no
 /// `default_branch` is an `Err` here rather than an answer.
 ///
-/// **`pub` for the merge a person presses** (SKEIN-338). [`crate::prwork::merge_by_hand`] needs the
+/// **`pub` for the merge a person presses** (SKEIN-338). [`super::merge_by_hand`] needs the
 /// trunk and must not refresh the queue to get it, and this is already the memoised answer the
 /// queue itself uses — so both roads to a merge read the repository's default branch from the same
 /// place and cannot disagree about what the trunk is.

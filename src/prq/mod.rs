@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 mod checks;
 mod credentials;
+mod handmerge;
 mod node;
 mod refresh;
 mod search;
@@ -49,6 +50,7 @@ pub use credentials::{
     forget_trunks, host_token, host_token_source, refused_repos, repo_slug, repo_token_source,
     slug_for_write, token_for, trunk_of, viewer, CredentialLife, GhToken, Life, Need,
 };
+pub use handmerge::merge_by_hand;
 pub use refresh::{
     counts, invalidate, merged, queue, queue_within, unexpired, Count, MergedQueue, StoppedPr,
 };

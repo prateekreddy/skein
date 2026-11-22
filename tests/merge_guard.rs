@@ -111,7 +111,7 @@ fn every_merge_request_names_the_head_it_was_decided_about() {
 
 /// **Nothing merges except through the two functions that check the trunk.**
 ///
-/// `prq::merge` holds the `PUT` and knows nothing about bases; `prwork::merge_by_hand` is what puts
+/// `prq::merge` holds the `PUT` and knows nothing about bases; `prq::merge_by_hand` is what puts
 /// the trunk guard in front of it. So a caller that reaches `prq::merge` directly has the head
 /// anchor and NOT the base check — half a guard, which is exactly the shape SKEIN-338 was: the
 /// cockpit route called `prq::merge` and a stacked child merged into its parent.
@@ -177,7 +177,7 @@ fn the_only_caller_of_the_bare_merge_is_the_one_that_checks_the_base() {
             file, &holder,
             "{file}:{line} calls prq::merge directly. That is the head anchor WITHOUT the base \
              check — half a guard, and exactly the shape SKEIN-338 was: the cockpit called it, and \
-             a stacked child would merge into its parent. Go through prwork::merge_by_hand."
+             a stacked child would merge into its parent. Go through prq::merge_by_hand."
         );
         assert!(
             inside.contains(line),
@@ -215,7 +215,7 @@ fn the_cockpits_merge_takes_its_head_from_the_reader_and_not_from_github() {
     // The arm, generously bounded: up to the next match arm of the same `match`.
     let arm = &text[start
         ..text[start..]
-            .find(r#"(None, "ask")"#)
+            .find(r#"(None, other)"#)
             .map(|n| start + n)
             .unwrap_or(text.len())];
 

@@ -129,7 +129,7 @@ pub fn re_anchor(
     // second body with the same name: identical code, and `review::commentable` had a
     // THIRD reading of the same bytes that lacked the `\ No newline at end of file` case
     // and silently discarded the rest of its hunk. `prq -> review` is already declared.
-    let lines = crate::review::right_side_lines(new_diff);
+    let lines = right_side_lines(new_diff);
     let mut anchored = Vec::new();
     let mut displaced = Vec::new();
     for c in comments {
@@ -655,7 +655,7 @@ pub fn pr_files(slug: &str, number: u64) -> Result<Vec<String>, String> {
 /// The empty string is refused rather than defaulted to the live head because "assume current" is
 /// precisely the hole: a caller with no idea what the reader saw must say so and be stopped, not
 /// have skein invent an answer that agrees with whatever GitHub has now. The one caller is
-/// [`crate::prwork::merge_by_hand`], which checks the trunk as well — there is no merge in this
+/// [`super::merge_by_hand`], which checks the trunk as well — there is no merge in this
 /// crate that goes to GitHub past neither guard.
 pub fn merge(slug: &str, number: u64, expected_head: &str) -> Result<String, String> {
     if expected_head.trim().is_empty() {
@@ -858,6 +858,64 @@ fn set_thread_resolved(slug: &str, thread_id: &str, resolved: bool) -> Result<()
     }
 }
 
+/// **Which lines of a unified diff the NEW file shows, and what is on them**: `(path, new-side line
+/// number, content with the diff marker stripped)`, in the order the diff lists them.
+///
+/// Exactly the lines GitHub accepts a RIGHT-side review comment on: context and added lines count,
+/// a deleted line exists only on the left, and a deleted file has no right side at all. A `\ No
+/// newline at end of file` marker in the middle of a hunk moves no counter and ends no hunk
+/// (SKEIN-233). The content is each comment's durable anchor ([`ReviewComment::text`]).
+fn right_side_lines(diff: &str) -> Vec<(String, u64, String)> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut new_line: u64 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            path = None;
+            in_hunk = false;
+        } else if !in_hunk && line.starts_with("+++ ") {
+            // `b/` is git's convention and not part of the path; `+++ /dev/null` is a deleted file,
+            // which has no right side to comment on. The `!in_hunk` guard is what keeps an ADDED
+            // line whose own text begins `++ ` from being read as a file header.
+            let name = line["+++ ".len()..].trim();
+            path =
+                (name != "/dev/null").then(|| name.strip_prefix("b/").unwrap_or(name).to_string());
+        } else if !in_hunk && line.starts_with("--- ") {
+            // The old-file header; only the +++ side names what RIGHT comments attach to.
+        } else if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — only `+c` matters here. A header this cannot read leaves
+            // `in_hunk` false rather than counting from a number nobody supplied.
+            in_hunk = false;
+            if let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) {
+                let start = plus[1..].split(',').next().unwrap_or("");
+                if let Ok(n) = start.parse::<u64>() {
+                    new_line = n;
+                    in_hunk = true;
+                }
+            }
+        } else if in_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            } else if line.starts_with('\\') || line.starts_with('-') {
+                // `\ No newline…` is a note ABOUT the previous line, not a line of either file, so
+                // it moves no counter and ends no hunk. `-` lines live only in the old file.
+            } else {
+                // Context: a leading space, or the entirely empty line git emits for blank context.
+                let rest = line.strip_prefix(' ').unwrap_or(line);
+                if let Some(p) = &path {
+                    out.push((p.clone(), new_line, rest.to_string()));
+                }
+                new_line += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,7 +1048,7 @@ mod tests {
 
     /// **A merge with no expected head never reaches the network.**
     ///
-    /// The backstop, one layer below `prwork::merge_by_hand`'s own refusal, and it is here rather
+    /// The backstop, one layer below `merge_by_hand`'s own refusal, and it is here rather
     /// than only there because this is the function holding the `PUT`. Until SKEIN-338 it sent
     /// `{"merge_method": …}` and nothing else, so every caller — present and future — merged
     /// whatever HEAD happened to be. Making the argument required is only half of that; refusing
