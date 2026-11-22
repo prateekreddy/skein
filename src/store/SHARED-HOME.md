@@ -1,17 +1,16 @@
 # Shared working files in Skein boxes
 
 Use `$HOME/shared` (`/home/agent/shared`) for durable project working material that must survive a
-box restart or be available live in another Claude/Codex box for this repo. Examples: reference
+box restart or be available live in another box for this repo. Examples: reference
 documents, sample corpora, research captures, and working notes.
 
 The canonical directory is `shared-home/` beside this repo's mounted Skein store, outside any
-`.claude` directory, and each box lists `$HOME/shared` among its additional directories (Codex: its
-writable roots), so writing there does not ask for permission. It is read-write and
+`.claude` directory, and each box lists `$HOME/shared` among its additional directories, so writing there does not ask for permission. It is read-write and
 project-scoped. Changes appear in every box immediately; concurrent writes have normal filesystem
 last-writer-wins behavior, so coordinate edits to the same file.
 
 Real `$HOME` is intentionally private to each box. Do not put credentials, `.ssh`, agent runtime
-state (`.claude`/`.codex`), caches, toolchains, repositories, build outputs, sockets, or locks in
+state (`.claude`), caches, toolchains, repositories, build outputs, sockets, or locks in
 `shared`. If `$HOME/shared` is missing or is not a symlink, report it instead of assuming data is
 being persisted.
 

@@ -78,8 +78,7 @@ installed. Tail-first — these files reach tens of megabytes — with "load old
 back to the beginning. Tool calls are summarised as `Bash(cargo test)` rather than inlined, and
 tool results and thinking are left out, because the point is the conversation.
 
-Claude only for now. Codex's rollout files have a different shape, and skein captures a runtime's
-format from a real box before claiming to read it — the tab says so rather than guessing.
+It reads Claude's transcript format, the only one skein runs.
 
 ## Per-repo settings
 
@@ -134,7 +133,7 @@ mounted live into every box for the repo — rather than the kit, because a kit 
 created after it changed. On a box that has been running for weeks, every write is an append or a
 create, never a replace: the Work tracking section is appended to `CLAUDE.md` only if it isn't
 already there; the memory and the skill are copied only if absent; one line is appended to
-`MEMORY.md`; and a hand-written `[mcp_servers.…]` in Codex's config is left exactly as it was. Then
+`MEMORY.md`. Then
 it stamps itself and stops — the box owns all of it from that point, including deleting the parts it
 doesn't want, and a later start will not put them back. The single exception is the box's own `sync`
 MCP registration, which a re-apply deliberately replaces: that is how a rotated token gets in.
@@ -165,17 +164,13 @@ the full surface. Those three documents are derived from the `sync` repo rather 
 `src/store/sync/UPSTREAM.md` records which upstream file each claim comes from, the commit they were
 last checked against, and what to re-read when the gateway moves.
 
-## Claude and Codex runtimes
+## The agent runtime
 
-Choose the default runtime when adding a repo, override it when launching a box, or use the cockpit's
-`↔` action to create a replacement box in another supported runtime. Each box remains single-runtime:
-Skein snapshots the source, launches the target runtime's own image, and keeps the source intact as
-rollback. This keeps images light and avoids cross-provider authentication inside the wrong image.
+skein runs Claude Code. Codex was removed (SKEIN-1511): a box whose record still names it starts on
+the fleet's default runtime, and its `~/.codex` is left where it is.
 
-Same-provider reconnects reuse the existing `skein-agent` tmux session. If the tmux process no
-longer exists, Skein runs the provider's native resume command (`claude --continue` or
-`codex resume --last`) inside a new tmux session. No replacement, transcript export, or context
-conversion is involved.
+Reconnects reuse the existing `skein-agent` tmux session. If the tmux process no longer exists, skein
+runs `claude --continue` inside a new tmux session.
 
 **Starting an agent reaches for nothing over the network** (SKEIN-403). It used to run the
 runtime's native updater first, on every session start — 1.9–3.2 s, and it failed every time,
@@ -198,12 +193,7 @@ the session hangs up its terminal, which stops the agent and whatever it runs th
 ignores the hangup (`nohup`) or left the session (`setsid`) keeps running.
 
 tmux is deliberately invisible: its status bar is disabled, mouse/copy scrolling is enabled, and
-pane history is enlarged. Codex is launched with its documented `--no-alt-screen` option so browser
-wheel scrolling moves through conversation output instead of cycling prompt history. Claude feeds
-its native status-line JSON into Skein's renderer; Codex maps the live `token_count` data behind
-`/status` into the same schema. The cockpit shows the same CTX/5H/7D/cost/model footer for both,
-refreshing every 30 seconds and omitting unavailable segments. An explicit Codex `/statusline`
-choice disables Skein's adapted footer.
+pane history is enlarged.
 
 Each Claude box also keeps the prompt cache for subagents, workflows and background requests for an
 hour instead of Claude Code's five minutes: the kit sets `"subagentPromptCacheTtl": "1h"` in the
@@ -221,15 +211,8 @@ plugins synced from claude.ai behave as they would anyway. To allow the plugin f
 start, when the launcher takes skein's `false` back out. A value somebody else wrote for that key
 is left alone either way. skein's own per-turn telemetry is separate and stays in the repo's store.
 
-Native transcripts are provider-specific and are not converted. A takeover preserves unpushed commits,
-the staged and unstaged tree, untracked files, branch, shared memory, skills, and user hooks. It also
-injects a durable brief containing the active task, last outcome, journal, diff, changed files, and a
-bounded Markdown export of the source conversation. The export provides continuity, but only the source
-provider can natively resume its original session.
-
-Skein installs `jq` and mandates `tmux` as the minimal box substrate. Provider-neutral probe scripts,
-handoffs, and immutable takeover snapshots live once in the mounted shared store; Skein never installs
-both large agent CLIs into every box. `GET /api/health` exposes dependency/hook failures.
+Skein installs `jq` and mandates `tmux` as the minimal box substrate. Probe scripts live once in the
+mounted shared store. `GET /api/health` exposes dependency/hook failures.
 
 ### One disk or two
 
@@ -452,13 +435,12 @@ the box's **next start**, because a credential is placed as the box comes up.
 
 ## Shared working files
 
-Every managed Claude and Codex box exposes the repo's durable working-data directory at
+Every managed box exposes the repo's durable working-data directory at
 `/home/agent/shared` (`$HOME/shared`). Its canonical host location is
 `~/.skein/repos/<id>/store/shared-home/`, beside the store (`store/data`) rather than inside it. A
 store kept elsewhere with `--store` keeps it at `<store>/shared-home/`. Writes are visible live in
 every box for that repo; concurrent edits use ordinary filesystem/last-writer-wins semantics. A box
-writes it without a prompt: it is in the box's `permissions.additionalDirectories`, and for Codex in
-`sandbox_workspace_write.writable_roots`.
+writes it without a prompt: it is in the box's `permissions.additionalDirectories`.
 
 A store from before the move has it at `store/.claude/shared-home/`. skein moves it beside the store
 the next time it starts a box of that repo. If both places hold files, skein moves nothing and says
@@ -466,7 +448,7 @@ so, and boxes leave `$HOME/shared` unlinked until one is left: move what you wan
 `store/shared-home/`, remove `store/.claude/shared-home/`, and start the box again. A box that was
 already running when the files moved gets `$HOME/shared` back when it restarts.
 
-Real `$HOME` remains private to each box. Skein never shares agent/auth state (`.claude`, `.codex`),
+Real `$HOME` remains private to each box. Skein never shares agent/auth state (`.claude`),
 credentials (`.ssh`, `.aws`, gh config), caches, toolchains, sockets, or locks. Startup creates or
 repairs the `shared` symlink but refuses to replace a real file/directory at that path, and box startup
 fails visibly if the canonical mount is unavailable or unwritable.
@@ -499,8 +481,7 @@ surfaced file asked. It is `store/data` now (SKEIN-1330, `docs/decisions/store-i
   did. Move what you want to keep into `store/data`, remove `store/.claude`, and restart the server.
 - **A box already running** loses nothing. Its store is bound into it, and a bind follows the
   directory, not the name, so it goes on writing into the renamed one. What it gets only at its
-  next restart: memory read straight from the store, `~/shared` and the mailbox writable from Codex,
-  and surfaced files editable. The workshop box sees the volume itself; its hooks find the store at
+  next restart: memory read straight from the store, and surfaced files editable. The workshop box sees the volume itself; its hooks find the store at
   the new name on their own.
 - **Memory** is the store's `memory/`, set as `autoMemoryDirectory` in the box's own
   `.claude/settings.local.json` rather than reached through a link under `~/.claude`. The checkout's
@@ -510,7 +491,7 @@ surfaced file asked. It is `store/data` now (SKEIN-1330, `docs/decisions/store-i
 - **Surfaced files** (`shared-paths.txt`) are bound into the checkout at the box's start, so the
   agent can edit them; the edit lands in the store's `shared-rw/` copy. A file of the box's own at
   that path is left alone and the launcher says so. An entry under a hidden directory, such as
-  `.codex/memory`, is refused.
+  `.git/hooks`, is refused.
 
 ## Configuration
 

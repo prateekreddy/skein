@@ -149,7 +149,7 @@ the same calls against the new one, as the kit and launcher now set a box up:
 - The kit (`src/kit/skein-startup.sh`): tests
   `the_checkout_links_only_what_claude_code_reads_from_the_store`,
   `the_box_settings_point_memory_at_the_store_and_allow_the_shared_home` and
-  `codex_may_write_the_shared_home_and_the_mailbox` (`src/kit.rs`).
+  a kit test removed with Codex (SKEIN-1511).
 - The launcher's surfaced-file binds and the shared-home bind by either name
   (`src/box-session.sh`): bwrap test
   `a_covered_box_writes_its_store_at_data_and_edits_a_surfaced_file_in_place`

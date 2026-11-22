@@ -148,7 +148,7 @@ opened without it says so and shows this same line; see [Opening the cockpit](#o
 sandbox, and every box inherits that session. Without it each box comes up sitting at a login
 prompt, does nothing, and shows `sign in` on the board — the single most common way a first run goes
 quiet. The checklist's sign-in step and that `sign in` chip both open a login terminal in the
-cockpit. Claude and Codex are separate sign-ins, and both can be signed in.
+cockpit.
 
 **Then add a repo, press + box**, name a branch, and an agent starts working on it. The board's
 first-run checklist (`firstRunHtml` in `src/web/app/settings.js`) says what is left, and `skein doctor` diagnoses the environment if anything looks wrong.
@@ -207,20 +207,14 @@ now: a `nice`d in-box observer samples the agent's tmux pane (0.11% of one core)
 back, so a chip clears itself within a second or two of you answering — and states no hook can report
 (a trust prompt before any session exists, an expired login, a crashed agent, a dialog dismissed with
 esc) become visible at all. A blocking dialog says *which* kind it is: `decision` (a tool wants
-approval), `asks` (a question), `trust?`, `sign in`. Both runtimes' screens are read from live
-captures — Codex even states its blocked-ness in the terminal title (`[ ! ] Action Required`), which
-clears the instant you answer either way. With no observation present, or a screen the grammar does
+approval), `asks` (a question), `trust?`, `sign in`. The screen is read from live captures. With no observation present, or a screen the grammar does
 not recognise, turn state is exactly the edge signal it always was, so nothing regresses — and because
 that fallback is otherwise invisible, a box running on hook edges alone says so: a half-filled dot on
 its state pill and its tab, and `hooks only` / `screen lost` / `screen unread` in the tab's header,
 each explaining what's missing and whether reattaching fixes it.
 
-Signals come through thin runtime adapters writing the same shared contract. Claude maps
-`Notification`, `TodoWrite`, and turn lifecycle hooks; Codex maps `PermissionRequest`,
-`UserPromptSubmit`, `PostToolUse`, and `Stop`. Both produce the same status, task, session, diff,
-telemetry, mailbox, and handoff files; skein only reads and ranks that provider-neutral data.
-Codex hooks pass through one Bash/`jq` adapter that converts probe stdout into Codex's required
-event-specific JSON response, so the shared probes do not acquire provider branches.
+Signals come through Claude's `Notification`, `TodoWrite`, and turn lifecycle hooks, written as status,
+task, session, diff, telemetry and mailbox files that skein reads and ranks.
 
 More attention helpers, all free unless noted:
 - **One-click continue** — boxes paused on a trivial "shall I proceed?" get a `proceed?` chip; **▸ Continue N**
@@ -364,8 +358,6 @@ still preferred where you can use it — it keeps the bind on loopback and gives
 ```sh
 skein                 # = skein ls — the fleet, the boxes that need you first
 skein attach <box>    # reattach to the live provider tmux session
-skein attach <box> --agent codex --handoff   # Codex takes over a Claude box
-skein attach <box> --agent claude --handoff  # Claude takes over a Codex box
 skein version · help
 ```
 

@@ -3,7 +3,7 @@
 This folder (`~/.skein/repos/<id>/store/data`; it was `store/.claude` until SKEIN-1330, when skein
 renamed it because Claude Code asks before every write to a path under a `.claude` folder) is **one
 project's shared data**.
-It serves Claude, Codex, and future runtime adapters; it is not a Claude-only transcript store. Every sandbox skein launches
+It is not a transcript store. Every sandbox skein launches
 for this repo mounts it live, so memory and the mailbox are shared across the
 project's parallel boxes — and stay scoped to *this* project (see "Talking across
 projects" below for the one exception).
@@ -41,7 +41,6 @@ they are not edge cases:
 
 - **the box is not running.** A message needs a live session; mail waits on disk and is
   delivered at the box's next turn boundary, whenever that is.
-- **the box is Codex.** It has no equivalent, so mail is the only channel that reaches it.
 - **the box is in another project.** `all-projects` / `project:<repo-id>`, relayed
   host-side (below). Messaging has no notion of a project at all.
 
@@ -76,7 +75,7 @@ What you *optionally* add is your own project content:
                    commands/, agents/, output-styles/ and rules/ if you add them; nothing else
                    here is.
     hooks/         your own hook scripts, if you reference them from settings.json.
-    ../shared-home/  durable project working files, exposed as $HOME/shared in every Claude/Codex
+    ../shared-home/  durable project working files, exposed as $HOME/shared in every
                    box. BESIDE this folder, not in it. (A store kept elsewhere with --store keeps it here, as
                    shared-home/.) Real $HOME remains box-private. Writes are live across the
                    repo's boxes; coordinate concurrent edits (last-writer-wins).
@@ -124,7 +123,7 @@ Managed by skein (don't edit):
                    real work, size-rotated). How the cockpit tells "hooks broken" apart from "box
                    quiet": a Running box with no heartbeat and no status has dark hooks and gets a
                    "⚠ no signals" badge.
-    handoffs/      durable provider-neutral takeover briefs plus one-shot pending copies per target
+    handoffs/      briefs from the removed takeover (SKEIN-1511), with one-shot pending copies
                    runtime. Native provider transcripts remain separate; replacement boxes receive
                    a bounded context export while the original remains natively resumable.
     skein/handoff-snapshots/ no longer written or read: what wrote it is deleted (SKEIN-1289),

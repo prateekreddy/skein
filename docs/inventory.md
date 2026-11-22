@@ -70,7 +70,7 @@ wherever it moves next.
 | **on approval** | `apt-get install` **or `npm install -g`** the approved packages | `substrate.rs`, `install_script` |
 | **every box destroy** | `rmdir` the box's leaf and job cgroups, then the box's cgroup | `sandbox.rs`, `stop_box_inner` |
 | **every box startup** | apt in the startup kit | `kit/skein-startup.sh` |
-| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, `ensure_source_takeover_tools` (it was cited as `lib.rs:1489`; that code moved out of the crate root in `a8edef1`) |
+| takeover setup | `apt-get install` the tools a source box needs | `takeover.rs`, takeover's source-tools installer (removed, SKEIN-1511) (it was cited as `lib.rs:1489`; that code moved out of the crate root in `a8edef1`) |
 
 So the honest statement is: **normal operation is full of sandbox-root work.** Cgroups on every box
 start *and* every box destroy; the package manifest replayed on every **box** start (through
@@ -272,7 +272,7 @@ review.
 
 ## 8. The operations already exist
 
-`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u` → **twenty public**, plus one private (`ensure_source_takeover_tools`, itself a sandbox-root apt
+`grep -rhoE "pub(\(crate\))? fn ensure_[a-z_]+" src/*.rs | sort -u` → **twenty public**, plus one private (takeover's source-tools installer (removed, SKEIN-1511), itself a sandbox-root apt
 install) for **twenty-one**, plus `heal_fleet`. (There was a second `heal_` beside it, the
 transport watcher; it went with the in-sandbox agent — SKEIN-521.) skein is already written as
 idempotent ensures; the Operation primitive names something the codebase does rather than importing
@@ -316,8 +316,8 @@ store is written by every box of the repo (`STORE_PROBE`, `src/probes.rs`) — s
 choose what a sibling ran as it started. Now the hooks load from a plugin skein installs under the
 fleet root's `.skein`, which the launcher binds read-only into every box (`turn_state_hooks`,
 `plugin_install`, and `install_launcher` in `src/fleet/launcher.rs`), and each hook runs the
-plugin's own copy of its script (`PLUGIN_PROBE`). What a box runs as it starts, and what Codex's
-hooks and the status line run, comes from the same read-only directory (`box_probe_dir`). The store
+plugin's own copy of its script (`PLUGIN_PROBE`). What a box runs as it starts, and what the
+status line runs, comes from the same read-only directory (`box_probe_dir`). The store
 keeps copies under `skein/bin/` for an agent that runs one by hand; nothing skein starts runs them,
 and `store_settings` is the retire half described in §8 above.
 
@@ -367,17 +367,6 @@ allowlist of glyphs rejected a plain `*` frame until live sampling caught it. Th
 counts only while the title's text is fresh (`title_is_spinning` over `title_is_fresh`, 90s,
 SKEIN-321). And `busy` outranks `Error` in both runtimes: an error still in the tail from the last
 turn is history while the next turn is visibly running.
-
-**Codex's grammar was captured from a live Codex 0.145.0**, not guessed (fixtures in
-`src/signals.rs`'s tests). The best single signal either runtime offers is Codex's title while a
-dialog is open, `[ ! ] Action Required | <dir>`: it appears when the dialog opens and clears on
-either answer. It animates (`[ ! ]` → `[ . ]`), so the observer compares the title with its whole
-leading run of non-alphanumerics stripped, or it would rewrite the observation every second while
-a dialog waited. Codex keeps its composer hint on screen while working, so "composer present" means
-idle for neither runtime. Two false friends are pinned by fixtures: the user's own echoed prompt
-uses the same `›` glyph as a dialog's options, so a dialog needs the numbered form *and* the
-confirm footer; and Codex's `Hooks need review` gate blocks before any hook can fire, which is the
-wall a skein box meets first, since skein installs hooks into every store.
 
 **When only half the signal is running, the row says so** (`screen_health`, computed in
 `load_views`). A missing level signal is otherwise invisible: turn state falls back to hook edges

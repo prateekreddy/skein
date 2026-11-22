@@ -371,7 +371,6 @@ but the *cell* is a level signal, and the cell is what is rendered.
 | onboarding, breakage, approval | failing checks with their recipes — three components, one language (§11.5) |
 | converse, answer, interrupt | **Acts** |
 | upload | an Act **with an outcome channel** — see below |
-| takeover | *not* an Act: a privileged snapshot, then an Operation, then a paid signal, plus durable rollback state |
 | merging a pull request | an Operation, class `destructive` — Acts have no class, and this is the one destructive verb in the review surface |
 | launching a box | an Operation whose check is "the box's tmux server is alive" (§6) |
 | foreign detection | `declared absent ∧ observed present` |
@@ -980,14 +979,14 @@ says in as many words that the tree its user works in "is not in the sandbox at 
 stronger than the read-only bind it replaced.
 
 The cover was the second half, and it is built. The launcher is *given* the mount set, tmpfses every
-path in it (`src/box-session.sh:2478`) and binds back only the one store this box is entitled to
-(`src/box-session.sh:2486`) — the inversion §9.5.2 asks for, not an enumeration. So:
+path in it (`src/box-session.sh:2460`) and binds back only the one store this box is entitled to
+(`src/box-session.sh:2468`) — the inversion §9.5.2 asks for, not an enumeration. So:
 
 - **across repos, the file boundary holds for a covered box.** Another repo's store, launch specs
   and status are under a tmpfs. It does not hold for an **uncovered** one: a launcher already
   installed in a running sandbox predates the mount set and passes none, and that is deliberately
   read as "no cover" rather than "cover with nothing bound back", which would take every box's store
-  away (`src/box-session.sh:2453`). A fleet that has not had its boxes restarted onto a current
+  away (`src/box-session.sh:2435`). A fleet that has not had its boxes restarted onto a current
   launcher is still in the old state.
 - **the box → host code-execution path has lost both of its named instances, and its shape
   survives.** The two host-side git calls this section cited ran against a repo's *working checkout*
