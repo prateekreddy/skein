@@ -142,10 +142,7 @@ fn main() {
         }
         "attach" => match rest.first() {
             Some(name) => cmd_attach(name, &rest[1..]),
-            None => Err(
-                "usage: skein attach <box> [--agent <runtime>] [--uncovered]"
-                    .to_string(),
-            ),
+            None => Err("usage: skein attach <box> [--agent <runtime>] [--uncovered]".to_string()),
         },
         "cockpit-stop" => cmd_cockpit_stop(&skein::place::fleet_sandbox()),
         "version" | "--version" | "-v" => {

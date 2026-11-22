@@ -1553,10 +1553,7 @@ mod tests {
         assert_eq!(
             stale_keys(
                 &born,
-                &m(&[
-                    ("claude", "claude@1.0.1"),
-                    ("rust", "1.97.0-x")
-                ])
+                &m(&[("claude", "claude@1.0.1"), ("rust", "1.97.0-x")])
             ),
             ["agent-cli"]
         );
@@ -1912,13 +1909,13 @@ mod tests {
         pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"))
             .set("SKEIN_HOME", dir.join("home"));
         let pin = format!("claude@{}", pinned("claude").expect("claude is pinned"));
-        for e in ["codex@1.0.0", "claude@1.0.0", pin.as_str()] {
+        for e in ["claude@1.0.0", pin.as_str()] {
             publish_fixture(&AGENT_CLI, e);
         }
         let why = rollout("claude", &pin).expect_err("untested");
         assert!(why.contains("has not passed its tests"), "{why}");
         update_rollouts(|r| {
-            for e in ["codex@1.0.0", "claude@1.0.0", pin.as_str()] {
+            for e in ["claude@1.0.0", pin.as_str()] {
                 r.tested.insert(
                     e.into(),
                     Tested {
@@ -2107,10 +2104,7 @@ mod tests {
             )),
             "{script}"
         );
-        let others: Vec<&CliCheck> = checks
-            .iter()
-            .filter(|c| c.name != "plugin-check")
-            .collect();
+        let others: Vec<&CliCheck> = checks.iter().filter(|c| c.name != "plugin-check").collect();
         for c in others {
             assert!(
                 c.binds.is_empty() && !c.env.iter().any(|(k, _)| k == "TSC"),

@@ -1522,10 +1522,7 @@ esac
             "the launch path stopped skipping runtimes that are already installed, so every box \
              start now waits on an npm install"
         );
-        for guard in [
-            "command -v claude",
-            "skein_runtime_at claude)\" ] ||",
-        ] {
+        for guard in ["command -v claude", "skein_runtime_at claude)\" ] ||"] {
             assert!(
                 !super::RUNTIME_UPDATE_SCRIPT.contains(guard),
                 "the update path consults {guard:?} — so a runtime that is present is skipped, \
@@ -1722,9 +1719,7 @@ esac
                     nothing moved — every runtime here was already the newest npm has.\n";
         assert_eq!(
             moved_runtimes(said),
-            vec![
-                ("claude".into(), "2.1.278".into(), "2.1.280".into()),
-            ]
+            vec![("claude".into(), "2.1.278".into(), "2.1.280".into()),]
         );
     }
 

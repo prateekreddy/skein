@@ -768,7 +768,6 @@ mod tests {
             [
                 "ANTHROPIC_API_KEY",
                 "GH_TOKEN",
-                "OPENAI_API_KEY",
                 // SKEIN-1373: the repo's kinds, consumed by the launcher and held by no box.
                 "SKEIN_BOX_KINDS",
                 "SKEIN_BOX_STORE",

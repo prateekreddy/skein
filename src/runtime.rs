@@ -164,7 +164,8 @@ pub(crate) fn guarded_agent_command(agent: &str, command: &str) -> String {
 
 /// The launcher's "login beats the placeholder key" rule, asked when an agent session is made
 /// rather than only when the box started — see [`guarded_agent_command`]. Same files, same names.
-const LOGIN_BEATS_PLACEHOLDER: &str = "{ [ -s ~/.claude/.credentials.json ] && unset ANTHROPIC_API_KEY; }; ";
+const LOGIN_BEATS_PLACEHOLDER: &str =
+    "{ [ -s ~/.claude/.credentials.json ] && unset ANTHROPIC_API_KEY; }; ";
 
 /// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
 /// creating its agent process. Reattaching to a live tmux session skips this entire branch.
