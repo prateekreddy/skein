@@ -31,8 +31,8 @@ its check in `tests/parity_numbers.rs`.
 
 ```sh
 grep -c '\.route('  src/bin/skein-server/main.rs               # 111  (NOT '.route("' — that gives 99, missing every entry whose path is on the line below)
-grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 187 unique, 192 occurrences
-grep -c 'function ' src/web/index.html                          # 548
+grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 185 unique, 190 occurrences
+grep -c 'function ' src/web/index.html                          # 473
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
 sed -n '16,151p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
@@ -366,6 +366,15 @@ decision rather than an omission.
 ## 7. Deliberate removals and forced changes
 
 Each is a decision, with its cost stated in the user's terms.
+
+**The merge train, its workflows and the AI review engine are removed** (the owner, 2026-11,
+SKEIN-1509 and SKEIN-1510). Gone from the review pane: the train panel, the workflow editor, the
+AI reading and its gist on a row, read-ahead and its daily ceiling, `R`, the composer's ask and draft,
+and the "Reviews act as" setting. The cost: nothing merges or reviews a pull request unattended, and
+a row no longer carries a model's summary. A person still reads, comments, approves, requests changes
+and merges there, and an agent in a box can review with its own tools.
+[`decisions/review-engine-removed.md`](decisions/review-engine-removed.md) says what it did and how
+to recover it.
 
 **A repository no longer picks a runtime, and the Add-repository overlay's agent picker is gone**
 (the owner, 2026-09-27, SKEIN-1207). A runtime is one fleet default (Settings → Boxes → Default
