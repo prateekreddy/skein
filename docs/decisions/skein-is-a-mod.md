@@ -69,9 +69,10 @@ bound read-only as a box binds it, and a stand-in `resources.json` asking for a 
   imports it under the feature's name and calls it in one line. A direct call, never a loop over a
   list: `claude plugin validate` reads the module's source and refuses a call it cannot trace.
 - An event that more than one feature only watches is hooked once, bare, in `register.tsx`:
-  `session.start`, `agent.spawn`, `turn.step`, `turn.complete`, `tool.call` today, and any other
+  `session.start`, `turn.start`, `turn.complete`, `tool.call`, `session.measure` and `session.end`
+  today, and any other
   the moment a second feature needs it. That hook calls `next(e)` itself, once, then calls each
-  feature's exported `on<Event>` (`onStart($, e)`, `onSpawn($, e, started)`) in the order written
+  feature's exported `on<Event>` (`onStart($, e)`, `onTurnComplete($, e)`) in the order written
   there, each passed by if it fails, so the order the features hear an event is read in one place.
   A hook that refuses or rewrites, where its place in the chain and its `next` matter, stays in its
   feature file under a real matcher of its own: a tool, a command, a component, a pane's id.

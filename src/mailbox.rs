@@ -766,8 +766,8 @@ mod tests {
     }
 
     /// **`mailbox.sh unread` counts what `inbox` would deliver, and marks none of it** (SKEIN-1362).
-    /// skein's band above the prompt shows the number on a timer, so a count that marked mail seen
-    /// would swallow it before the turn-boundary hooks deliver it to the agent.
+    /// A count that marked mail seen would swallow it before the turn-boundary hooks deliver it to
+    /// the agent.
     ///
     /// What would make it fail: `unread` marking `seenBy` or the seen-file (the second count and
     /// `inbox` then find nothing), counting the box's own mail or another box's, or skipping the
