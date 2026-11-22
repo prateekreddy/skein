@@ -762,16 +762,14 @@ mod tests {
 
     /// What is **not** an Act, kept where somebody would otherwise add it.
     ///
-    /// Both were miscategorised once. Takeover is a privileged snapshot, then an Operation, then a
-    /// paid model call, plus durable rollback state — it creates a *replacement* box on the other
-    /// runtime and keeps the original as the way back. Merging a pull request is an Operation of
-    /// class `destructive`, and Acts have no class field at all.
+    /// Merging was miscategorised once: merging a pull request is an Operation of class
+    /// `destructive`, and Acts have no class field at all.
     ///
     /// Asserted by absence, which is the only way to assert it: the list is the whole claim.
     #[test]
-    fn takeover_and_merge_are_not_acts() {
+    fn merge_is_not_an_act() {
         let named: Vec<&str> = Act::ALL.iter().map(|a| a.name()).collect();
-        for operation in ["takeover", "merge", "merge-pr", "resize", "destroy"] {
+        for operation in ["merge", "merge-pr", "resize", "destroy"] {
             assert!(
                 !named.contains(&operation),
                 "`{operation}` is an Operation — it has a check, or a class, or both, and an Act \

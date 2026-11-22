@@ -43,7 +43,6 @@ pub mod files;
 pub mod fleet;
 pub mod gitgate;
 pub mod github;
-pub mod handoff;
 pub mod health;
 pub mod jobs;
 pub mod kit;
@@ -74,7 +73,6 @@ pub mod signals;
 pub mod source;
 pub mod stream;
 pub mod substrate;
-pub mod takeover;
 #[cfg(test)]
 mod testutil;
 pub mod tracking;
