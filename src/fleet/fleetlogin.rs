@@ -83,11 +83,8 @@ pub fn runtime_logins() -> Vec<RuntimeLogin> {
 
 /// Whose credential one of [`LOGIN_FILES`] is. One definition, because [`login_written_ms`] has to
 /// walk the same list backwards and two spellings of the same mapping is how they come apart.
-pub(super) fn runtime_of(rel: &str) -> &'static str {
-    match rel.starts_with(".codex") {
-        true => "codex",
-        false => "claude",
-    }
+pub(super) fn runtime_of(_rel: &str) -> &'static str {
+    "claude"
 }
 
 /// When a credential this fleet's model calls would read was last **written**, in epoch ms.
@@ -469,7 +466,7 @@ fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>, now_ms: i64) -> LoginMo
 
 /// The command that authenticates `runtime` inside the fleet sandbox, and why it differs per runtime.
 ///
-/// There is no uniform spelling to guess at: `codex login` exists, `claude login` does not.
+/// `claude login` does not exist.
 ///
 /// Claude's headless-looking option, `setup-token`, was tried here and does not do what this needs:
 /// it returns a long-lived token to export as an environment variable and leaves no credential
@@ -489,7 +486,6 @@ fn login_move(in_sandbox: &[u8], on_host: Option<&[u8]>, now_ms: i64) -> LoginMo
 /// still gets a shell whose agent, whatever it is, is not standing in the shared `/tmp`.
 pub fn fleet_login_command(runtime: &str) -> String {
     let command = match runtime {
-        "codex" => "codex login",
         "claude" => "claude", // then /login inside it
         _ => "exec bash -l",
     };
@@ -997,8 +993,8 @@ mod tests {
         std::env::set_var("SKEIN_HOME", dir.join("home"));
 
         let sandbox = fleet_sandbox();
-        let attached = login_argv(&sandbox, "codex");
-        let spawned = login_spawn_argv("codex");
+        let attached = login_argv(&sandbox, "claude");
+        let spawned = login_spawn_argv("claude");
 
         std::env::remove_var("SKEIN_FLEET_ROOT");
         std::env::remove_var("SKEIN_HOME");
@@ -1008,7 +1004,7 @@ mod tests {
             "the cockpit login pane and `skein login` no longer run the same command"
         );
         assert!(
-            spawned.1.iter().any(|a| a.contains("codex login")),
+            spawned.1.iter().any(|a| a.contains("claude")),
             "the runtime never reached the command the pane spawns: {spawned:?}"
         );
     }

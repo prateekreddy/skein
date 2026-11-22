@@ -36,23 +36,13 @@ pub struct RuntimeInfo {
     pub label: &'static str,
     pub executable: &'static str,
     pub supports_resume: bool,
-    pub supports_handoff: bool,
-    pub adapted_statusline: bool,
 }
 
 /// Everything Skein needs to start or resume a native agent process. Lifecycle hook translation is
-/// kept beside this registry below, while launch, attach, takeover, validation, health, and UI all
+/// kept beside this registry below, while launch, attach, validation, health, and UI all
 /// consume these definitions. Provider quirks belong here, not at their call sites.
 pub(crate) struct RuntimeAdapter {
     pub(crate) info: RuntimeInfo,
-    /// Idempotent provider setup run on attach and before first launch. It may provide defaults but
-    /// must preserve explicit user configuration. Provider quirks remain centralized here.
-    pub(crate) interactive_setup: &'static str,
-    /// Best-effort, bounded native updater run immediately before creating a new agent process.
-    /// Reattaching to a live tmux session skips it so an in-progress agent is never replaced.
-    /// Emits the Claude-compatible status-line JSON model on stdout. `None` means the provider
-    /// supplies its own command-driven status line and needs no browser footer adapter.
-    pub(crate) statusline_input: Option<&'static str>,
     /// Runtime-native durable instruction file, relative to HOME. Skein adds one managed block.
     pub(crate) instruction_file: &'static str,
     /// Optional higher-precedence instruction file used only when the user already created it.
@@ -63,9 +53,6 @@ pub(crate) struct RuntimeAdapter {
     pub(crate) interactive_resume: &'static str,
     /// Headless command run inside an existing box; `{prompt}` is replaced with a shell-quoted value.
     pub(crate) headless_resume: &'static str,
-    /// Best-effort, bounded provider-native transcript export. It emits Markdown to stdout and is
-    /// used only for cross-runtime replacement; native transcript files never leave the source box.
-    pub(crate) context_export: &'static str,
 }
 
 pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
@@ -75,11 +62,7 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
             label: "Claude",
             executable: "claude",
             supports_resume: true,
-            supports_handoff: true,
-            adapted_statusline: false,
         },
-        interactive_setup: ":",
-        statusline_input: None,
         instruction_file: ".claude/CLAUDE.md",
         instruction_override: "",
         // Named after the box, because the name is the address. With the session registry shared
@@ -93,11 +76,9 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // it and no box can remove it from another. `{plugin}` is resolved by [`for_box`].
         interactive_start: "claude --name '{box}' --plugin-dir {plugin}",
         // `|| claude` is not belt-and-braces: a box can legitimately have nothing to continue — a
-        // cross-runtime replacement box whose new agent was never spoken to, a box whose transcript
-        // was cleared, a session killed before its first turn. There `claude --continue` exits with
+        // box whose transcript was cleared, a session killed before its first turn. There `claude --continue` exits with
         // "No conversation found", the tmux session dies with it, and every reconnect replayed that
-        // same failure. Fall back to a fresh conversation (the takeover brief is on disk, so the new
-        // agent still picks up the context). Mirrors Codex's `resume --last || codex` below.
+        // same failure. Fall back to a fresh conversation.
         interactive_resume: "claude --name '{box}' --plugin-dir {plugin} --continue || claude --name '{box}' --plugin-dir {plugin}",
         // `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on both halves, so a headless run loads skein's
         // hooks module where the build asks for the switch (SKEIN-1359). Measured on a throwaway
@@ -105,36 +86,6 @@ pub(crate) static RUNTIME_ADAPTERS: &[RuntimeAdapter] = &[
         // its flag "off, from the default"; 2.1.314 loads it either way. Here rather than in the
         // launcher's exports, because this runs through a crossing that does not inherit them.
         headless_resume: "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir {plugin} --continue --print {prompt} || CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir {plugin} --print {prompt}",
-        context_export: r####"project="$HOME/.claude/projects/$(printf '%s' "$root" | sed 's#/#-#g')"; latest="$(find "$project" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'def text: if type == "string" then . elif type == "array" then map(if type == "string" then . elif .type == "text" then (.text // empty) else empty end) | join("\n") else "" end; select(.type == "user" or .type == "assistant") | (.message.role // .type) as $role | ((.message.content // empty) | text) as $body | select($body != "") | "### \($role)\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
-    },
-    RuntimeAdapter {
-        info: RuntimeInfo {
-            id: "codex",
-            label: "Codex",
-            executable: "codex",
-            supports_resume: true,
-            supports_handoff: true,
-            adapted_statusline: true,
-        },
-        // Skein's exact footer needs bars and projections that Codex's native item list cannot
-        // express. Disable only the default Skein previously seeded; an explicit `/statusline`
-        // choice remains authoritative and suppresses the adapted footer below.
-        interactive_setup: r#"cfg="$HOME/.codex/config.toml"; mkdir -p "$HOME/.codex"; touch "$cfg"; old='status_line = ["context-used", "five-hour-limit", "weekly-limit", "used-tokens", "git-branch", "model-with-reasoning"]'; broken='status_line = null # skein custom statusline'; marker='status_line = [] # skein custom statusline'; if grep -Fqx "$broken" "$cfg"; then sed -i 's/^status_line = null # skein custom statusline$/status_line = [] # skein custom statusline/' "$cfg"; elif grep -Fqx "$old" "$cfg"; then sed -i '/^status_line = \[/c\status_line = [] # skein custom statusline' "$cfg"; elif ! grep -Eq '^[[:space:]]*(tui\.)?status_line[[:space:]]*=' "$cfg"; then if grep -Eq '^[[:space:]]*\[tui\][[:space:]]*$' "$cfg"; then sed -i "/^[[:space:]]*\[tui\][[:space:]]*$/a $marker" "$cfg"; else printf '\n[tui]\n%s\n' "$marker" >> "$cfg"; fi; fi; installer="${SKEIN_FLEET_ROOT:-/boxes}/.skein/plugin-turn-state/probe/install-codex-hooks.sh"; [ ! -r "$installer" ] || bash "$installer""#,
-        // Codex records the same live data used by `/status` in token_count events. Select limits
-        // by window duration (5h/7d), not provider-specific limit names, and emit Claude's schema so
-        // both providers share the renderer below. The marker makes `/statusline` an opt-out.
-        statusline_input: Some(r####"grep -Fq 'status_line = [] # skein custom statusline' "$HOME/.codex/config.toml" || exit 0; latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] || exit 0; jq -s '([.[] | select(.type == "event_msg" and .payload.type == "token_count") | .payload]) as $tokens | ($tokens | last) as $t | (([$tokens[] | select((.rate_limits.limit_name // "") == "")] | last) // $t) as $quota | ([.[] | select(.type == "turn_context") | .payload] | last) as $turn | def window($minutes): ([$quota.rate_limits.primary, $quota.rate_limits.secondary, $quota.rate_limits.individual_limit] | map(select(. != null and .window_minutes == $minutes)) | first); ($t.info.last_token_usage.total_tokens // 0) as $used | ($t.info.model_context_window // 0) as $total | {context_window: (if $total > 0 then {used_percentage: (($used * 100) / $total), total_input_tokens: $used, context_window_size: $total} else null end), rate_limits: {five_hour: ((window(300)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end), seven_day: ((window(10080)) as $w | if $w then {used_percentage: $w.used_percent, resets_at: $w.resets_at} else null end)}, model: {display_name: ([($turn.model // empty), ($turn.effort // empty)] | map(select(length > 0)) | join(" "))}}' "$latest""####),
-        instruction_file: ".codex/AGENTS.md",
-        instruction_override: ".codex/AGENTS.override.md",
-        // Skein installs a generated user-level hook set. Trusting this known set on launch avoids
-        // an otherwise invisible first-run prompt while retaining Codex's workspace sandbox.
-        // Codex documents --no-alt-screen specifically for retaining terminal scrollback. Under
-        // tmux + xterm.js, alternate-screen wheel events otherwise become Up/Down and cycle prompt
-        // history instead of scrolling the conversation.
-        interactive_start: "codex --no-alt-screen --dangerously-bypass-hook-trust",
-        interactive_resume: "codex --no-alt-screen --dangerously-bypass-hook-trust resume --last || codex --no-alt-screen --dangerously-bypass-hook-trust",
-        headless_resume: "codex exec resume --last --dangerously-bypass-hook-trust {prompt} || codex exec --dangerously-bypass-hook-trust {prompt}",
-        context_export: r####"latest="$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"; [ -n "$latest" ] && [ -r "$latest" ] && jq -r 'select(.type == "response_item" and .payload.type == "message") | .payload as $m | (($m.content // []) | map(.text // .input_text // .output_text // empty) | join("\n")) as $body | select($body != "") | "### \($m.role // "agent")\n\n\($body)\n"' "$latest" 2>/dev/null | tail -c 200000 || true"####,
     },
 ];
 
@@ -193,7 +144,7 @@ pub(crate) fn pane_observer_start(tmux_name: &str, sock: &str) -> String {
 /// Wrap the command that becomes a tmux session's agent process so a *failure to start* leaves the
 /// window alive as a shell with the provider's error still on screen. Without it the window exits
 /// instantly and the attach right behind it dies on tmux's own "can't find session", the real cause
-/// already scrolled away — the shape the cross-runtime replacement path kept hitting.
+/// already scrolled away — the shape a failed start kept taking.
 /// Contains no `$`: this string is embedded double-quoted in the outer shell, which would expand a
 /// variable itself instead of leaving it for tmux's shell.
 ///
@@ -213,7 +164,7 @@ pub(crate) fn guarded_agent_command(agent: &str, command: &str) -> String {
 
 /// The launcher's "login beats the placeholder key" rule, asked when an agent session is made
 /// rather than only when the box started — see [`guarded_agent_command`]. Same files, same names.
-const LOGIN_BEATS_PLACEHOLDER: &str = "{ [ -s ~/.claude/.credentials.json ] && unset ANTHROPIC_API_KEY; [ -s ~/.codex/auth.json ] && unset OPENAI_API_KEY; }; ";
+const LOGIN_BEATS_PLACEHOLDER: &str = "{ [ -s ~/.claude/.credentials.json ] && unset ANTHROPIC_API_KEY; }; ";
 
 /// Refresh the concise Skein-managed block in a runtime's native durable instruction file before
 /// creating its agent process. Reattaching to a live tmux session skips this entire branch.
@@ -295,15 +246,12 @@ pub(crate) fn turn_state_plugin_dir() -> String {
 /// [`turn_state_plugin_dir`] under a fleet root the caller names.
 pub fn turn_state_plugin_dir_under(fleet_root: &str) -> String {
     // Spelt out rather than built from [`TURN_STATE_PLUGIN`]: `fleet::disk` reads the names
-    // under `.skein` from `{}/.skein/<name>` in the source. Codex's hooks use the constant, and
-    // `every_turn_state_hook_runs_a_script_the_read_only_plugin_installs` fails if the two part.
+    // under `.skein` from `{}/.skein/<name>` in the source.
     format!("{}/.skein/plugin-turn-state", fleet_root)
 }
 
-/// The name of [`turn_state_plugin_dir`] under `.skein`. Codex's hooks spell it too
-/// (`probes::codex_hooks_with_probe`): Codex loads no Claude plugin, so it has no
-/// `${CLAUDE_PLUGIN_ROOT}` and names the directory by its path inside the box. This variant, and
-/// not [`plugin_dir`], because it is installed whatever the fleet's switch says.
+/// The name of [`turn_state_plugin_dir`] under `.skein`. This variant, and not [`plugin_dir`],
+/// because it is installed whatever the fleet's switch says.
 pub(crate) const TURN_STATE_PLUGIN: &str = "plugin-turn-state";
 
 /// The plugin's files, relative to [`plugin_dir`], as the build carries them. `src/plugin/` is the
@@ -409,22 +357,18 @@ mod tests {
     /// with. The probe is `env`, so no `$` is in it for the outer shell to expand early.
     ///
     /// What would make it fail: dropping `LOGIN_BEATS_PLACEHOLDER` from `guarded_agent_command`
-    /// (the `claude login` and `both` rows keep the key), spelling it with `$HOME` (the outer shell
+    /// (the `claude login` row keeps the key), spelling it with `$HOME` (the outer shell
     /// expands it to the test's own home), or unsetting without asking (the `no login` row loses
-    /// both keys).
+    /// the key).
     #[test]
     fn an_agent_session_runs_on_a_login_placed_after_the_box_started() {
         let probe = guarded_agent_command("claude", "env | grep _API_KEY= | sort");
-        let run = |claude: bool, codex: bool| {
+        let run = |claude: bool| {
             let home = crate::testutil::tempdir();
             let home: &std::path::Path = home.as_ref();
             if claude {
                 std::fs::create_dir_all(home.join(".claude")).unwrap();
                 std::fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
-            }
-            if codex {
-                std::fs::create_dir_all(home.join(".codex")).unwrap();
-                std::fs::write(home.join(".codex/auth.json"), "{}").unwrap();
             }
             // Only this test's own values in the environment: the machine running it may hold
             // real keys under these names and their neighbours.
@@ -435,23 +379,16 @@ mod tests {
                 .env("PATH", "/usr/local/bin:/usr/bin:/bin")
                 .env("HOME", home)
                 .env("ANTHROPIC_API_KEY", "skein-test-placeholder")
-                .env("OPENAI_API_KEY", "skein-test-placeholder")
                 .output()
                 .expect("run sh");
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         let anthropic = "ANTHROPIC_API_KEY=skein-test-placeholder";
-        let openai = "OPENAI_API_KEY=skein-test-placeholder";
-        for (what, claude, codex, keeps_anthropic, keeps_openai) in [
-            ("no login", false, false, true, true),
-            ("claude login", true, false, false, true),
-            ("codex login", false, true, true, false),
-            ("both", true, true, false, false),
-        ] {
-            let seen = run(claude, codex);
+        for (what, claude, keeps) in [("no login", false, true), ("claude login", true, false)] {
+            let seen = run(claude);
             assert_eq!(
-                (seen.contains(anthropic), seen.contains(openai)),
-                (keeps_anthropic, keeps_openai),
+                seen.contains(anthropic),
+                keeps,
                 "with {what}, the agent session's keys were: {seen:?}"
             );
         }

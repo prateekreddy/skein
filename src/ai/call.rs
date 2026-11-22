@@ -275,7 +275,7 @@ pub(crate) fn tried(
     let out = match out {
         Ok(out) => out,
         Err(why) => {
-            remember_refusal(&why, bin, turn);
+            remember_refusal(&why, turn);
             return Err(why);
         }
     };
@@ -304,7 +304,7 @@ pub(crate) fn tried(
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why, bin, turn);
+        remember_refusal(&why, turn);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -366,7 +366,7 @@ fn from_sandbox(ran: crate::fleet::Ran, bin: &str, turn: Turn<'_>) -> Result<Str
                 false => crate::util::clip(said_all.trim(), 240),
             },
         };
-        remember_refusal(&out, bin, turn);
+        remember_refusal(&out, turn);
         return Err(out);
     }
     // The sandbox answered, and the shell in it could not find the CLI. `claude` never ran, so
@@ -377,7 +377,7 @@ fn from_sandbox(ran: crate::fleet::Ran, bin: &str, turn: Turn<'_>) -> Result<Str
             bin: bin.to_string(),
             sandbox: crate::fleet::fleet_sandbox(),
         };
-        remember_refusal(&out, bin, turn);
+        remember_refusal(&out, turn);
         return Err(out);
     }
     if ran.code != 0 {
@@ -391,7 +391,7 @@ fn from_sandbox(ran: crate::fleet::Ran, bin: &str, turn: Turn<'_>) -> Result<Str
                 .collect::<Vec<_>>()
                 .join(" / "),
         };
-        remember_refusal(&why, bin, turn);
+        remember_refusal(&why, turn);
         return Err(why);
     }
     let said = String::from_utf8_lossy(&ran.out).trim().to_string();

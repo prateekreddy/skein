@@ -579,6 +579,12 @@ pub fn load_config() -> Config {
     if cfg.fleet_sandbox.trim().is_empty() {
         cfg.fleet_sandbox = default_fleet_sandbox();
     }
+    // **A default runtime this build no longer has is nobody's choice any more** (SKEIN-1511: Codex
+    // was removed, and a fleet may have it saved here). Repaired on read, because `update_config`
+    // refuses to write an unknown runtime, so leaving it would make every Settings change fail.
+    if !valid_runtime(&cfg.default_agent) {
+        cfg.default_agent = default_agent();
+    }
     cfg
 }
 
@@ -674,6 +680,12 @@ pub fn update_config<T>(f: impl FnOnce(&mut Config) -> Result<T, String>) -> Res
         // answered.
         if current.fleet_sandbox.trim().is_empty() {
             current.fleet_sandbox = default_fleet_sandbox();
+        }
+        // A saved default this build no longer has (SKEIN-1511) is repaired before `f`, as in
+        // `load_config`, so it cannot fail a save about something else. A closure that SETS an
+        // unknown runtime is still refused below.
+        if !valid_runtime(&current.default_agent) {
+            current.default_agent = default_agent();
         }
         let out = f(&mut current)?;
         // **This one is for a closure that CLEARS the name**, which the repair above cannot help

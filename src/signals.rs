@@ -692,7 +692,7 @@ pub enum Screen {
 ///
 /// * `markers` is one runtime's glyph set, never the union. skein already knows which agent a box
 ///   runs (`load_views` resolves it from sbx metadata, then the box's launch spec, then the repo
-///   default), so nothing here has to guess — and a Claude pane displaying a pasted *Codex* dialog,
+///   default), so nothing here has to guess — and a Claude pane displaying another agent's pasted dialog,
 ///   which happens routinely in this repo, must not read as a live one.
 /// * the marker is required. An unmarked numbered row is just a numbered list, and agents write those
 ///   constantly ("2. The observer was capturing scrollback"); only the selected row is decorated, and
@@ -802,8 +802,7 @@ pub(crate) fn is_compacting_line(line: &str) -> bool {
 }
 
 /// The braille lead glyph itself, with no claim about *when* it was drawn — Claude Code writes
-/// `⠂ Claude Code` while working and `✳ Claude Code` when idle, Codex writes `⠋ <dir>`. Braille is
-/// the animated set in both.
+/// `⠂ Claude Code` while working and `✳ Claude Code` when idle. Braille is the animated set.
 ///
 /// Private on purpose. The glyph alone is not a verdict and the type system should say so: every
 /// caller goes through [`title_is_spinning`], which is the glyph **and** the freshness bound.
@@ -859,7 +858,7 @@ pub fn title_activity(title: &str) -> Option<String> {
         .trim()
         .trim_start_matches(|c: char| !c.is_alphanumeric())
         .trim();
-    let generic = matches!(rest, "Claude Code" | "Codex" | "codex" | "claude");
+    let generic = matches!(rest, "Claude Code" | "claude");
     (!rest.is_empty() && !generic).then(|| rest.to_string())
 }
 
@@ -868,13 +867,12 @@ pub fn title_activity(title: &str) -> Option<String> {
 /// and a dialog is only believed when it also carries an option list *and* the composer is gone
 /// (a dialog replaces it).
 ///
-/// Both runtimes are implemented from live captures (docs/inventory.md §9.1); anything else
-/// returns `Unknown`, which defers to the hook edges — i.e. exactly the old behaviour — rather than
+/// Claude is implemented from live captures (docs/inventory.md §9.1); anything else returns `Unknown`, which defers to the hook edges — i.e. exactly the old behaviour — rather than
 /// guess at a grammar nobody has read.
 /// The runtimes whose screens skein can read. Kept next to `classify_pane`'s dispatch so the two
 /// cannot drift, and used by [`screen_health`] to say "hooks only, by design" rather than "broken".
 pub fn has_screen_grammar(runtime: &str) -> bool {
-    matches!(runtime, "claude" | "codex")
+    runtime == "claude"
 }
 
 pub fn classify_pane(runtime: &str, obs: &PaneObs) -> Screen {
@@ -885,7 +883,6 @@ pub fn classify_pane(runtime: &str, obs: &PaneObs) -> Screen {
     let lower: Vec<String> = obs.tail.iter().map(|l| l.to_lowercase()).collect();
     match runtime {
         "claude" => classify_claude(obs, &lower),
-        "codex" => classify_codex(obs, &lower),
         _ => Screen::Unknown,
     }
 }
@@ -1007,72 +1004,6 @@ pub(crate) fn classify_claude(obs: &PaneObs, lower: &[String]) -> Screen {
         return Screen::Dead;
     }
     Screen::Unknown
-}
-
-/// Codex 0.145.0, captured live (docs/inventory.md §9.1). Two things make its screen easier to read
-/// than Claude's: a dialog replaces the composer *and* carries a fixed footer (`Press enter to
-/// confirm…`), and the terminal title says `[ ! ] Action Required` while — and only while — a
-/// decision is pending. That marker is animated (`[ ! ]` → `[ . ]`), so only the words can be matched.
-pub(crate) fn classify_codex(obs: &PaneObs, lower: &[String]) -> Screen {
-    let any = |needle: &str| lower.iter().any(|l| l.contains(needle));
-
-    // Onboarding sign-in: no credentials, so nothing runs until a human authenticates. No hook can
-    // ever report this — hooks belong to a session that has not started.
-    if any("sign in with chatgpt") || any("provide your own api key") {
-        return Screen::Blocked(Blocked::Auth);
-    }
-    // The composer's footer, present exactly when no dialog is up.
-    let composer = any("? for shortcuts");
-    // Every dialog — approval, picker, onboarding — ends in a confirm footer: "Press enter to
-    // confirm or esc to cancel" / "…or esc to go back" / "Press enter to continue".
-    let confirm = any("press enter to confirm") || any("press enter to continue");
-    // `›` in dialogs, plain `>` in the onboarding screens.
-    let options = obs.tail.iter().any(|l| is_option_line(l, &['›', '>']));
-    if confirm && options && !composer {
-        // "Would you like to run …?" / "… make the following edits?" is a yes/no on a tool.
-        if any("would you like to") {
-            return Screen::Blocked(Blocked::Permission);
-        }
-        // Codex gates *hooks* rather than the folder, and skein installs hooks into every store —
-        // so "19 hooks are new or changed" is the trust wall a skein box actually hits, and it
-        // blocks before any hook could fire to say so.
-        if any("hooks need review") || any("trust all and continue") || any("do you trust") {
-            return Screen::Blocked(Blocked::Trust);
-        }
-        return Screen::Blocked(Blocked::Question);
-    }
-    // The title carries the same claim and survives a dialog body we have no phrasing for, so it is
-    // the fallback: attention pending, kind unknown. Verified to clear the instant a dialog is
-    // answered (approve or esc) and to stay clear through a finished turn.
-    if title_has_attention(&obs.title) && !composer {
-        return Screen::Blocked(Blocked::Question);
-    }
-    if any("esc to interrupt") || title_is_spinning(obs) {
-        return Screen::Busy;
-    }
-    // Codex prints failures as a `■ ` line carrying a JSON payload. Prose `■ ` lines are notices
-    // ("■ Conversation interrupted - tell the model what to do differently"), not failures, and the
-    // monthly-limit "⚠ Heads up…" is a warning beside a perfectly live composer.
-    if obs
-        .tail
-        .iter()
-        .any(|l| l.trim_start().starts_with('■') && l.contains("{\""))
-    {
-        return Screen::Error("API error".into());
-    }
-    if composer {
-        return Screen::Waiting;
-    }
-    if dropped_to_shell(obs) {
-        return Screen::Dead;
-    }
-    Screen::Unknown
-}
-
-/// Codex's explicit "a human must act" title marker, `[ ! ] Action Required | <dir>`. The bracket
-/// animates, so the words are the signal.
-pub(crate) fn title_has_attention(title: &str) -> bool {
-    title.to_lowercase().contains("action required")
 }
 
 /// Where a fused status came from — architecture §2.2's rule that **no displayed state may rest on
@@ -1528,7 +1459,6 @@ mod tests {
         );
         // …but a dead window needs no grammar, so that still reports across runtimes.
         assert_eq!(classify_pane("gemini", &dead), Screen::Dead);
-        assert_eq!(classify_pane("codex", &dead), Screen::Dead);
     }
 
     /// **Boxes outlive the skein that installed them**, and the marker that says so was read by
@@ -1616,7 +1546,7 @@ mod tests {
             screen_health("gemini", "web-main", None, true),
             "unsupported"
         );
-        assert!(has_screen_grammar("claude") && has_screen_grammar("codex"));
+        assert!(has_screen_grammar("claude"));
         assert!(!has_screen_grammar("gemini"));
         // A box that isn't running has no screen to read, so there is nothing to caveat.
         for h in [None, Some(&fresh()), Some(&stopped)] {
@@ -1633,17 +1563,13 @@ mod tests {
         // the box's launch spec, or the repo default, and hands it to `classify_pane`. So each table
         // reads only its own selection glyph, and one agent showing the *other's* dialog — pasted into
         // a message, or quoted in a doc, both routine in this repo — is not a live dialog.
-        let codex_dialog = &[
+        let other_dialog = &[
             "  Would you like to run the following command?",
             "› 1. Yes, proceed (y)",
-            "  2. No, and tell Codex what to do differently (esc)",
+            "  2. No, and tell the agent what to do differently (esc)",
             "  Press enter to confirm or esc to cancel",
         ];
-        assert_eq!(
-            classify_pane("codex", &obs(codex_dialog)),
-            Screen::Blocked(Blocked::Permission)
-        );
-        assert_eq!(classify_pane("claude", &obs(codex_dialog)), Screen::Unknown);
+        assert_eq!(classify_pane("claude", &obs(other_dialog)), Screen::Unknown);
         assert!(is_option_line("› 1. Yes, proceed (y)", &['›', '>']));
         assert!(!is_option_line("› 1. Yes, proceed (y)", &['❯', '>']));
         // And the marker itself is required: an unmarked numbered row is just a numbered list, which
@@ -2048,164 +1974,6 @@ mod tests {
         assert_eq!(classify_pane("claude", &obs(retrying)), Screen::Busy);
     }
 
-    // ---------- Codex 0.145.0, captured live from a box (docs/inventory.md §9.1) ----------
-
-    /// A shell-command approval, exactly as Codex draws it. Note there is no composer footer: a
-    /// dialog *replaces* it.
-    const CODEX_APPROVAL: &[&str] = &[
-        "› run the shell command: date",
-        "• I’ll run date and report its output.",
-        "• Running date",
-        "  Would you like to run the following command?",
-        "  Environment: local",
-        "  $ date",
-        "› 1. Yes, proceed (y)",
-        "  2. Yes, and don't ask again for commands that start with `date` (p)",
-        "  3. No, and tell Codex what to do differently (esc)",
-        "  Press enter to confirm or esc to cancel",
-    ];
-
-    /// The same pane after pressing esc — and a minefield: a `■ ` notice line, a monthly-limit
-    /// warning, and the user's own prompt echoed with the same `› ` glyph the options use.
-    const CODEX_ANSWERED: &[&str] = &[
-        "› run the shell command: date",
-        "• I’ll run date and report its output.",
-        "✗ You canceled the request to run date",
-        "• Ran date",
-        "  └ (no output)",
-        "⚠ Heads up, you have less than 25% of your monthly limit left. Run /status for a breakdown.",
-        "■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the",
-        "issue.",
-        "› Improve documentation in @filename",
-        "  ? for shortcuts                                          100% context left",
-    ];
-
-    #[test]
-    fn classify_pane_reads_codexs_approval_and_watches_it_clear() {
-        let mut dialog = obs(CODEX_APPROVAL);
-        dialog.title = "[ ! ] Action Required | skein".into();
-        assert_eq!(
-            classify_pane("codex", &dialog),
-            Screen::Blocked(Blocked::Permission)
-        );
-        // One keystroke later: no confirm footer, composer back, title back to the plain directory.
-        let mut answered = obs(CODEX_ANSWERED);
-        answered.title = "skein".into();
-        assert_eq!(classify_pane("codex", &answered), Screen::Waiting);
-    }
-
-    #[test]
-    fn classify_pane_reads_codexs_edit_approval_too() {
-        // A different body under the same footer — which is why the footer, not the wording of any
-        // one dialog, is the predicate.
-        let mut edits = obs(&[
-            "• Added scratch-hello.txt (+1 -0)",
-            "    1 +hello",
-            "  Would you like to make the following edits?",
-            "› 1. Yes, proceed (y)",
-            "  2. Yes, and don't ask again for these files (a)",
-            "  3. No, and tell Codex what to do differently (esc)",
-            "  Press enter to confirm or esc to cancel",
-        ]);
-        edits.title = "[ . ] Action Required | skein".into();
-        assert_eq!(
-            classify_pane("codex", &edits),
-            Screen::Blocked(Blocked::Permission)
-        );
-    }
-
-    #[test]
-    fn classify_pane_names_the_wall_codex_puts_in_front_of_skeins_own_hooks() {
-        // skein installs its probes into every store, so "N hooks are new or changed" is the trust
-        // gate a skein box really hits — and it blocks *before* any hook could fire to report it.
-        let trust = &[
-            "  Hooks need review",
-            "  19 hooks are new or changed.",
-            "  Hooks can run outside the sandbox after you trust them.",
-            "› 1. Review hooks",
-            "  2. Trust all and continue",
-            "  3. Continue without trusting (hooks won't run)",
-            "  Press enter to confirm or esc to go back",
-        ];
-        assert_eq!(
-            classify_pane("codex", &obs(trust)),
-            Screen::Blocked(Blocked::Trust)
-        );
-        // Onboarding with no credentials: the options switch to a plain `> 1.` and the footer to
-        // "continue", and nothing will ever run until a human signs in.
-        let signin = &[
-            "  Welcome to Codex, OpenAI's command-line coding agent",
-            "  Sign in with ChatGPT to use Codex as part of your paid plan",
-            "  or connect an API key for usage-based billing",
-            "> 1. Sign in with ChatGPT",
-            "     Usage included with Plus, Pro, Business, and Enterprise plans",
-            "  2. Sign in with Device Code",
-            "  3. Provide your own API key",
-            "  Press enter to continue",
-        ];
-        assert_eq!(
-            classify_pane("codex", &obs(signin)),
-            Screen::Blocked(Blocked::Auth)
-        );
-        // A picker is a question, not a permission: nothing is waiting on a yes.
-        let picker = &[
-            "  Select a model",
-            "› 1. gpt-5.6-sol (current)",
-            "  2. gpt-5.6-terra",
-            "  Press enter to confirm or esc to go back",
-        ];
-        assert_eq!(
-            classify_pane("codex", &obs(picker)),
-            Screen::Blocked(Blocked::Question)
-        );
-    }
-
-    #[test]
-    fn codexs_action_required_title_covers_a_dialog_we_have_no_wording_for() {
-        // The next Codex release can reword any dialog body; the title marker is the backstop, and it
-        // is honest about not knowing which kind. Verified to appear only while a decision is
-        // pending — it clears on approve *and* on esc, and stays clear through a finished turn.
-        let mut unknown_dialog = obs(&["  Some future prompt nobody has captured", "  ▸ pick one"]);
-        unknown_dialog.title = "[ ! ] Action Required | skein".into();
-        assert_eq!(
-            classify_pane("codex", &unknown_dialog),
-            Screen::Blocked(Blocked::Question)
-        );
-        // The bracket animates, so only the words can be matched.
-        assert!(title_has_attention("[ ! ] Action Required | skein"));
-        assert!(title_has_attention("[ . ] Action Required | skein"));
-        assert!(!title_has_attention("⠧ skein"));
-    }
-
-    #[test]
-    fn classify_pane_reads_codexs_working_line_and_its_notices() {
-        // Codex keeps the composer on screen while it works, so "composer present" cannot mean idle.
-        let mut busy = obs(&[
-            "› run the shell command: date",
-            "• Working (1s • esc to interrupt)",
-            "› Improve documentation in @filename",
-            "  ? for shortcuts                                          100% context left",
-        ]);
-        busy.title = "⠴ skein".into();
-        assert_eq!(classify_pane("codex", &busy), Screen::Busy);
-        // A failure is a `■ ` line carrying a JSON payload…
-        let failed = &[
-            "› run the shell command: date",
-            "■ {\"detail\":\"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}",
-            "  ? for shortcuts                                          100% context left",
-        ];
-        assert!(matches!(
-            classify_pane("codex", &obs(failed)),
-            Screen::Error(_)
-        ));
-        // …while the prose `■ ` notice and the monthly-limit warning in CODEX_ANSWERED are neither an
-        // error nor an auth block. That pane is simply waiting for you.
-        assert_eq!(
-            classify_pane("codex", &obs(CODEX_ANSWERED)),
-            Screen::Waiting
-        );
-    }
-
     /// **No displayed state rests on an edge alone without saying so.** The law, as a matrix.
     ///
     /// Three of the four fusion rules can display a state no level observation supports, and each
@@ -2509,14 +2277,6 @@ mod tests {
             !usable(&unwitnessed),
             "never seen changing ⇒ no claim at all"
         );
-        // Codex's title is the working directory, not the running tool, so it names no task however
-        // fresh it is — otherwise the task column would just repeat the box's folder name.
-        let codex = PaneObs {
-            title: "⠧ skein".into(),
-            title_age: 2,
-            ..stale.clone()
-        };
-        assert!(!task_from_title("codex", &codex));
     }
 
     /// **A spinner glyph nobody has watched move is not evidence that anything is moving.**
@@ -2580,26 +2340,6 @@ mod tests {
                 ..Default::default()
             }),
             "✳ is Claude Code's idle glyph and was never a spinner, however fresh"
-        );
-
-        // Codex reads the same title through the same gate — `⠋ <dir>` is its working glyph, and its
-        // title text is the working directory, which never changes either.
-        let codex = |age: i64| {
-            classify_pane(
-                "codex",
-                &PaneObs {
-                    title: "⠧ skein".into(),
-                    title_age: age,
-                    tail: vec!["› do the thing".into()],
-                    ..Default::default()
-                },
-            )
-        };
-        assert_eq!(codex(2), Screen::Busy);
-        assert_eq!(
-            codex(TITLE_FRESH_SECS + 1),
-            Screen::Unknown,
-            "stale glyph ⇒ the grammar has nothing to say, which defers to the hook edges"
         );
 
         // The worst shape the ungated glyph could produce, and the one box-pane.sh's own header

@@ -114,14 +114,6 @@ const GATED: &[(&str, &str)] = &[
         "runs the sandbox's resource script, which reads /proc and GNU `df -P` columns",
     ),
     (
-        "codex_status_line_setup_defaults_without_overriding_user_choice",
-        "runs Codex's interactive_setup, which uses `sed -i` with no argument (GNU)",
-    ),
-    (
-        "codex_statusline_uses_default_quota_when_named_pool_arrives_last",
-        "reads the config that same `sed -i` writes",
-    ),
-    (
         "one_live_login_heals_every_box_whose_own_is_dead",
         "runs the reconciler's own script — GNU-shaped, and the fleet it repairs is Linux",
     ),

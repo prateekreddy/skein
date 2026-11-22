@@ -341,7 +341,7 @@ pub struct BoxView {
     /// Lets the cockpit group rows by repo once more than one is managed.
     #[serde(default)]
     pub repo: String,
-    /// Runtime configured for this sandbox (`claude` or `codex`). The cockpit uses this as the
+    /// Runtime configured for this sandbox (`claude`). The cockpit uses this as the
     /// default agent and offers the other runtime as a replacement-box takeover target.
     #[serde(default = "default_agent")]
     pub agent: String,

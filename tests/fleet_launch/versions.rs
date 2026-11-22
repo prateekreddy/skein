@@ -60,7 +60,7 @@ fn npm_package(prefix: &Path, package: &str, file: &str, command: &str, says: &s
 
 /// Publish a fixture CLI version into the depot the way a fill does after its check, test it
 /// through the real check namespace, and return its entry name. Its binary answers `--version` the
-/// way the real one does: `<version> (Claude Code)`, `codex-cli <version>`.
+/// way the real one does: `<version> (Claude Code)`.
 fn publish_cli(root: &Path, runtime: &str, version: &str) -> String {
     let entry = stage_cli(root, runtime, version);
     let tested = versions::test_cli(FLEET, &entry).expect("the entry is tested");
@@ -75,18 +75,12 @@ fn publish_cli(root: &Path, runtime: &str, version: &str) -> String {
 fn stage_cli(root: &Path, runtime: &str, version: &str) -> String {
     let entry = format!("{runtime}@{version}");
     let out = root.join(format!("staged-{entry}"));
-    let (package, file, says) = match runtime {
-        "claude" => (
-            "@anthropic-ai/claude-code",
-            "bin/claude.exe",
-            format!("{version} (Claude Code)"),
-        ),
-        _ => (
-            "@openai/codex",
-            "bin/codex.js",
-            format!("codex-cli {version}"),
-        ),
-    };
+    assert_eq!(runtime, "claude", "skein manages one CLI");
+    let (package, file, says) = (
+        "@anthropic-ai/claude-code",
+        "bin/claude.exe",
+        format!("{version} (Claude Code)"),
+    );
     npm_package(
         &out.join(&entry),
         package,
@@ -97,6 +91,31 @@ fn stage_cli(root: &Path, runtime: &str, version: &str) -> String {
     let staged = depot::verify(&out, &AGENT_CLI).expect("a fixture prefix passes the check");
     depot::publish(&out, &depot::kind_dir(&AGENT_CLI), &staged).expect("published");
     entry
+}
+
+/// Record `entry` as `component`'s rollout directly in skein's record. `versions::rollout` holds
+/// claude to its pin and to a passed mod check, and what these fixtures exercise is what happens
+/// when the rolled-out version MOVES, which needs two versions no pin would allow.
+fn roll_out(component: &str, entry: &str) {
+    let mut r = versions::rollouts();
+    let previous = r
+        .current
+        .get(component)
+        .map(|c| c.entry.clone())
+        .filter(|was| was != entry);
+    r.current.insert(
+        component.to_string(),
+        versions::Rolled {
+            entry: entry.to_string(),
+            previous,
+            at: 0,
+        },
+    );
+    fs::write(
+        skein::config::skein_home().join("versions.json"),
+        serde_json::to_vec(&r).unwrap(),
+    )
+    .unwrap();
 }
 
 /// Publish a fixture of the pinned TypeScript into the depot the way a fill does after its check:
@@ -413,14 +432,14 @@ fn a_claude_entry_waits_for_its_typescript_and_is_retested_when_it_arrives() {
     );
 }
 
-/// Install `version` of claude-code into the fixture prefix the way the fleet does, with
-/// `src/package-install.sh`'s `skein_npm_install`. A stub `npm` stands for the registry: it lays
+/// Install `version` of a package skein does not manage into the fixture prefix the way the fleet
+/// installs anything, with `src/package-install.sh`'s `skein_npm_install`. A stub `npm` stands for the registry: it lays
 /// the package into the prefix it is given, as `npm install -g --prefix` does, and its binary says
 /// `version`.
-fn install_sandbox_claude(root: &Path, prefix: &Path, version: &str) {
+fn install_sandbox_tool(root: &Path, prefix: &Path, version: &str) {
     let stubs = root.join("npm-stub");
     fs::create_dir_all(&stubs).unwrap();
-    let pkg = "lib/node_modules/@anthropic-ai/claude-code";
+    let pkg = "lib/node_modules/@fixture/tool";
     fs::write(
         stubs.join("npm"),
         format!(
@@ -429,9 +448,9 @@ case "$1 $2" in "config get") echo '{live}'; exit 0 ;; esac
 prefix='{live}'
 while [ $# -gt 0 ]; do case "$1" in --prefix) prefix=$2; shift ;; --globalconfig) shift ;; esac; shift; done
 mkdir -p "$prefix/{pkg}/bin" "$prefix/bin"
-printf '#!/bin/sh\necho %s\n' "$FAKE_VERSION" >"$prefix/{pkg}/bin/claude.exe"
-chmod +x "$prefix/{pkg}/bin/claude.exe"
-ln -sfn ../{pkg}/bin/claude.exe "$prefix/bin/claude"
+printf '#!/bin/sh\necho %s\n' "$FAKE_VERSION" >"$prefix/{pkg}/bin/tool.exe"
+chmod +x "$prefix/{pkg}/bin/tool.exe"
+ln -sfn ../{pkg}/bin/tool.exe "$prefix/bin/tool"
 "#,
             live = prefix.display()
         ),
@@ -441,7 +460,7 @@ ln -sfn ../{pkg}/bin/claude.exe "$prefix/bin/claude"
     let out = Command::new("bash")
         .arg("-c")
         .arg(format!(
-            "{}\nskein_npm_install \"$TMPDIR/npm.log\" @anthropic-ai/claude-code",
+            "{}\nskein_npm_install \"$TMPDIR/npm.log\" @fixture/tool",
             include_str!("../../src/package-install.sh")
         ))
         .env_clear()
@@ -457,37 +476,38 @@ ln -sfn ../{pkg}/bin/claude.exe "$prefix/bin/claude"
     );
 }
 
-/// **A box running the sandbox's own claude keeps finding it when the sandbox installs a new one**
-/// (SKEIN-1487). A rolled-out codex is what makes the launcher project the prefix, as it did for
-/// every box of the fleet when this was found; claude, with nothing rolled out, is the sandbox's.
+/// **A box keeps finding the sandbox's own copy of a package when the sandbox installs a new one**
+/// (SKEIN-1487, found on claude, when a rollout of another CLI made the launcher project the
+/// prefix). A rolled-out claude is what makes it project the prefix here; the tool, which skein
+/// does not manage, is the sandbox's.
 ///
-/// The sandbox's claude is put in place the way the fleet puts it, by `skein_npm_install`, which
-/// leaves `bin/claude` a link into `lib/.skein-v.<id>`. A box starts and runs it. Then a second
+/// The tool is put in place the way the fleet puts it, by `skein_npm_install`, which
+/// leaves `bin/tool` a link into `lib/.skein-v.<id>`. A box starts and runs it. Then a second
 /// install moves the link to a new prefix and removes the first, as the fleet's update of
-/// 2026-11-13 did, and `claude` is run again inside the box that is still running: what a new agent
+/// 2026-11-13 did, and `tool` is run again inside the box that is still running: what a new agent
 /// session in it would run.
 ///
 /// What would make it fail: a projection that copies each of the sandbox's items as it was at the
-/// box's start (the link text, or a bind of the one `.skein-v` directory): the box's `claude` then
+/// box's start (the link text, or a bind of the one `.skein-v` directory): the box's `tool` then
 /// names a removed directory, and `after` is "not found". Or an install that no longer removes the
 /// old prefix would leave it passing for the wrong reason, so the removal is asserted first.
 #[test]
-fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
+fn a_box_keeps_the_sandboxs_own_package_across_an_install_into_the_sandbox() {
     let _env = env_lock();
     let _real = skein::place::seam::real_crossings();
     if !bwrap_works() || !have("tmux") {
         return skip(
             "this machine cannot make a bwrap namespace, or lacks tmux, so whether a running box \
-             keeps the sandbox's claude across an install was NOT exercised",
+             keeps the sandbox's own package across an install was NOT exercised",
         );
     }
     let (root, prefix, _pins) = versions_fleet("clilive");
-    install_sandbox_claude(&root, &prefix, "first-install");
-    let codex = publish_cli(&root, "codex", "1.0.0");
-    versions::rollout("codex", &codex).expect("roll out codex 1.0.0");
+    install_sandbox_tool(&root, &prefix, "first-install");
+    let claude = stage_cli(&root, "claude", "1.0.0");
+    roll_out("claude", &claude);
     let p = prefix.display().to_string();
     let agent = format!(
-        "{{ printf 'cli %s\\n' \"$('{p}/bin/claude' 2>&1)\"; }} > /tmp/c.tmp \
+        "{{ printf 'cli %s\\n' \"$('{p}/bin/tool' 2>&1)\"; }} > /tmp/c.tmp \
          && mv /tmp/c.tmp /tmp/c.report; exec sleep 300"
     );
     let name = "clilive-main";
@@ -496,7 +516,7 @@ fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
         own_sandbox(FLEET)
             .exec(
                 &format!(
-                    "nsenter -t {anchor} -U -m --preserve-credentials sh -c \"'{p}/bin/claude' 2>&1\""
+                    "nsenter -t {anchor} -U -m --preserve-credentials sh -c \"'{p}/bin/tool' 2>&1\""
                 ),
                 Duration::from_secs(30),
             )
@@ -507,7 +527,7 @@ fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
     let before = in_box();
     let first_prefixes = skein_prefixes(&prefix);
 
-    install_sandbox_claude(&root, &prefix, "second-install");
+    install_sandbox_tool(&root, &prefix, "second-install");
     let after = in_box();
     let second_prefixes = skein_prefixes(&prefix);
     end(name, anchor);
@@ -515,8 +535,8 @@ fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
     assert_eq!(
         versions::versions_from_launch(&launched),
         Some(std::collections::BTreeMap::from([(
-            "codex".to_string(),
-            codex.clone()
+            "claude".to_string(),
+            claude.clone()
         )])),
         "the box was not started with the prefix projected, so this proves nothing: {launched}"
     );
@@ -531,8 +551,7 @@ fn a_box_keeps_the_sandboxs_claude_across_an_install_into_the_sandbox() {
     );
     assert_eq!(
         after, "second-install",
-        "after the sandbox installed a new claude, the running box's claude no longer runs, so \
-         every new agent session in it would say \"waiting for claude\""
+        "after the sandbox installed a new copy, the running box's copy no longer runs"
     );
 }
 
@@ -550,7 +569,7 @@ fn skein_prefixes(prefix: &Path) -> Vec<String> {
 /// apply" without touching what it runs; an idle box is then restarted onto the new version, and a
 /// working box is not** (the owner's decisions 1 and 2).
 ///
-/// Two boxes start on `codex@1.0.0`. `1.0.1` is published, tested and rolled out. Both are then
+/// Two boxes start on `claude@1.0.0`. `1.0.1` is published, tested and rolled out. Both are then
 /// stale, and both still run 1.0.0. Both ask to be restarted, through the drop-box file the box's
 /// tool writes, and the restart pass runs with the board reading one `waiting` and the other
 /// `working`. The
@@ -577,11 +596,11 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         );
     }
     let (root, prefix, _pins) = versions_fleet("cliroll");
-    let first = publish_cli(&root, "codex", "1.0.0");
-    versions::rollout("codex", &first).expect("roll out 1.0.0");
+    let first = stage_cli(&root, "claude", "1.0.0");
+    roll_out("claude", &first);
     let p = prefix.display().to_string();
     let agent = format!(
-        "{{ printf 'cli %s\\n' \"$('{p}/bin/codex' --version 2>&1)\"; }} > /tmp/v.tmp \
+        "{{ printf 'cli %s\\n' \"$('{p}/bin/claude' --version 2>&1)\"; }} > /tmp/v.tmp \
          && mv /tmp/v.tmp /tmp/v.report; exec sleep 300"
     );
     let mut anchors = std::collections::BTreeMap::new();
@@ -589,14 +608,14 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         let (launched, anchor, report) = start(name, false, &prefix, &agent, "v");
         assert_eq!(
             field(&report, "cli"),
-            "codex-cli 1.0.0",
+            "1.0.0 (Claude Code)",
             "{name}: {report:?}"
         );
         record_start(name, &launched, anchor);
         assert_eq!(
             shared_record(name).unwrap().versions,
             Some(std::collections::BTreeMap::from([(
-                "codex".to_string(),
+                "claude".to_string(),
                 first.clone()
             )])),
             "{name} did not record the version it started on"
@@ -609,8 +628,8 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         "a box on the current version reads stale"
     );
 
-    let second = publish_cli(&root, "codex", "1.0.1");
-    versions::rollout("codex", &second).expect("roll out 1.0.1");
+    let second = stage_cli(&root, "claude", "1.0.1");
+    roll_out("claude", &second);
     for name in ["rollidle-main", "rollbusy-main"] {
         assert!(
             stale(name).contains(&"agent-cli"),
@@ -620,7 +639,7 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
         let still = own_sandbox(FLEET)
             .exec(
                 &format!(
-                    "nsenter -t {} -U -m --preserve-credentials '{p}/bin/codex' --version",
+                    "nsenter -t {} -U -m --preserve-credentials '{p}/bin/claude' --version",
                     anchors[name]
                 ),
                 Duration::from_secs(30),
@@ -628,7 +647,7 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
             .unwrap_or_default();
         assert_eq!(
             still.trim(),
-            "codex-cli 1.0.0",
+            "1.0.0 (Claude Code)",
             "a rollout changed what the running {name} runs"
         );
     }
@@ -679,13 +698,13 @@ fn an_idle_box_moves_onto_a_rollout_and_a_working_box_does_not() {
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(
         field(&moved.borrow(), "cli"),
-        "codex-cli 1.0.1",
+        "1.0.1 (Claude Code)",
         "the idle box was not moved onto the rollout"
     );
     assert_eq!(
         shared_record("rollidle-main").unwrap().versions,
         Some(std::collections::BTreeMap::from([(
-            "codex".to_string(),
+            "claude".to_string(),
             second.clone()
         )]))
     );
@@ -962,18 +981,18 @@ fn the_clean_refuses_a_version_in_use() {
     let _env = env_lock();
     let _real = skein::place::seam::real_crossings();
     let (root, _prefix, _pins) = versions_fleet("cliclean");
-    let used = publish_cli(&root, "codex", "1.0.0");
-    let previous = publish_cli(&root, "codex", "1.0.1");
-    let current = publish_cli(&root, "codex", "1.0.2");
-    let unused = publish_cli(&root, "codex", "1.0.3");
-    versions::rollout("codex", &previous).unwrap();
-    versions::rollout("codex", &current).unwrap();
+    let used = stage_cli(&root, "claude", "1.0.0");
+    let previous = stage_cli(&root, "claude", "1.0.1");
+    let current = stage_cli(&root, "claude", "1.0.2");
+    let unused = stage_cli(&root, "claude", "1.0.3");
+    roll_out("claude", &previous);
+    roll_out("claude", &current);
     record_place(
         "cleanuse-main",
         &PlaceRecord {
             sandbox: FLEET.into(),
             versions: Some(std::collections::BTreeMap::from([(
-                "codex".to_string(),
+                "claude".to_string(),
                 used.clone(),
             )])),
             ..Default::default()

@@ -63,18 +63,6 @@ fi
 clone_root="$(printenv WORKSPACE_DIR 2>/dev/null || true)"
 [ -n "$clone_root" ] || clone_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-# A repo launched through Skein was explicitly selected by the user, so record that one
-# workspace as trusted before Codex starts. This bypasses Codex's separate first-run project
-# prompt (hook trust is a different gate) without weakening trust for any other directory.
-codex_cfg="$HOME/.codex/config.toml"
-if [ -f "$codex_cfg" ]; then
-  toml_root="$(printf '%s' "$clone_root" | sed 's/\\/\\\\/g; s/"/\\"/g')"
-  project_header="[projects.\"$toml_root\"]"
-  if ! grep -Fqx "$project_header" "$codex_cfg" 2>/dev/null; then
-    printf '\n%s\ntrust_level = "trusted"\n' "$project_header" >> "$codex_cfg"
-  fi
-fi
-
 # The helpers this runs from here on are skein's read-only copies, not the store's (SKEIN-1149): the
 # store is writable by every box of the repo, so a helper run from there is one a sibling box can
 # rewrite and this box then runs as it starts. They are installed with this script, under the fleet
@@ -455,7 +443,8 @@ done
 [ "$tools_ok" = "true" ] \
   || echo "[skein-kit] required box tools unavailable:$missing" >&2
 
-# A cross-runtime replacement carries an immutable snapshot. Restore it before either provider
+# A replacement box made by the takeover skein used to have (removed in SKEIN-1511) carries an
+# immutable snapshot, and one that has not started yet still needs it. Restore it before the agent
 # starts: the bundle preserves unpushed commits, separate patches preserve index vs worktree
 # state, and the archive preserves untracked files. This runs once in the NEW target clone only;
 # the source box is never reset, stopped, or destroyed.
@@ -476,7 +465,7 @@ handoff_marker="$clone_root/.git/skein-handoff-restored"
 # and nothing under a `.git` directory.
 #
 # There is no `home` case, and no agent-state archive is restored into `$HOME`: the only producer
-# of one was the fleet's own snapshot of a box, which SKEIN-1289 deleted, and `prepare_replacement`
+# of one was the fleet's own snapshot of a box, which SKEIN-1289 deleted, and the takeover
 # writes none, so the restore that read one was reachable only from a test (SKEIN-1314). An
 # `agent-state.tgz` found in a snapshot is left where it is.
 archive_members_ok() {
@@ -501,7 +490,7 @@ if [ -n "$handoff_dir" ] && [ ! -e "$handoff_marker" ]; then
     || { echo "[skein-kit] this box has a handoff to restore but no host-only state directory to restore it from (SKEIN_STATE)" >&2; exit 1; }
   snapshot="$box_state/$handoff_dir"
   [ -s "$snapshot/repo.bundle" ] || { echo "[skein-kit] handoff bundle missing" >&2; exit 1; }
-  # One producer writes this bundle: a takeover (takeover::prepare_replacement), which bundles HEAD
+  # One producer wrote this bundle: the removed takeover, which bundled HEAD
   # alone, because it moves one branch to a new box. So the restore takes the bundle's HEAD, the
   # commit the manifest records, and nothing else the bundle might carry.
   restored=""
@@ -800,6 +789,12 @@ agent_guide_state="failed"
 instruction_file=""
 instruction_override=""
 if [ -r "$store/skein/runtimes.tsv" ]; then
+  # A spec can name a runtime this build no longer has (a box created as Codex, SKEIN-1511). The host
+  # starts such a box on the fleet's default, so its guidance is the first row's rather than none.
+  if [ -n "$selected_agent" ] && ! cut -f1 "$store/skein/runtimes.tsv" | grep -Fxq -- "$selected_agent"; then
+    echo "[skein-kit] this box was created for $selected_agent, which skein no longer runs; using $(head -n 1 "$store/skein/runtimes.tsv" | cut -f1)" >&2
+    selected_agent="$(head -n 1 "$store/skein/runtimes.tsv" | cut -f1)"
+  fi
   while IFS="$(printf '\t')" read -r runtime_id runtime_label runtime_exe runtime_instruction runtime_override; do
     if [ "$runtime_id" = "$selected_agent" ]; then
       instruction_file="$runtime_instruction"
@@ -813,83 +808,6 @@ if [ -n "$instruction_file" ] && [ -r "$skein_probe/agent-guide.sh" ] \
   agent_guide_state="installed"
 else
   echo "[skein-kit] durable agent guidance unavailable — check runtime manifest" >&2
-fi
-
-# Codex adapter: install Skein's generated hooks at the USER layer. Project-local .codex
-# hooks are suppressed until the clone is trusted; the user layer is independent of project
-# trust, and Skein launches Codex with --dangerously-bypass-hook-trust for these vetted
-# generated commands. Preserve unrelated user hooks, while replacing older Skein entries so
-# upgrades don't double-fire. jq is preferred for the additive merge; a fresh file can be
-# installed without it.
-codex_hooks_state="absent"
-codex_home="$HOME/.codex"
-codex_installer="$skein_probe/install-codex-hooks.sh"
-if [ -r "$codex_installer" ] && bash "$codex_installer"; then
-  codex_hooks_state="installed"
-fi
-
-# Codex's workspace sandbox writes the checkout and nothing else, so a Codex box could not write
-# `$HOME/shared` or post to the mailbox (SKEIN-1330). Both go in `sandbox_workspace_write`'s
-# `writable_roots` in `~/.codex/config.toml`, by their real paths — the shared home as
-# `skein_shared_home` names it, not the `$HOME/shared` link. The line is skein's, marked, and
-# replaced at every start. TOML has no merge, and a key twice in one table is a file Codex will not
-# load, so where the table already holds a `writable_roots` of the person's, or the person set the
-# table some other way, theirs is left exactly as it is and the boot report says `theirs`.
-codex_roots_state="absent"
-codex_cfg="$codex_home/config.toml"
-if [ "$box_self" = "true" ]; then shared_dir="$(skein_shared_home "$store")"; else shared_dir="$store/shared-home"; fi
-roots=""
-for root in "$shared_dir" "$store/mailbox"; do
-  [ -d "$root" ] && [ ! -L "$root" ] || continue
-  case "$root" in *'"'* | *'\'*) continue ;; esac
-  if [ -n "$roots" ]; then roots="$roots, \"$root\""; else roots="\"$root\""; fi
-done
-if [ -n "$roots" ] && mkdir -p "$codex_home" 2>/dev/null; then
-  mark="# skein: this repo's shared files and mailbox"
-  [ -f "$codex_cfg" ] || : >"$codex_cfg"
-  tmp="$(mktemp "$codex_home/.config.XXXXXX" 2>/dev/null)" || tmp=""
-  if [ -n "$tmp" ]; then
-    awk -v line="writable_roots = [$roots] $mark" -v mark="$mark" '
-      function header(s) { return s ~ /^[[:space:]]*\[/ }
-      function ours(s) { return s ~ /^[[:space:]]*\[[[:space:]]*sandbox_workspace_write[[:space:]]*\][[:space:]]*(#.*)?$/ }
-      function key(s) { return s ~ /^[[:space:]]*writable_roots[[:space:]]*=/ }
-      NR == FNR {
-        if (header($0)) { seen = 1; t = ours($0); if (t) table = 1 }
-        else if (t && key($0)) { if (index($0, mark)) mine = 1; else theirs = 1 }
-        else if (!seen && $0 ~ /^[[:space:]]*sandbox_workspace_write[[:space:]]*[.=]/) theirs = 1
-        next
-      }
-      header($0) { t = ours($0) }
-      t && key($0) && index($0, mark) { if (!theirs) print line; next }
-      { print }
-      ours($0) && !theirs && !mine { print line }
-      END {
-        if (!table && !theirs) { print ""; print "[sandbox_workspace_write]"; print line }
-        exit theirs ? 3 : 0
-      }
-    ' "$codex_cfg" "$codex_cfg" >"$tmp"
-    case "$?" in
-      0) codex_roots_state="set" ;;
-      3) codex_roots_state="theirs" ;;
-      *) codex_roots_state="failed" ;;
-    esac
-    if [ "$codex_roots_state" != "failed" ] && ! cmp -s "$tmp" "$codex_cfg"; then
-      mv "$tmp" "$codex_cfg" || codex_roots_state="failed"
-    fi
-    rm -f "$tmp"
-  fi
-fi
-
-# The same project skills should be available to both runtimes. Claude reads them through
-# .claude/skills; Codex discovers user skills under ~/.codex/skills. Link each project skill
-# without replacing Codex's own/system skills.
-if [ -d "$store/skills" ]; then
-  mkdir -p "$codex_home/skills" 2>/dev/null || true
-  for skill in "$store/skills"/*; do
-    [ -e "$skill" ] || continue
-    dst="$codex_home/skills/$(basename "$skill")"
-    [ -e "$dst" ] || [ -L "$dst" ] || ln -s "$skill" "$dst" 2>/dev/null || true
-  done
 fi
 
 # Boot report: one small JSON the cockpit (and `skein doctor`) can read instead of guessing
@@ -915,8 +833,8 @@ if [ -d "$store" ] && [ -n "$vmid" ]; then
   if [ -n "$store_note" ]; then
     if [ -n "$claude_note" ]; then claude_note="$store_note; $claude_note"; else claude_note="$store_note"; fi
   fi
-  printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","codex_hooks":"%s","codex_roots":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$codex_hooks_state" "$codex_roots_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
+  printf '{"ts":"%s","claude_link":"%s","claude_note":"%s","shared_home":"%s","agent_guide":"%s","agents":"%s","jq":%s,"tmux":%s,"probe_revision":"%s","branch":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$link_state" "$claude_note" "$shared_home_state" "$agent_guide_state" "$cap" "$jqp" "$tmuxp" "$revision" "$branch" \
     > "$store/skein/boot/$vmid.json" 2>/dev/null || true
 fi
 [ "$tools_ok" = "true" ] || exit 1

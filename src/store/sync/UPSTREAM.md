@@ -48,24 +48,13 @@ stays box-private.
 Authentication moves with it: the plugin signs in over OAuth rather than carrying a minted token.
 That is upstream's primary path, and the sync repo's own box already runs this way.
 
-**Codex still registers by token**, and that is not a fallback — plugins are a Claude Code feature,
-so for Codex the TOML block is the only way it ever gets these tools. That is also why
-`sync_provision_box` still mints a token.
+`sync-install.sh` needs no token: a URL alone wires a box up. `sync_provision_box` still mints one
+and writes it into the box, where nothing reads it now that Codex is gone (SKEIN-1511); what it
+minted is still tracked so that it can be revoked.
 
-It is the *only* thing the token is for now, which is why `sync-install.sh` no longer requires one to
-run: a URL alone wires a box up. Requiring a token first would have meant a repo could not be pointed
-at a tracker without one being minted for every box of it — the per-box work this arrangement exists
-to remove.
-
-**So the vendored skill below is now the Codex fallback, not the primary.** The plugin ships this
-skill and keeps it current; skein's copy is pinned to whatever commit was last pulled here, and two
-copies of one skill is a fork rather than a redundancy. `sync-install.sh` skips it when the plugin is
-installed *and Codex was not registered*.
-
-That condition is about the tools, not about the binary. Every box has `codex` on `PATH` — the kit
-installs it — so a condition written on `command -v codex` is true everywhere and never skips
-anything. Whether the sync server was actually written into Codex's config is the fact that decides
-it: if Codex has the tools, something has to teach Codex the rules, and the plugin cannot.
+**So the vendored skill below is only for a box without the plugin.** The plugin ships this skill and
+keeps it current; skein's copy is pinned to whatever commit was last pulled here, and two copies of
+one skill is a fork rather than a redundancy. `sync-install.sh` skips it when the plugin is installed.
 
 ## What comes from where
 

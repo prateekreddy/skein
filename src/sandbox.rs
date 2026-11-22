@@ -33,7 +33,7 @@ pub fn launch_command(name: &str, branch: &str) -> String {
 
 /// Build a launch command with an optional per-box runtime override. The repo's configured agent
 /// remains the default; the cockpit uses this seam when the New box dialog explicitly selects
-/// Claude or Codex.
+/// the agent.
 pub fn launch_command_with_agent(name: &str, branch: &str, agent: Option<&str>) -> String {
     launch_command_as(name, branch, agent, Attach::Yes)
 }
@@ -818,7 +818,7 @@ fn forget_what_skein_decided(name: &str) {
 /// reattaches when alive and creates with the adapter's resume command only when missing. Detached
 /// creation lets Skein hide tmux chrome and configure scrolling before the browser attaches. The
 /// resume command is per-agent: claude → `claude --continue` (picks the
-/// transcript back up); Codex uses `resume --last`. If the tmux process is still alive, this command
+/// transcript back up). If the tmux process is still alive, this command
 /// is not run at all — the client attaches directly to the in-progress process.
 /// A missing tmux is a broken Skein box contract, not a reason to start a second direct process.
 /// Mirror of [`shell_argv`], which backs the shell tab the same way. Override wholesale with
@@ -829,8 +829,7 @@ pub fn attach_argv(name: &str, _dir: &str) -> Vec<String> {
 }
 
 /// Attach using an explicit runtime. Normal operation uses the configured runtime in `skein-agent`.
-/// A different runtime remains available as a low-level compatibility path; product takeover uses
-/// [`replace_box`] so boxes stay single-runtime.
+/// A different runtime gets a session of its own.
 pub fn attach_argv_as(name: &str, _dir: &str, agent: &str) -> Vec<String> {
     let runtime = resolve_runtime(agent);
     let agent = runtime.info.id;
@@ -848,9 +847,8 @@ pub fn initial_attach_argv_as(name: &str, agent: &str) -> Vec<String> {
     // here would leave that transcript sitting on disk, unread, while the agent opened an empty
     // session against a tree full of context it appears not to remember.
     //
-    // Safe for the cross-runtime takeover path, which also carries a handoff dir: `interactive_resume`
-    // is `<cli> --continue || <cli>`, so a target runtime with no native transcript of its own falls
-    // back to a fresh start on its own — the takeover brief is what carries context there.
+    // Safe for a box with no transcript of its own: `interactive_resume` is
+    // `<cli> --continue || <cli>`, so it falls back to a fresh start.
     let command = if restored_from_snapshot(name) {
         runtime.interactive_resume
     } else {
@@ -964,12 +962,10 @@ fn agent_session_shell(
     format!(
         "{setup_wait}{cli_wait}if ! command -v {executable} >/dev/null 2>&1; then echo 'skein: {agent} is not on this box after {AGENT_CLI_WAIT_SECS} s. An install of the agent CLI may be in progress: stop and start the box to try again. If this sandbox has no {agent}, create a {agent} box, or install and authenticate the CLI here to take over.'; {no_cli}; fi; \
          if ! command -v tmux >/dev/null 2>&1; then echo 'skein: tmux is required for durable sessions but is missing; recreate this box or install tmux'; exit 1; fi; \
-         {setup}; \
          created=0; if ! {tmux} has-session -t {tmux_name} 2>/dev/null; then {instruction}; {tmux} new-session -d -s {tmux_name} {command:?}; created=1; fi; \
          if [ \"$created\" = 1 ]; then {tmux} set-option -t {tmux_name} @skein-agent-contract {TMUX_AGENT_CONTRACT}; fi; \
          {observer} \
-         {configure}{last}",
-        setup = runtime.interactive_setup,
+         {configure}{last}"
     )
 }
 
@@ -1145,7 +1141,7 @@ pub fn reopen_agent_session(name: &str) -> Result<(), String> {
 
 /// The shell command that (re)starts an agent, resuming prior history when the runtime supports it —
 /// run inside the `skein-agent` tmux session by [`attach_argv`] (the per-runtime seam). Claude uses
-/// `--continue`; Codex uses `resume --last`; future runtimes add their command in the adapter table.
+/// `--continue`; a future runtime adds its command in the adapter table.
 #[cfg(test)]
 pub(crate) fn agent_resume_cmd(agent: &str) -> String {
     runtime_adapter(agent)
@@ -1195,7 +1191,7 @@ mod tests {
     use super::*;
     use crate::config::{load_config, save_config, Config};
     use crate::place::{record_place, PlaceRecord};
-    use crate::repos::{launch_spec_agent, save_repos};
+    use crate::repos::save_repos;
     use crate::testutil::*;
 
     #[test]
@@ -1242,60 +1238,6 @@ mod tests {
             .join("thing-feat-auth.json");
         let txt = fs::read_to_string(&spec).unwrap();
         assert!(txt.contains("\"branch\": \"feat/auth\""), "spec was: {txt}");
-        env::remove_var("SKEIN_HOME");
-    }
-
-    #[test]
-    fn codex_launch_records_runtime_and_bypasses_generated_hook_review() {
-        let _g = env_lock();
-        // The agent's command names skein's plugin under the fleet root (SKEIN-1056).
-        let mut pins = crate::testutil::env_pins();
-        pins.set("SKEIN_FLEET_ROOT", "/fleet-root-example");
-        let home = tempdir();
-        env::set_var("SKEIN_HOME", &home);
-        // The sandbox-per-box path — the fleet builds its session a different way.
-        save_config(&Config {
-            fleet_sandbox: String::new(),
-            ..Config::default()
-        })
-        .unwrap();
-        let repo = Repo {
-            read_prs: false,
-            id: "skein".into(),
-            source: "s".into(),
-            store: home.join("store/.claude").to_string_lossy().into_owned(),
-            plane_project: String::new(),
-            sync_connection: String::new(),
-            review_queue: true,
-            sync_gateway_url: String::new(),
-            ..Default::default()
-        };
-        // The launcher carries the runtime choice; what that runtime then *does* on attach — the
-        // update, the hook-trust bypass, no `resume --last` on a first start — is
-        // `initial_attach_argv_as`'s business and is asserted there. This string used to contain both,
-        // because `sbx create … && sbx exec …` was one line; it is now `skein start --attach`.
-        let cmd = repo_launch_command_as("skein-codex", &repo, "codex", Some("codex"), Attach::Yes);
-        assert!(
-            cmd.contains("--agent 'codex'"),
-            "the runtime override has to reach the launcher: {cmd}"
-        );
-        placed("skein-codex");
-        let attach = initial_attach_argv_as("skein-codex", "codex");
-        let shell = attach.last().unwrap();
-        assert!(shell.contains("new-session -d -s skein-agent"), "{shell}");
-        // SKEIN-403: a box's very first attach used to spend a network round trip on an update it
-        // could not perform. Nowhere on this path reaches out any more.
-        assert!(!shell.contains("codex update"), "{shell}");
-        assert!(
-            shell.contains("codex --no-alt-screen --dangerously-bypass-hook-trust"),
-            "{shell}"
-        );
-        assert!(!shell.contains("codex resume --last"), "{shell}");
-        // What the box will be recorded as, which is what a later attach reads back.
-        assert_eq!(
-            launch_spec_agent(&repo, "skein-codex").as_deref(),
-            Some("codex")
-        );
         env::remove_var("SKEIN_HOME");
     }
 
@@ -2343,7 +2285,7 @@ mod tests {
         assert!(first.last().unwrap().contains("waiting for box setup"));
         assert!(!a.last().unwrap().contains("waiting for box setup"));
         // claude resumes its transcript; a non-claude agent starts bare (its binary name).
-        // Both real runtimes fall back to a fresh conversation: a replacement/cleared box has no
+        // It falls back to a fresh conversation: a cleared box has no
         // transcript, and without the fallback "No conversation found" killed the session on attach.
         // The raw template, `{box}` unresolved — `for_box` fills it in at the call sites above,
         // where the name is known. Asserted as a template on purpose: the placeholder being here is
@@ -2353,37 +2295,7 @@ mod tests {
             "claude --name '{box}' --plugin-dir {plugin} --continue || claude --name '{box}' \
              --plugin-dir {plugin}"
         );
-        assert!(agent_resume_cmd("codex").contains("resume --last"));
-        assert!(agent_resume_cmd("codex").contains("||"));
         assert_eq!(agent_resume_cmd("shell"), "shell");
-        let codex = attach_argv_as("thing-x", "/d", "codex");
-        assert!(codex.last().unwrap().contains("skein-agent-codex"));
-        assert!(codex.last().unwrap().contains("resume --last"));
-        assert!(codex.last().unwrap().contains("--no-alt-screen"));
-        // The same absence for the other adapter (SKEIN-403): both carried an update that could
-        // not write the file it was updating, and a fix applied to one of two runtimes is half a
-        // fix that reads as a whole one.
-        assert!(
-            !codex.last().unwrap().contains("codex update"),
-            "starting a codex agent still runs an update first: {}",
-            codex.last().unwrap()
-        );
-        assert!(codex.last().unwrap().contains("install-codex-hooks.sh"));
-        assert!(
-            codex
-                .last()
-                .unwrap()
-                .find("install-codex-hooks.sh")
-                .unwrap()
-                < codex.last().unwrap().find("new-session").unwrap(),
-            "Codex hooks must be installed before the resumed process starts"
-        );
-        assert!(codex.last().unwrap().contains("agent-guide.sh"));
-        assert!(
-            codex.last().unwrap().find("agent-guide.sh").unwrap()
-                < codex.last().unwrap().find("new-session").unwrap(),
-            "durable instructions must be installed before Codex starts"
-        );
         // shell requires the same durable-session substrate; it never opens a reload-fragile shell.
         let sh = shell_argv("thing-x");
         assert!(!sh.iter().any(|x| x == "sbx"), "{sh:?}");

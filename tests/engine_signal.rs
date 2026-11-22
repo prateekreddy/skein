@@ -247,9 +247,9 @@ fn mod_not_loaded_is_said_of_a_running_claude_box_only() {
     );
     assert_eq!(engine_health("claude", &EngineRead::Fresh(some), true), "");
     assert_eq!(
-        engine_health("codex", &EngineRead::Absent, true),
+        engine_health("other", &EngineRead::Absent, true),
         "",
-        "Codex gets nothing from the mod, so its absence is not news"
+        "a runtime that loads no mod gets nothing from it, so its absence is not news"
     );
     assert_eq!(
         engine_health("claude", &EngineRead::Absent, false),

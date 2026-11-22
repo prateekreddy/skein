@@ -8,24 +8,21 @@ use super::*;
 /// Each is a file in the turn-state variant's `probe/` under `.skein` (SKEIN-1149).
 /// `probes::every_start_helper_runs_from_the_read_only_plugin` holds every caller to that directory;
 /// this list only says what box A tries to change.
-const START_FILES: [&str; 8] = [
+const START_FILES: [&str; 6] = [
     "shared-home.sh",
     "agent-guide.sh",
-    "install-codex-hooks.sh",
     "sync-install.sh",
     "sync-refresh.sh",
     "statusline-command.sh",
     "box-pane.sh",
-    "codex-hooks.json",
 ];
 
-/// **A box cannot change what its sibling runs from skein as it starts — Codex's hook wiring, the
-/// kit's helpers or the status line — and the sibling's start still works** (SKEIN-1149).
+/// **A box cannot change what its sibling runs from skein as it starts — the kit's helpers or the
+/// status line — and the sibling's start still works** (SKEIN-1149).
 ///
 /// Two boxes of one repository share its store, and every box can write it (docs/threat-model.md).
-/// Until SKEIN-1149 the kit ran `shared-home.sh`, `agent-guide.sh`, `install-codex-hooks.sh` and
-/// `sync-install.sh` from the store's `skein/bin/`, the installer merged the store's
-/// `skein/codex-hooks.json` into the box's `~/.codex/hooks.json`, the attach shell and the tracker
+/// Until SKEIN-1149 the kit ran `shared-home.sh`, `agent-guide.sh` and
+/// `sync-install.sh` from the store's `skein/bin/`, the attach shell and the tracker
 /// ran their helpers from there too, and skein's default status line ran the store's renderer. So a
 /// box could choose what its siblings ran the next time they started. They run skein's read-only
 /// copies under the fleet root's `.skein` now.
@@ -38,8 +35,7 @@ const START_FILES: [&str; 8] = [
 /// tracker's install and refresh, and the status line — each the production string.
 ///
 /// Box A (`web-main`) overwrites every one of those files in `.skein` with a script that leaves a
-/// marker in the store (and Codex's wiring with a hook that would), then plants the same in the
-/// store's `skein/bin/` and `skein/codex-hooks.json`, which it can: that write succeeding is what
+/// marker in the store, then plants the same in the store's `skein/bin/`, which it can: that write succeeding is what
 /// makes the rest a statement about `.skein` rather than about a box that can write nothing. Box B
 /// (`web-two`) then starts under the same cover.
 ///
@@ -51,13 +47,12 @@ const START_FILES: [&str; 8] = [
 /// - `--bind` in place of `--ro-bind` for `.skein` in `box-session.sh`'s isolation block: A's
 ///   writes land (the first assertion);
 /// - any caller put back on the store — the kit's `$skein_probe` as `$store/skein/bin`, a runtime
-///   or tracker string on `.claude/skein/bin/`, the status line on the store's renderer, or the
-///   Codex installer reading `$store/skein/codex-hooks.json`: B runs A's plant (a marker appears,
-///   or B's Codex hooks carry A's command);
+///   or tracker string on `.claude/skein/bin/`, or the status line on the store's renderer: B runs
+///   A's plant (a marker appears);
 /// - a helper dropped from what the plugin installs: the test refuses before anything runs ("the
 ///   plugin installs no …");
-/// - a caller naming a file the plugin does not install (the kit's installer misspelt): B's start
-///   does not work (the boot report says `codex_hooks` is `absent`).
+/// - a caller naming a file the plugin does not install (the kit's helper misspelt): B's start
+///   does not work (the boot report says `agent_guide` is `failed`).
 #[test]
 fn a_box_cannot_change_what_its_sibling_runs_as_it_starts() {
     if !bwrap_works() {
@@ -158,18 +153,18 @@ rm -f /tmp/skein-pane.web-two.lock
             .collect();
 
         // What the store holds for B's start that is data rather than a helper: the runtime
-        // manifest and the guide agent-guide.sh checks for, and B's launch spec saying it is Codex.
+        // manifest and the guide agent-guide.sh checks for, and B's launch spec.
         let store = fleet.store();
         fs::create_dir_all(store.join("skein/launch")).unwrap();
         fs::write(
             store.join("skein/runtimes.tsv"),
-            "codex\tCodex\tcodex\t.codex/AGENTS.md\t.codex/AGENTS.override.md\n",
+            "claude\tClaude\tclaude\t.claude/CLAUDE.md\t\n",
         )
         .unwrap();
         fs::write(store.join("skein/SHARED-HOME.md"), "the guide\n").unwrap();
         fs::write(
             store.join("skein/launch/web-two.json"),
-            "{\"agent\":\"codex\",\"branch\":\"\"}\n",
+            "{\"agent\":\"claude\",\"branch\":\"\"}\n",
         )
         .unwrap();
         let tree = fleet.fleet_root.join("web-main/tree");
@@ -208,8 +203,7 @@ rm -f /tmp/skein-pane.web-two.lock
                  nothing"
             );
             // Every script plant ran when B started, so a marker's absence below is one that
-            // something could have filled. Codex's wiring is data, not a script: its plant is
-            // proven by B's hooks carrying it.
+            // something could have filled.
             for name in START_FILES.iter().filter(|n| n.ends_with(".sh")) {
                 assert!(
                     planted_ran.contains(&format!("planted-{name}")),
@@ -247,23 +241,9 @@ rm -f /tmp/skein-pane.web-two.lock
         .unwrap();
         assert_eq!(boot["shared_home"], "linked", "{boot}");
         assert_eq!(boot["agent_guide"], "installed", "{boot}");
-        assert_eq!(boot["codex_hooks"], "installed", "{boot}");
         let home = tree.join(".home-b");
-        let hooks = fs::read_to_string(home.join(".codex/hooks.json"))
-            .expect("the sibling has no Codex hooks");
         assert!(
-            !hooks.contains("planted-"),
-            "the sibling's Codex hooks carry a command another box wrote: {hooks}"
-        );
-        let hooks: serde_json::Value = serde_json::from_str(&hooks).unwrap();
-        let skeins: serde_json::Value =
-            serde_json::from_slice(&originals[START_FILES.len() - 1]).unwrap();
-        assert_eq!(
-            hooks, skeins,
-            "the sibling's Codex hooks are not the ones skein installed"
-        );
-        assert!(
-            fs::read_to_string(home.join(".codex/AGENTS.md"))
+            fs::read_to_string(home.join(".claude/CLAUDE.md"))
                 .expect("the sibling has no agent guide")
                 .contains("skein:shared-home:start"),
             "the sibling's agent guide is not skein's"

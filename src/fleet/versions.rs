@@ -5,7 +5,7 @@
 //! new one. The owner's decisions of 2026-10-30, which this module is the whole of:
 //!
 //!  1. **A new CLI version is fetched and tested automatically, and rolled out by the owner.**
-//!     [`watch_pass`] asks the npm registry what the newest claude-code and codex are, fills each
+//!     [`watch_pass`] asks the npm registry what the newest claude-code is, fills each
 //!     one the depot lacks in a namespace that sees no box, and tests it from the published entry
 //!     ([`test_cli`]). The cockpit then offers "Roll out", and nothing changes until it is pressed
 //!     ([`rollout`]).
@@ -96,18 +96,11 @@ pub struct Cli {
 
 /// The CLIs skein fetches, the same table the launcher's projection carries (`box-session.sh`, "the
 /// fleet's agent CLIs"); `the_launchers_cli_table_is_this_one` holds the two together.
-pub const CLIS: [Cli; 2] = [
-    Cli {
-        runtime: "claude",
-        package: "@anthropic-ai/claude-code",
-        command: "claude",
-    },
-    Cli {
-        runtime: "codex",
-        package: "@openai/codex",
-        command: "codex",
-    },
-];
+pub const CLIS: [Cli; 1] = [Cli {
+    runtime: "claude",
+    package: "@anthropic-ai/claude-code",
+    command: "claude",
+}];
 
 /// The component the fleet's default Rust toolchain is rolled out under.
 pub const RUST: &str = "rust";
@@ -689,7 +682,10 @@ pub fn pending_for(record: &crate::place::PlaceRecord, name: &str) -> Vec<Pendin
     let now = wanted_versions(name);
     let keys: BTreeSet<&String> = born.keys().chain(now.keys()).collect();
     keys.into_iter()
-        .filter(|k| *k != RUST_REPO_MISSING && born.get(*k) != now.get(*k))
+        // A key skein no longer manages (`codex`, on a box started before SKEIN-1511) is nothing a
+        // restart would give it, so it is not a version the box is behind on.
+        .filter(|k| cli(k).is_some() || matches!(k.as_str(), RUST | RUST_REPO))
+        .filter(|k| born.get(*k) != now.get(*k))
         .map(|k| Pending {
             component: k.clone(),
             have: born.get(k).cloned().unwrap_or_default(),
@@ -821,7 +817,7 @@ pub fn typescript_entry() -> String {
     format!("typescript@{}", TYPESCRIPT_PIN.trim())
 }
 
-/// The version `runtime` is pinned to, when it is: claude-code is; codex follows npm's newest.
+/// The version `runtime` is pinned to, when it is: claude-code is.
 pub fn pinned(runtime: &str) -> Option<&'static str> {
     (runtime == "claude").then(|| CLAUDE_CODE_PIN.trim())
 }
@@ -1466,7 +1462,7 @@ mod tests {
     /// `toolchain_is_nameable` accepting a moving channel (`stable-…`) or a path.
     #[test]
     fn only_a_known_cli_and_a_plain_version_or_a_pinned_toolchain_is_an_entry() {
-        for good in ["claude@2.1.314", "codex@0.170.0", "claude@0.0.1"] {
+        for good in ["claude@2.1.314", "claude@0.0.1"] {
             assert!(cli_entry_is_nameable(good), "{good}");
         }
         for bad in [
@@ -1558,8 +1554,7 @@ mod tests {
             stale_keys(
                 &born,
                 &m(&[
-                    ("claude", "claude@1.0.0"),
-                    ("codex", "codex@1.0.0"),
+                    ("claude", "claude@1.0.1"),
                     ("rust", "1.97.0-x")
                 ])
             ),
@@ -1917,13 +1912,13 @@ mod tests {
         pins.set("SKEIN_FLEET_ROOT", dir.join("fleet"))
             .set("SKEIN_HOME", dir.join("home"));
         let pin = format!("claude@{}", pinned("claude").expect("claude is pinned"));
-        for e in ["codex@1.0.0", "codex@1.0.1", "claude@1.0.0", pin.as_str()] {
+        for e in ["codex@1.0.0", "claude@1.0.0", pin.as_str()] {
             publish_fixture(&AGENT_CLI, e);
         }
-        let why = rollout("codex", "codex@1.0.0").expect_err("untested");
+        let why = rollout("claude", &pin).expect_err("untested");
         assert!(why.contains("has not passed its tests"), "{why}");
         update_rollouts(|r| {
-            for e in ["codex@1.0.0", "codex@1.0.1", "claude@1.0.0", pin.as_str()] {
+            for e in ["codex@1.0.0", "claude@1.0.0", pin.as_str()] {
                 r.tested.insert(
                     e.into(),
                     Tested {
@@ -1935,18 +1930,29 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        // A runtime skein no longer manages cannot be rolled out, whatever the record says of it.
+        assert!(rollout("codex", "codex@1.0.0").is_err());
         assert!(
             rollout("codex", "claude@1.0.0").is_err(),
-            "a claude entry rolled out as codex"
+            "a claude entry rolled out as a retired runtime"
         );
         let off_pin = rollout("claude", "claude@1.0.0").expect_err("claude is pinned");
         assert!(off_pin.contains("src/claude-code.version"), "{off_pin}");
-        rollout("claude", &pin).expect("the pin rolls out");
-        rollout("codex", "codex@1.0.0").unwrap();
-        let rolled = rollout("codex", "codex@1.0.1").unwrap();
-        assert_eq!(rolled.previous.as_deref(), Some("codex@1.0.0"));
+        update_rollouts(|r| {
+            r.current.insert(
+                "claude".into(),
+                Rolled {
+                    entry: "claude@1.0.0".into(),
+                    previous: None,
+                    at: 0,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let rolled = rollout("claude", &pin).expect("the pin rolls out");
+        assert_eq!(rolled.previous.as_deref(), Some("claude@1.0.0"));
         let want = wanted_versions("web-main");
-        assert_eq!(want.get("codex").map(String::as_str), Some("codex@1.0.1"));
         assert_eq!(want.get("claude"), Some(&pin));
         depot::make_writable(&dir);
     }
@@ -2070,7 +2076,7 @@ mod tests {
     /// no other check is.**
     ///
     /// What would make it fail: dropping the `TSC` variable or the `/tsc` bind from the
-    /// plugin-check row; giving them to codex's or the version check; `check_script` not emitting
+    /// plugin-check row; giving them to the version check; `check_script` not emitting
     /// a check's binds as `--ro-bind`.
     #[test]
     fn the_mod_check_is_given_the_pinned_tsc() {
@@ -2101,11 +2107,9 @@ mod tests {
             )),
             "{script}"
         );
-        let codex = checks_for(cli("codex").unwrap(), "0.170.0", &ts);
         let others: Vec<&CliCheck> = checks
             .iter()
             .filter(|c| c.name != "plugin-check")
-            .chain(codex.iter())
             .collect();
         for c in others {
             assert!(

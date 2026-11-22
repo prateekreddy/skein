@@ -179,8 +179,12 @@ pub fn agent_for_box(name: &str) -> String {
             return agent;
         }
     }
+    // Filtered like the live record above: a spec can name a runtime this build no longer has (a
+    // box created as Codex, SKEIN-1511). Such a box still starts, on the fleet's default, and its
+    // spec is left as written.
     repo_for_box(name)
         .and_then(|repo| launch_spec_agent(&repo, name))
+        .filter(|a| valid_runtime(a))
         .unwrap_or_else(crate::runtime::fleet_default_runtime)
 }
 
@@ -259,7 +263,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        crate::testutil::switch_on(|c| c.default_agent = "codex".into());
+        crate::testutil::switch_on(|c| c.default_agent = "claude".into());
 
         assert_eq!(
             load_repos()
@@ -274,7 +278,7 @@ mod tests {
         repin_branch("thing-feat-x", "feat-x").unwrap();
         assert_eq!(
             launch_spec_agent(repo, "thing-feat-x").as_deref(),
-            Some("codex"),
+            Some("claude"),
             "the fleet's default decides"
         );
         // And a pick, once made, is kept: it is the per-box half of the rule.
@@ -288,11 +292,13 @@ mod tests {
 
     /// **A box runs its own pick, not the fleet's default** (the owner, 2026-09-27: one fleet
     /// default plus a per-box pick). `agent_for_box` is what every reconnect, resume and transcript
-    /// read asks (`sandbox::attach_argv`, `reopen_agent_session`, `transcript`), so a box created
-    /// as Codex on a Claude fleet has to answer Codex here or it comes back as Claude.
+    /// read asks (`sandbox::attach_argv`, `reopen_agent_session`, `transcript`), so a box's
+    /// recorded pick has to answer here. **A pick this build has no adapter for answers the fleet's
+    /// default instead** (SKEIN-1511): live boxes were created as Codex, and each must still start.
     ///
     /// What would make it fail: `agent_for_box` answering the fleet default without reading the
-    /// box's launch spec (planted by the coordinator; every other lib test stayed green).
+    /// box's launch spec (planted by the coordinator; every other lib test stayed green), or
+    /// returning a retired runtime's name, which `sandbox::attach_argv_as` cannot start.
     #[test]
     fn a_box_with_its_own_pick_runs_it_over_the_fleets_default() {
         let _g = env_lock();
@@ -316,11 +322,18 @@ mod tests {
         crate::testutil::switch_on(|c| c.default_agent = "claude".into());
         let repo = &load_repos()[0];
 
-        write_launch_spec_for_agent("thing-picked", "picked", repo, "codex").unwrap();
+        write_launch_spec_for_agent("thing-picked", "picked", repo, "claude").unwrap();
+        assert_eq!(agent_for_box("thing-picked"), "claude");
+        write_launch_spec_for_agent("thing-retired", "retired", repo, "codex").unwrap();
         assert_eq!(
-            agent_for_box("thing-picked"),
-            "codex",
-            "a box picked as codex answered the fleet default instead of its own pick"
+            agent_for_box("thing-retired"),
+            "claude",
+            "a box recorded with a retired runtime must start on the fleet's default"
+        );
+        assert_eq!(
+            launch_spec_agent(repo, "thing-retired").as_deref(),
+            Some("codex"),
+            "the record is the box's own and is not rewritten by reading it"
         );
         // The control: with no pick recorded, the fleet's default is what it runs.
         assert_eq!(agent_for_box("thing-unpicked"), "claude");
