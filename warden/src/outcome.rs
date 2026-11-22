@@ -1402,16 +1402,12 @@ mod tests {
         let store = Store::new(&dir, forever());
         let ran = AtomicUsize::new(0);
         let got = store
-            .once(
-                "op-killed",
-                &|_| Ok(false),
-                |reach| {
-                    cross_then(reach, || {
-                        ran.fetch_add(1, Ordering::SeqCst);
-                        Ok("asked and run".to_string())
-                    })
-                },
-            )
+            .once("op-killed", &|_| Ok(false), |reach| {
+                cross_then(reach, || {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    Ok("asked and run".to_string())
+                })
+            })
             .unwrap();
         assert_eq!(got, Outcome::Ran(Ok("asked and run".to_string())));
         assert_eq!(ran.load(Ordering::SeqCst), 1);
@@ -1474,7 +1470,10 @@ mod tests {
             .once("op-live", &believed, |reach| {
                 cross_then(reach, || {
                     let probe = fs::File::open(&path).unwrap();
-                    assert!(!lock(&probe), "the marker was unlocked while its command ran");
+                    assert!(
+                        !lock(&probe),
+                        "the marker was unlocked while its command ran"
+                    );
                     Ok("ran".to_string())
                 })
             })
