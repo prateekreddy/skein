@@ -45,11 +45,16 @@ pub struct Request {
     pub state: String,
     #[serde(default)]
     pub decided: String,
-    /// Why a pending request cannot be granted yet, or why a granted one's box has no token for
-    /// it: one sentence for the cockpit, empty when there is nothing to say. **Set by [`list`] from
-    /// the host's own state and never read from the box's file**, which may say anything here.
+    /// Why a pending request cannot be granted yet: one sentence for the cockpit, empty when there
+    /// is nothing to say. **Set by [`list`] from the host's own state and never read from the
+    /// box's file**, which may say anything here.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub blocked: String,
+    /// What this access is now, for a granted request: derived by [`crate::state::access`] from
+    /// what is placed, because `state` stays `granted` for ever. **Set by [`list`] and never read
+    /// from a file**, which is why it cannot be deserialized.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::state::access::Shown>,
 }
 
 impl Request {
@@ -75,38 +80,7 @@ impl Request {
     }
 }
 
-/// An approved cross-repo write, as recorded on the host.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Grant {
-    #[serde(default, rename = "box")]
-    pub box_name: String,
-    #[serde(default)]
-    pub repo: String,
-    #[serde(default)]
-    pub granted: String,
-    /// RFC3339, or empty for "until the box is destroyed".
-    ///
-    /// Empty rather than a far-future date so the cockpit can say *which* of the two a grant is,
-    /// and so a permanent grant is a deliberate-looking record instead of a timestamp in 2099.
-    #[serde(default)]
-    pub expires: String,
-}
-
-impl Grant {
-    /// Is this grant still good at `now`?
-    ///
-    /// An unparseable expiry counts as **expired**, not as permanent. The alternative fails open:
-    /// a corrupted date would silently upgrade a 24-hour grant into a forever one, and nothing
-    /// would ever report it.
-    pub fn is_live(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
-        if self.expires.trim().is_empty() {
-            return true;
-        }
-        chrono::DateTime::parse_from_rfc3339(self.expires.trim())
-            .map(|e| e > now)
-            .unwrap_or(false)
-    }
-}
+pub use crate::state::access::Grant;
 
 /// Every request id skein is willing to act on.
 ///

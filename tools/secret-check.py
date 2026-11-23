@@ -185,13 +185,9 @@ PLACEMENT = {
     "warden's own home; the warden is its only minter and mover",
     ("warden/src/secret.rs", ".skein/warden/secret"): "the warden's OLD location under the host "
     "`$HOME`, named so the warden can adopt what an older install left there",
-    ("src/gitgate/mint.rs", "git-tokens"): "kept by Rule 1 on purpose: `<box state>/git-tokens/` "
-    "holds the only secrets a box receives, bound read-only into that box alone",
-    ("src/gitgate/decide.rs", "{}/git-tokens/{}"): "kept by Rule 1 on purpose: a box's own "
-    "`git-tokens/`, the delegated installation tokens bound read-only into that box alone",
-    ("src/gitgate/decide.rs", "{}/git-tokens/why/{}"): "not a credential: one sentence saying "
-    "why a granted repository has no token, beside the box's tokens so the helper that reads them "
-    "can say it; it never holds token bytes",
+    ("src/state/access.rs", "git-tokens"): "kept by Rule 1 on purpose: `<box state>/git-tokens/` "
+    "holds the only secrets a box receives, bound read-only into that box alone. Its `why/` holds "
+    "no token bytes, only a sentence saying why a granted repository has no token",
     ("src/fleet/paths.rs", "{}/.skein/review-github.token"): "the review credential's OLD location, "
     "named so `stale_sandbox_secrets` can delete what fleets from before the move still carry",
     ("src/repos/add.rs", "gh-secret-seeded"): "a marker that an sbx secret was once seeded, which "

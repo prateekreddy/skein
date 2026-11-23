@@ -427,3 +427,123 @@ fn a_server_that_accepts_and_never_answers_fails_the_request_instead_of_hanging_
         "the failure does not name the request it was making: {message}"
     );
 }
+
+/// **The cockpit's route says "granted" only for a token that is placed and unexpired.**
+///
+/// Through the real server, because the stale answer was in what this route served: a grant row
+/// read `live` from its date alone, and a request read `granted` for ever. Each repository below is
+/// one way for the two to disagree with what is in the box.
+#[test]
+fn the_grants_route_derives_granted_from_what_is_placed() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = token_home("access");
+    // An App "configured" by a key file that exists and is never read, so a missing token is not
+    // explained away by there being no way to mint one. No box is placed, so no refresh runs.
+    let key = home.join("app-key-fixture");
+    std::fs::write(&key, "").unwrap();
+    std::fs::write(
+        home.join("config.json"),
+        serde_json::json!({
+            "fleet_sandbox": "example",
+            "github_app_id": "123",
+            "github_app_key": key,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(home.join("repos.json"), "[]").unwrap();
+
+    let now = chrono::Utc::now();
+    let later = (now + chrono::Duration::hours(4)).to_rfc3339();
+    let earlier = (now - chrono::Duration::hours(4)).to_rfc3339();
+    let grant = |repo: &str, expires: &str| serde_json::json!({"box":"web-main","repo":repo,"granted":earlier,"expires":expires});
+    std::fs::write(
+        home.join("git-grants.json"),
+        serde_json::json!([
+            grant("acme/placed", &later),
+            grant("acme/missing", &later),
+            grant("acme/stale", &later),
+            grant("acme/ended", &earlier),
+        ])
+        .to_string(),
+    )
+    .unwrap();
+
+    let tokens = home.join("boxes/web-main/git-tokens");
+    std::fs::create_dir_all(&tokens).unwrap();
+    for name in ["acme%2Fplaced", "acme%2Fstale"] {
+        let path = tokens.join(name);
+        std::fs::write(&path, "fixture-token-value").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    // Written two hours ago: past the hour an App token lives.
+    std::fs::File::options()
+        .write(true)
+        .open(tokens.join("acme%2Fstale"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 3600))
+        .unwrap();
+
+    // One answered request per repository, and one whose grant is gone from the record.
+    let queue = fleet_root_in(&home).join(".skein/gitgate/requests/web-main");
+    let decided = home.join("gitgate/web-main");
+    std::fs::create_dir_all(&queue).unwrap();
+    std::fs::create_dir_all(&decided).unwrap();
+    for (n, repo) in ["placed", "missing", "stale", "ended", "gone"]
+        .iter()
+        .enumerate()
+    {
+        let id = format!("20261123-10000{n}-1");
+        let row = serde_json::json!({
+            "id": id, "box": "web-main", "repo": format!("acme/{repo}"),
+            "asked": "2026-11-23T10:00:00Z", "state": "granted",
+            "decided": "2026-11-23T10:01:00Z",
+        })
+        .to_string();
+        std::fs::write(queue.join(format!("{id}.json")), &row).unwrap();
+        std::fs::write(decided.join(format!("{id}.json")), &row).unwrap();
+    }
+
+    let (child, addr) = serving(
+        skein_server()
+            .env("SKEIN_HOME", home.path())
+            .env("SKEIN_FLEET_ROOT", fleet_root_in(&home))
+            .env("SKEIN_WARDEN", "127.0.0.1:1")
+            .env("SKEIN_REGISTRY", "")
+            .env_remove("SKEIN_SELF")
+            .env_remove("SANDBOX_VM_ID")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
+    let _kid = Kid(child);
+    let (code, raw) = http_get(&addr, "/api/fleet/git-grants");
+    assert_eq!(code, 200, "{raw}");
+    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    assert!(
+        !body.contains("fixture-token-value"),
+        "a token's value reached the page"
+    );
+    let shown: serde_json::Value = serde_json::from_str(body).unwrap();
+
+    let in_list = |list: &str, repo: &str| -> String {
+        shown[list]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["repo"] == repo))
+            .unwrap_or_else(|| panic!("{repo} is not in {list}: {shown}"))["access"]["status"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    for list in ["grants", "requests"] {
+        // Fails if the route answers from the grant's date alone: this one has no token at all.
+        assert_eq!(in_list(list, "acme/missing"), "waiting", "{list}");
+        // Fails if the token's age is not compared with the hour an App token lives.
+        assert_eq!(in_list(list, "acme/stale"), "token_expired", "{list}");
+        // Fails if an ended grant is shown from its request's `granted`.
+        assert_eq!(in_list(list, "acme/ended"), "expired", "{list}");
+        // Fails if a placed, live token stops being granted, which would make the rest vacuous.
+        assert_eq!(in_list(list, "acme/placed"), "granted", "{list}");
+    }
+    // Fails if a request whose grant is off the record still reads as granted.
+    assert_eq!(in_list("requests", "acme/gone"), "withdrawn");
+}

@@ -442,6 +442,12 @@ depends_on = [
   "warden_client",
 ]
 
+[current.state]
+# `util` for its locked, refuse-what-cannot-be-read JSON file: the grants file's format moved here
+# and its write discipline did not need a second copy. The destination's `state` depends on nothing;
+# this edge goes when that helper does.
+depends_on = ["util"]
+
 [current.gitgate]
 # `warden_client` for the same reason as `sandbox`: a credential arriving at a box or being taken
 # away from it is what §9.5 R6 exists to make permanent, and this is where that happens.
@@ -472,6 +478,8 @@ depends_on = [
   "place",
   "repos",
   "secret",
+  # `state` for the access noun (SKEIN-1516): the grant's format and the one derived status.
+  "state",
   "util",
   "warden_client",
 ]
@@ -701,7 +709,7 @@ depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
 # different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
 #
-# **This whole unit is test code.** `src/lib.rs:74` is `mod testutil;` under the `#[cfg(test)]` on
+# **This whole unit is test code.** `src/lib.rs:75` is `mod testutil;` under the `#[cfg(test)]` on
 # the line above it, so
 # not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
 # reaches nothing"; this one says "this module is not in the architecture", which is the same rule
@@ -719,7 +727,7 @@ depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 # `#[cfg(test)] mod tests` block.
 #
 # Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
-# take the `#[cfg(test)]` off `src/lib.rs:74`'s declaration and `place` and `registry` come back,
+# take the `#[cfg(test)]` off `src/lib.rs:75`'s declaration and `place` and `registry` come back,
 # with nothing here allowing them.
 depends_on = []
 

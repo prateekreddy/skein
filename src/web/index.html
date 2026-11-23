@@ -8198,10 +8198,15 @@ function gitqCard(r) {
   const key = (r.box || "") + "/" + r.id;
   if (pending) gitqShown.set(key, { box: r.box || "", repo: r.repo || "" });
   const busy = busyAttr("gitq", key);
-  // The host's sentence for why this cannot be granted yet, or why its grant placed no token
-  // (`gitgate::list`, `blocked`). Pending, Grant is drawn disabled beside it, because pressing can
-  // only be refused; Deny still works.
+  // The host's sentence for why this cannot be granted yet (`gitgate::list`, `blocked`). Pending,
+  // Grant is drawn disabled beside it, because pressing can only be refused; Deny still works. A
+  // granted request says what its access is now (`state::access::derive`), since `state` stays
+  // "granted" after the token has gone.
   const blocked = (r.blocked || "").trim();
+  const now = r.access || null;
+  const says = now ? (now.says || "").trim() : "";
+  const stateClass = now ? (now.status === "granted" ? "granted" : "") : (r.state || "");
+  const stateWord = now ? now.label : (r.state || "?");
   const grantOff = busy || (pending && blocked ? " disabled" : "");
   return `
     <div class="msg" data-card="${esc(key)}">
@@ -8209,8 +8214,9 @@ function gitqCard(r) {
       <div class="sq-meta">asked by <b>${esc(r.box || "?")}</b> · ${esc(localStamp(r.asked))}</div>
       ${reason ? `<div class="sq-log">${esc(reason)}</div>` : ""}
       ${blocked ? `<div class="sq-meta gq-blocked">${esc(blocked)}</div>` : ""}
+      ${says ? `<div class="sq-meta gq-blocked">${esc(says)}</div>` : ""}
       <div class="sq-row">
-        <span class="sq-state ${esc(r.state || "")}">${esc(r.state || "?")}</span>
+        <span class="sq-state ${esc(stateClass)}">${esc(stateWord)}</span>
         ${pending ? `
           <label>for <input type="number" min="1" value="24" style="width:4em" id="gq-h-${esc(key)}"${busy} /> hours
             <input type="checkbox" id="gq-keep-${esc(key)}"${busy} /> keep indefinitely</label>
@@ -8225,15 +8231,17 @@ function gitqGrantRow(g) {
   // An expired grant is shown rather than hidden: "this box had access until Tuesday" is the answer
   // to a question this list exists to answer, and a row that silently vanishes answers nothing.
   const when = g.expires ? esc(localStamp(g.expires)) : "no expiry";
+  // Derived on the host from what is placed (`state::access::derive`), never from the grant alone.
+  const a = g.access || { status: "unknown", label: "unknown", says: "", can_revoke: false };
   return `
     <div class="msg">
       <div class="sq-pkgs">${esc(g.box)} → ${esc(g.repo)}</div>
       <div class="sq-row">
-        <span class="sq-state ${g.live ? "approved" : ""}">${g.live ? "live" : "expired"}</span>
+        <span class="sq-state ${a.status === "granted" ? "approved" : ""}">${esc(a.label)}</span>
         <span class="sq-meta">${when}</span>
-        ${g.live ? `<button class="kbtn ghost" onclick="revokeGitq(${esc(JSON.stringify(g.box))},${esc(JSON.stringify(g.repo))})">Revoke</button>` : ""}
+        ${a.can_revoke ? `<button class="kbtn ghost" onclick="revokeGitq(${esc(JSON.stringify(g.box))},${esc(JSON.stringify(g.repo))})">Revoke</button>` : ""}
       </div>
-      ${g.live && g.no_token ? `<div class="sq-meta gq-blocked">${esc(g.no_token)}</div>` : ""}
+      ${a.says ? `<div class="sq-meta gq-blocked">${esc(a.says)}</div>` : ""}
     </div>`;
 }
 

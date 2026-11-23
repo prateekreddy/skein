@@ -152,28 +152,48 @@ pub(super) fn cannot_grant(slug: &str, why: &str) -> String {
     )
 }
 
-/// What a live grant whose box has no token for it says, in the cockpit, with the reason the
-/// refresher recorded or [`token_blocker`]'s.
-fn granted_without_token(slug: &str, why: &str) -> String {
-    format!(
-        "Granted, but no token can be made for {slug}: {why}. {}.",
-        store_token_step(slug)
-    )
+/// What this box's access to `repo` is now, as the cockpit shows it. `on_record` is every grant,
+/// or `None` when the file could not be read. Reads metadata only, and makes no network call.
+pub fn shown_access(
+    box_name: &str,
+    repo: &str,
+    on_record: Option<&[Grant]>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::state::access::Shown {
+    use crate::state::access::{derive, observe_token, Declared, Observed, Record, APP_TOKEN_LIFE};
+    let declared = match on_record {
+        None => Declared::Unreadable,
+        Some(all) => all
+            .iter()
+            .find(|g| g.box_name == box_name && same_repo(&g.repo, repo))
+            .map_or(Declared::Absent, |g| Declared::Granted {
+                live: g.is_live(now),
+            }),
+    };
+    // A stored token is placed as it is and has no lifetime skein knows; anything else is an App
+    // token, good for an hour from when it was written. Asked of the descriptions, so no stored
+    // token is read to answer it.
+    let stored = write_credentials()
+        .into_iter()
+        .find(|c| c.covers(repo) && credential_has_token(&c.id));
+    let lifetime = stored.is_none().then_some(APP_TOKEN_LIFE);
+    let record = Record {
+        declared,
+        wanted: box_takes_tokens(box_name),
+        observed: Observed {
+            token: observe_token(std::path::Path::new(&token_file(box_name, repo)), lifetime),
+            why_none: recorded_token_reason(box_name, repo).or_else(|| token_blocker(repo)),
+            turned_down: stored.is_some_and(|c| !c.turned_down.is_empty()),
+        },
+    };
+    derive(repo, &record, now)
 }
 
-/// Why `grant` is live and its box still has no token for it, as the cockpit says it — or `None`
-/// for an expired grant, or one that may work.
-///
-/// The refresher's own answer first, from the reason file it left beside the box's tokens: that is
-/// what actually happened at the last mint, an App not installed on the repository included. Until
-/// a refresh has run, [`token_blocker`]'s.
-pub fn grant_without_token(grant: &Grant, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
-    if !grant.is_live(now) {
-        return None;
-    }
-    let why = recorded_token_reason(&grant.box_name, &grant.repo)
-        .or_else(|| token_blocker(&grant.repo))?;
-    Some(granted_without_token(&grant.repo, &why))
+/// Whether the refresher places per-repository tokens in this box: it is scoped, or was started
+/// scoped and keeps them until it restarts (SKEIN-1331).
+fn box_takes_tokens(box_name: &str) -> bool {
+    box_is_scoped(box_name)
+        || crate::fleet::running_record(box_name).is_some_and(|rec| rec.scoped == Some(true))
 }
 
 /// The reason the refresher recorded for `box_name` having no token for `slug`, if it did. Read by
@@ -403,7 +423,7 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // credential being taken away are the two things worth a permanent record.
     let mut granted: Vec<String> = Vec::new();
     let mut withdrawn: Vec<String> = Vec::new();
-    let dir = std::path::Path::new(&crate::fleet::box_state(box_name)).join("git-tokens");
+    let dir = box_tokens_dir(box_name);
 
     // **Not through a link** (§9.5 R8). `create_dir_all` follows a symlink at this path, and so
     // does the one inside `crate::secret::write` — so a `git-tokens` that is a link to somewhere
@@ -442,9 +462,7 @@ pub fn refresh_tokens(box_name: &str) -> Vec<String> {
     // taking its tokens now leaves it able to push nowhere at all, its own repo included, until it
     // restarts. It keeps them, refreshed, until then; its row says "restart to apply", and the
     // restart is what withdraws them.
-    let held_scoped =
-        || crate::fleet::running_record(box_name).is_some_and(|rec| rec.scoped == Some(true));
-    if !box_is_scoped(box_name) && !held_scoped() {
+    if !box_takes_tokens(box_name) {
         // Everything goes, which is the largest withdrawal there is — so it is reported, and only
         // when there was something to take: an unscoped box is refreshed on every pass and has no
         // tokens on all but the first.

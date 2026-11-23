@@ -23,6 +23,9 @@ struct Box_ {
     dir: Scratch,
     /// `$HOME` for the server, when a test needs it to be the box's own home.
     home: std::cell::RefCell<Option<std::path::PathBuf>>,
+    /// `$SKEIN_GIT_TOKENS`, when a test gives the box a token directory. Never the ambient one:
+    /// these tests run inside a real box, whose own tokens are none of their business.
+    git_tokens: std::cell::RefCell<Option<std::path::PathBuf>>,
 }
 
 impl Box_ {
@@ -42,6 +45,7 @@ impl Box_ {
         Box_ {
             dir,
             home: std::cell::RefCell::new(None),
+            git_tokens: std::cell::RefCell::new(None),
         }
     }
 
@@ -87,6 +91,10 @@ impl Box_ {
         let mut cmd = Command::new("python3");
         if let Some(home) = self.home.borrow().as_ref() {
             cmd.env("HOME", home);
+        }
+        cmd.env_remove("SKEIN_GIT_TOKENS");
+        if let Some(tokens) = self.git_tokens.borrow().as_ref() {
+            cmd.env("SKEIN_GIT_TOKENS", tokens);
         }
         let mut child = cmd
             .arg(self.at("skein-mcp"))
@@ -628,6 +636,61 @@ fn a_decision_is_the_answer_skein_requests_reports() {
     assert_eq!(rows[0]["state"], "denied", "{got}");
     assert_eq!(rows[1]["id"], "20260924-101500-9", "{got}");
     assert_eq!(rows[1]["state"], "granted", "{got}");
+}
+
+/// **A box is told `granted` only while its token is there.** The inbox answer never changes, so a
+/// grant that expired would otherwise read as granted for ever.
+#[test]
+fn a_granted_write_with_no_token_placed_is_not_reported_as_granted() {
+    let b = Box_::new("skein-tools-it-write-access");
+    b.put(
+        "fleet/.skein/gitgate/requests/example/20260924-101500-9.json",
+        r#"{"id":"20260924-101500-9","box":"example","repo":"thing/example","reason":"a fix",
+            "asked":"2026-09-24T10:15:00Z","state":"granted"}"#,
+    );
+    b.put(
+        "state/inbox/1-skein.json",
+        r#"{"from":"skein","kind":"answer","body":"write request 20260924-101500-9, granted","ts":"2026-09-24T10:20:00Z"}"#,
+    );
+    fs::create_dir_all(b.at("tokens")).unwrap();
+    *b.git_tokens.borrow_mut() = Some(b.at("tokens"));
+    let row = || b.call("example", "skein_requests", json!({}))["requests"][0].clone();
+
+    // Fails if `requests` reports the inbox's `granted` without looking at the token directory.
+    let none = row();
+    assert_eq!(none["state"], "no token", "{none}");
+    assert!(
+        none["why"]
+            .as_str()
+            .unwrap()
+            .contains("skein_request_write"),
+        "it has to say what to do next: {none}"
+    );
+
+    // Fails if the host's reason for there being no token is dropped.
+    b.put("tokens/why/thing%2Fexample", "the App is not installed\n");
+    let why = row();
+    assert_eq!(why["state"], "no token", "{why}");
+    assert!(
+        why["why"]
+            .as_str()
+            .unwrap()
+            .contains("the App is not installed"),
+        "{why}"
+    );
+
+    // Fails if an empty file counts as a token.
+    b.put("tokens/thing%2Fexample", "");
+    assert_eq!(row()["state"], "no token");
+
+    // Fails if a placed token stops counting.
+    b.put("tokens/thing%2Fexample", "fixture-value");
+    let placed = row();
+    assert_eq!(placed["state"], "granted", "{placed}");
+    assert!(
+        !placed.to_string().contains("fixture-value"),
+        "the token's value reached the answer: {placed}"
+    );
 }
 
 /// **Only this box's queue is read.** A neighbour's request, in the queue root every box can
@@ -2162,6 +2225,7 @@ fn the_command_line_requests_is_the_same_tool() {
     let out = Command::new("python3")
         .arg(b.at("skein-mcp"))
         .arg("requests")
+        .env_remove("SKEIN_GIT_TOKENS")
         .env("SKEIN_STATE", b.at("state"))
         .env("SKEIN_FLEET_ROOT", b.at("fleet"))
         .env("SKEIN_HOME", b.at("home"))

@@ -39,23 +39,21 @@ pub(super) async fn api_git_grants() -> Json<serde_json::Value> {
     })
     .await
     .unwrap_or_default();
-    let grants = skein::gitgate::grants();
+    let on_record = skein::gitgate::grants_on_record();
     let now = chrono::Utc::now();
     Json(serde_json::json!({
         "identity": identity,
         "requests": requests,
-        // `live` is computed here rather than in the page: an expiry is a comparison against the
-        // host's clock, and a browser in another timezone with a skewed clock would draw a grant as
-        // live that the host has already stopped honouring.
-        "grants": grants.iter().map(|g| serde_json::json!({
+        // `access` is derived here rather than in the page: it compares an expiry against the
+        // host's clock and looks at what is placed in the box, neither of which a browser can see.
+        "grants": on_record.as_deref().unwrap_or_default().iter().map(|g| serde_json::json!({
             "box": g.box_name,
             "repo": g.repo,
             "granted": g.granted,
             "expires": g.expires,
-            "live": g.is_live(now),
-            // Why a live grant placed no token in its box, in the words the cockpit shows; empty
-            // when it may work. The refresher's own answer when it has run, else the setup check.
-            "no_token": skein::gitgate::grant_without_token(g, now).unwrap_or_default(),
+            "access": skein::gitgate::shown_access(
+                &g.box_name, &g.repo, on_record.as_deref(), now,
+            ),
         })).collect::<Vec<_>>(),
         "app_ready": skein::gitgate::app_credentials().is_ok(),
         // Not a credential — the id is public, and the settings screen names it so "scoped" can say

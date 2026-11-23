@@ -108,11 +108,14 @@ pub(super) fn granted_request_ids(box_name: &str, repo: &str) -> Vec<String> {
 /// box→host channel. One file per repository rather than one per box: a box with a grant holds two
 /// tokens with different scopes, and a single file could only ever hold the narrower one.
 pub fn token_file(box_name: &str, slug: &str) -> String {
-    format!(
-        "{}/git-tokens/{}",
-        crate::fleet::box_state(box_name),
-        slug.replace('/', "%2F")
-    )
+    crate::state::access::token_path(&box_tokens_dir(box_name), slug)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// A box's token directory, which [`crate::state::access`] is handed rather than working out.
+pub(super) fn box_tokens_dir(box_name: &str) -> std::path::PathBuf {
+    crate::state::access::tokens_dir(std::path::Path::new(&crate::fleet::box_state(box_name)))
 }
 
 /// Where the host says why a box holds no token for a repository it was granted: `why/<slug>` in
@@ -123,11 +126,9 @@ pub fn token_file(box_name: &str, slug: &str) -> String {
 /// told "granted" is not then told to ask for access it already has. [`refresh_tokens`] writes it
 /// when a mint for a granted repository fails and removes it when one succeeds or the grant goes.
 pub fn token_reason_file(box_name: &str, slug: &str) -> String {
-    format!(
-        "{}/git-tokens/why/{}",
-        crate::fleet::box_state(box_name),
-        slug.replace('/', "%2F")
-    )
+    crate::state::access::reason_path(&box_tokens_dir(box_name), slug)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ───────────────────────────── the queue ─────────────────────────────
@@ -173,29 +174,31 @@ fn queued() -> Vec<Request> {
 pub fn list(sandbox: &str) -> Result<Vec<Request>, String> {
     crate::place::standing_in(sandbox)?;
     let now = chrono::Utc::now();
-    let grants = grants();
+    let on_record = grants_on_record();
     Ok(decided_over(queued())
         .into_iter()
-        .map(|r| with_blocker(r, &grants, now))
+        .map(|r| with_blocker(r, on_record.as_deref(), now))
         .collect())
 }
 
-/// Say on the row why it cannot be granted yet, or why its grant has no token — the host's words
-/// every time, whatever the box wrote in that field.
+/// Say on the row why it cannot be granted yet, or what its grant is now — the host's words every
+/// time, whatever the box wrote in that field.
 ///
 /// A pending request carries [`token_blocker`]'s answer, so the Grant control can say why pressing
-/// it would fail before anyone presses it. A granted one carries [`grant_without_token`]'s while its
-/// grant is live, so an approval that placed nothing does not read as done.
-fn with_blocker(mut r: Request, grants: &[Grant], now: chrono::DateTime<chrono::Utc>) -> Request {
+/// it would fail before anyone presses it. A granted one carries [`shown_access`]: its `state` says
+/// `granted` for ever, and this says whether that is still true. `on_record` is `None` when the
+/// grants file could not be read.
+fn with_blocker(
+    mut r: Request,
+    on_record: Option<&[Grant]>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Request {
     r.blocked = match r.state.as_str() {
         "pending" => token_blocker(&r.repo).map(|why| cannot_grant(&r.repo, &why)),
-        "granted" => grants
-            .iter()
-            .find(|g| g.box_name == r.box_name && same_repo(&g.repo, &r.repo))
-            .and_then(|g| grant_without_token(g, now)),
         _ => None,
     }
     .unwrap_or_default();
+    r.access = (r.state == "granted").then(|| shown_access(&r.box_name, &r.repo, on_record, now));
     r
 }
 
@@ -1064,6 +1067,7 @@ mod tests {
             },
             state: state.into(),
             blocked: String::new(),
+            access: None,
         }
     }
 
@@ -1319,7 +1323,7 @@ mod tests {
         let mut asked = asked_by("web-main", "20261113-100505-3", "acme/thing", "pending");
         asked.blocked = "whatever the box says".into();
 
-        let shown = with_blocker(asked.clone(), &grants(), now);
+        let shown = with_blocker(asked.clone(), Some(&grants()), now);
         assert_eq!(
             shown.blocked,
             "No write token can be made for acme/thing: no GitHub App is set up, and no stored \
@@ -1328,7 +1332,10 @@ mod tests {
         );
 
         tokens_for(&["acme/thing"]);
-        assert_eq!(with_blocker(asked.clone(), &grants(), now).blocked, "");
+        assert_eq!(
+            with_blocker(asked.clone(), Some(&grants()), now).blocked,
+            ""
+        );
 
         // Granted, live, and the refresher could not mint: its reason is what the row says.
         record(&asked, Some(24)).unwrap();
@@ -1339,12 +1346,16 @@ mod tests {
             state: "granted".into(),
             ..asked.clone()
         };
+        let shown = with_blocker(granted.clone(), Some(&grants()), now);
+        assert_eq!(shown.blocked, "", "a granted row's words are in `access`");
         assert_eq!(
-            with_blocker(granted.clone(), &grants(), now).blocked,
+            shown.access.unwrap().says,
             "Granted, but no token can be made for acme/thing: the App is not installed on \
              acme/thing. Store a token for acme/thing under Settings → GitHub & keys → Write tokens."
         );
         std::fs::remove_file(&reason).unwrap();
-        assert_eq!(with_blocker(granted, &grants(), now).blocked, "");
+        // With no reason and no token, it is waiting: never "granted".
+        let shown = with_blocker(granted, Some(&grants()), now);
+        assert_eq!(shown.access.unwrap().status, "waiting");
     }
 }

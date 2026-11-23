@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:519"]
+["docs/modules.toml:527"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1414,19 +1414,19 @@ cited_by = ["docs/decisions/one-identity.md"]
 line = "\"could not sign the App JWT: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:206"]
+["src/gitgate/mint.rs:226"]
 line = "return Err(\"no GitHub App configured: Settings → GitHub & keys → GitHub App ID\".into());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:215"]
+["src/gitgate/mint.rs:235"]
 line = "\"the GitHub App ID must be the numeric id, not {id:?} — Settings → GitHub & keys → GitHub App ID\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:219"]
+["src/gitgate/mint.rs:239"]
 line = "return Err(format!(\"the GitHub App key is not at {key}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/gitgate/mint.rs:383"]
+["src/gitgate/mint.rs:403"]
 line = "false => Err(format!(\"could not withdraw {}\", failed.join(\"; \"))),"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1553,7 +1553,7 @@ cited_by = ["docs/prose-symbols.toml"]
 historical = "`docs/inventory.md` cites `src/lib.rs:35-50` for what the module graph looked like BEFORE SKEIN-576 split it — “was `pub use <mod>::*` over sixteen modules”, past tense, and the point of the paragraph. Lines 61-76 today are `pub mod` declarations, so relocating the citation would move it onto code that does not support the sentence."
 cited_by = ["docs/inventory.md"]
 
-["src/lib.rs:74"]
+["src/lib.rs:75"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
@@ -2062,7 +2062,7 @@ cited_by = ["docs/recovery-survey.md"]
 line = "}).catch(() => { list.innerHTML = `<div class=\"note\">could not load package requests</div>`; });"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/app/panels.js:1144"]
+["src/web/app/panels.js:1152"]
 line = "}).catch(() => { out.textContent = \"could not run the test\"; })"
 cited_by = ["docs/recovery-survey.md"]
 

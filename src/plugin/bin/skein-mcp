@@ -1256,6 +1256,8 @@ def requests(_args):
             answer, decision, why = answer_for(kind, rid, answers)
             row["state"] = decision or "waiting"
             row["answer"] = answer
+            if kind == "write" and decision == "granted":
+                row.update(write_access_now(r.get("repo")))
             if why is not None and kind == "question":
                 row["answered"] = why
             elif why:
@@ -1283,6 +1285,42 @@ def requests(_args):
         out.append(row)
     out.sort(key=lambda r: r["asked"])
     return {"box": box, "requests": out}
+
+
+def write_access_now(repo):
+    """What a `granted` write answer is worth now, from what the host has placed in this box.
+
+    The inbox says `granted` for ever: nothing answers again when a grant expires. So the answer
+    stands only while the token file is there. Only its metadata is read, never the token. With no
+    token directory (a box on the fleet-wide credential) there is nothing to check.
+    """
+    tokens = os.environ.get("SKEIN_GIT_TOKENS", "")
+    if not tokens or not isinstance(repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        return {}
+    name = repo.replace("/", "%2F")
+    try:
+        held = os.lstat(os.path.join(tokens, name))
+        if stat.S_ISREG(held.st_mode) and held.st_size > 0:
+            return {}
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(tokens, "why", name), encoding="utf-8") as f:
+            said = f.readline(1024).strip()
+    except (OSError, ValueError):
+        said = ""
+    if said:
+        return {
+            "state": "no token",
+            "why": "Granted, but skein could not make a token: %s. Ask the person to store one "
+            "for %s in Settings, under GitHub & keys." % (said, repo),
+        }
+    return {
+        "state": "no token",
+        "why": "No token for %s is in this box. It may be on its way (up to 20 minutes), or the "
+        "grant has expired or been revoked. If git is still refused, ask again with "
+        "skein_request_write." % repo,
+    }
 
 
 def own_disk_ask():

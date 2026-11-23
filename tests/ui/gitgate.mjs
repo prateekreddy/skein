@@ -291,10 +291,17 @@ check("a granted request has no Grant button left", decided.includes("Grant writ
   check("and denies", T.sent()[0] && T.sent()[0].body.approve, false);
   check("an ordinary request's Grant is not disabled", /disabled[^>]*>Grant write</.test(T.gitqCard(ask("b"))), false);
 
-  const g = { box: "web-main", repo: "acme/thing", live: true, granted: "", expires: "" };
+  const waiting = { status: "no_token", label: "no token", says: "", can_revoke: true };
+  const g = { box: "web-main", repo: "acme/thing", granted: "", expires: "", access: waiting };
   const late = "Granted, but no token can be made for acme/thing: no GitHub App is set up, and no stored token covers it. Store a token for acme/thing under Settings → GitHub & keys → Write tokens.";
-  check("a live grant with no token says so", T.gitqGrantRow({ ...g, no_token: late }).includes(esc(late)), true);
-  check("an expired one does not", T.gitqGrantRow({ ...g, live: false, no_token: late }).includes("no token"), false);
+  check("a live grant with no token says so", T.gitqGrantRow({ ...g, access: { ...waiting, says: late } }).includes(esc(late)), true);
+  // Fails if the row draws the green "approved" style from anything but a derived `granted`.
+  check("a grant with no token is not drawn as working", T.gitqGrantRow({ ...g, access: { ...waiting, says: late } }).includes('sq-state approved'), false);
+  check("a placed, live one is", T.gitqGrantRow({ ...g, access: { status: "granted", label: "granted", says: "", can_revoke: true } }).includes('sq-state approved'), true);
+  // Fails if the request card goes back to printing `state`, which says granted for ever.
+  const ended = T.gitqCard(ask("c", { state: "granted", access: { status: "expired", label: "expired", says: "This access has expired.", can_revoke: false } }));
+  check("a granted request whose access ended does not say granted", />granted</.test(ended), false);
+  check("and says what it is now", ended.includes("This access has expired."), true);
 }
 
 // --- and it escapes them, because the box wrote them ---------------------------------------------
@@ -336,7 +343,7 @@ check("a granted request has no Grant button left", decided.includes("Grant writ
 }
 
 // --- grants list --------------------------------------------------------------------------------
-const live = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", live: true });
+const live = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", access: { status: "granted", label: "granted", says: "", can_revoke: true } });
 check("a live grant can be revoked from the list", live.includes("Revoke"), true);
 // The expiry is the server's UTC moment shown in the reader's own zone (SKEIN-1264). **What would
 // make this fail:** the old `replace("T", " ").replace("Z", "")`, which prints "2026-08-14 00:00"
@@ -345,13 +352,13 @@ check("a live grant can be revoked from the list", live.includes("Revoke"), true
   const was = process.env.TZ;
   process.env.TZ = "Asia/Kolkata";
   check("a grant's expiry is shown in local time, not UTC with the Z cut off",
-    T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", live: true }).includes("2026-08-14 05:30"), true);
+    T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-14T00:00:00Z", access: { status: "granted", label: "granted", says: "", can_revoke: true } }).includes("2026-08-14 05:30"), true);
   if (was === undefined) delete process.env.TZ; else process.env.TZ = was;
 }
-const dead = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-12T00:00:00Z", live: false });
+const dead = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "2026-08-12T00:00:00Z", access: { status: "expired", label: "expired", says: "", can_revoke: false } });
 check("an expired one is shown", dead.includes("expired"), true);
 check("but cannot be revoked twice", dead.includes("Revoke"), false);
-const forever = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "", live: true });
+const forever = T.gitqGrantRow({ box: "web-main", repo: "o/r", expires: "", access: { status: "granted", label: "granted", says: "", can_revoke: true } });
 check("a permanent grant says so rather than showing a blank date", forever.includes("no expiry"), true);
 
 // --- stored repository tokens -------------------------------------------------------------------

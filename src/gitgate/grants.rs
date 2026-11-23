@@ -12,11 +12,17 @@ use super::*;
 /// [`access`] denies, the token refresher places nothing, and a box is locked out rather than let
 /// in. It is said out loud once, because "no grants" and "skein cannot read your grants" look
 /// identical on the screen and only one of them is fixable. The writes below refuse outright —
-/// [`record`] and [`revoke`] go through [`crate::util::update_json`], which will not write a
-/// default over a file it could not read.
+/// [`record`] and [`revoke`] go through [`crate::state::access::update_grants`], which will not
+/// write a default over a file it could not read.
 pub fn grants() -> Vec<Grant> {
-    match crate::util::read_json_or_why::<Vec<Grant>>(&grants_path()) {
-        Ok(found) => found.unwrap_or_default(),
+    grants_on_record().unwrap_or_default()
+}
+
+/// [`grants`], keeping the difference between "none" and "skein could not read them": `None` is
+/// the second, so a status is not derived as "withdrawn" from a file nobody could read.
+pub fn grants_on_record() -> Option<Vec<Grant>> {
+    match crate::state::access::read_grants(&grants_path()) {
+        Ok(found) => Some(found),
         Err(why) => {
             // Once per process, for `config::load_config`'s reason: this is on the path of the
             // token refresher and of every cockpit poll, and a line per call buries the one line
@@ -29,7 +35,7 @@ pub fn grants() -> Vec<Grant> {
                      Fix or move the file."
                 );
             });
-            Vec::new()
+            None
         }
     }
 }
@@ -62,7 +68,7 @@ pub(super) fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
     // approval had just recorded. And `update_json` refuses on a grants file it cannot read rather
     // than writing this one grant over it — approving one box is not how a fleet loses the access
     // every other box was given (SKEIN-359).
-    crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+    crate::state::access::update_grants(&grants_path(), |all| {
         *all = merged(std::mem::take(all), grant);
         Ok(())
     })
@@ -80,7 +86,7 @@ pub(super) fn record(req: &Request, hours: Option<i64>) -> Result<(), String> {
 /// gets `write request <id>, revoked` in its read-only inbox, in the owner's words — but only when a
 /// grant was actually taken away, so revoking what was never granted says nothing.
 pub fn revoke(box_name: &str, repo: &str) -> Result<(), String> {
-    let removed = crate::util::update_json(&grants_path(), |all: &mut Vec<Grant>| {
+    let removed = crate::state::access::update_grants(&grants_path(), |all| {
         let before = all.len();
         all.retain(|g| !(g.box_name == box_name && same_repo(&g.repo, repo)));
         Ok(all.len() != before)
@@ -130,6 +136,7 @@ mod tests {
             state: "pending".into(),
             decided: String::new(),
             blocked: String::new(),
+            access: None,
         };
         record(&asked("web-main", "acme/web"), Some(4)).unwrap();
         record(&asked("api-main", "acme/api"), None).unwrap();

@@ -1508,8 +1508,8 @@ mod tests {
     ///
     /// The box is "running" the way the liveness sweep decides it: its anchor is this test
     /// process, stamped with the real boot id and start time. What would make it fail: deleting
-    /// `held_scoped` from `refresh_tokens` (the token goes at once); holding for a record that
-    /// started at fleet scope, or for a box that is not running (the second half keeps it).
+    /// the running-record half of `box_takes_tokens` (the token goes at once); holding for a record
+    /// that started at fleet scope, or for a box that is not running (the second half keeps it).
     #[test]
     fn un_scoping_a_running_box_holds_its_tokens_until_it_restarts() {
         let (_lock, home, mut env) = fresh_home();
