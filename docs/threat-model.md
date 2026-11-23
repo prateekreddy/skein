@@ -244,10 +244,10 @@ is accepted under [the model above](#what-skein-does-not-defend-against).
   without asking. skein did not write the entry.
 * **SKEIN-1308**: the repo's store is writable by every box of the repo, so a link a sibling puts
   in `memory/` or the shared home after a box starts is followed by that box's agent, into its own
-  private files. A fix is held on branch `fix/iso2-1308-held`, scoped to the whole of
-  `store/.claude`. The shared home has since moved out of it, to the sibling `store/shared-home`
-  (SKEIN-1324), and the store itself to `store/data` (SKEIN-1330), so that fix must cover both
-  directories, by their new names, before it lands.
+  private files. This is still true, and the owner accepted it on 2026-11-23 because boxes are
+  treated as accident-prone rather than hostile, and a sibling does not plant such a link by
+  accident. The unmerged fix on branch `fix/iso2-1308-held` predates the moves to
+  `store/shared-home` (SKEIN-1324) and `store/data` (SKEIN-1330), so it would need both new names.
 * **SKEIN-964**: architecture §9.4 says a box can signal skein and other boxes through the shared
   PID namespace. The premise is in the code, but no test sends a signal, so it is not a row.
 
