@@ -32,7 +32,7 @@ day are the ones who never turned it on (`src/warden_client.rs:1116-1123`).
 **Enforced at.**
 
 - `src/warden_client.rs:1147` — `perform`, the rule, which every privileged caller goes through:
-  `src/fleet/create.rs:467` and `src/fleet/resize.rs:679`.
+  `src/fleet/create.rs:467` and `src/fleet/resize.rs:683`.
 - `src/warden_client.rs:1070` — `Prompt`, whose three fields are the three parts.
 - `src/warden_client.rs:1776` — the test that every act's prompt carries all three, and renders the
   cost of declining where it can be seen.

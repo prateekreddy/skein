@@ -1176,85 +1176,85 @@ cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 line = "fn the_two_elections_agree_on_which_login_is_best() {"
 cited_by = ["docs/decisions/login-is-judged-by-its-last-refresh.md"]
 
-["src/fleet/resize.rs:185"]
-line = "true => census_placed_boxes(&sandbox)"
+["src/fleet/resize.rs:188"]
+line = "true => checkouts_on_disk().map_err(|why| {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:204"]
+["src/fleet/resize.rs:202"]
 line = "return Err(format!("
 window = "if !valid_name(name) {\u000breturn Err(format!(\u000b\"{name:?} is not a box name — nothing was copied out\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:205"]
+["src/fleet/resize.rs:203"]
 line = "\"{name:?} is not a box name — nothing was copied out\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:206"]
+["src/fleet/resize.rs:204"]
 line = "));"
 window = "\"{name:?} is not a box name — nothing was copied out\"\u000b));\u000b}"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:217"]
+["src/fleet/resize.rs:215"]
 line = "\"there is no box named {name} in {sandbox} — {} holds no checkout, and an archive \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:225"]
+["src/fleet/resize.rs:223"]
 line = "\"no box is placed in {sandbox}, so there is nothing to save\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:375"]
+["src/fleet/resize.rs:373"]
 line = "eprintln!(\"skein: could not measure the space this needs; continuing\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:382"]
+["src/fleet/resize.rs:380"]
 line = "\"copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:485"]
+["src/fleet/resize.rs:483"]
 line = "Err(e) => return Err(format!(\"listing {}: {e}\", dir.display())),"
 cited_by = ["docs/recovery-survey.md"]
 
 ["src/fleet/resize.rs:513"]
-line = "Err(e) => return Err(format!(\"listing {root}: {e}\")),"
-cited_by = ["docs/recovery-survey.md"]
-
-["src/fleet/resize.rs:533"]
 line = "\"{root} holds {} checkout{} that {} has no placement record for, so nothing could \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:536"]
+["src/fleet/resize.rs:516"]
 line = "if unaccounted.len() == 1 { \"\" } else { \"s\" },"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:542"]
+["src/fleet/resize.rs:522"]
 line = "Ok(found)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:545"]
+["src/fleet/resize.rs:532"]
+line = "Err(e) => return Err(format!(\"listing {root}: {e}\")),"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/fleet/resize.rs:549"]
 line = "fn resize_fleet_inner("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:601"]
+["src/fleet/resize.rs:605"]
 line = "\"could not check what Docker is holding ({why}), and a resize destroys \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:679"]
+["src/fleet/resize.rs:683"]
 line = "match crate::warden_client::perform(&crate::warden_client::Act::Destroy {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/fleet/resize.rs:694"]
+["src/fleet/resize.rs:698"]
 line = "// A destroy that may have happened is the one answer no command can be offered for: running"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:699"]
+["src/fleet/resize.rs:703"]
 line = "\"could not tell whether {sandbox} was destroyed: {} — every box's work is copied \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:1214"]
+["src/fleet/resize.rs:1218"]
 line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:1222"]
+["src/fleet/resize.rs:1226"]
 line = "let body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");"
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]

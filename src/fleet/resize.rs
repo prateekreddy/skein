@@ -173,27 +173,25 @@ pub struct SavedBox {
 ///
 /// # What it refuses, and it refuses before writing a byte
 ///
-/// A census that could not be taken, because a save that quietly skipped a box would report success
-/// about the box it missed (SKEIN-347, the same reading `destroy_costs` refuses). A host with no
-/// room ([`room_to_copy_out`]). A name that is not a box on disk, since an archive of nothing reads
-/// exactly like a save. Naming boxes deliberately bypasses only the *census*: it is the one refusal
-/// a person cannot clear in the moment, and a box they can point at is one they already know is
-/// there.
+/// A fleet root it could not list, because a save that quietly skipped a box would report success
+/// about the box it missed (SKEIN-347). A host with no room ([`room_to_copy_out`]). A name that is
+/// not a box on disk, since an archive of nothing reads exactly like a save.
+///
+/// # What it saves is what is on disk
+///
+/// Every checkout in the fleet root, whether or not a placement record names it, because the work
+/// is the checkout. A record with no checkout holds nothing to save and is left out, so it cannot
+/// fail the run or read as lost work (SKEIN-1536).
 pub fn save_boxes(only: &[String]) -> Result<Vec<SavedBox>, String> {
     let sandbox = fleet_sandbox();
     let wanted: Vec<String> = match only.is_empty() {
-        true => census_placed_boxes(&sandbox)
-            .map_err(|why| {
-                format!(
-                    "could not take a reliable census of the boxes in {sandbox} ({why}), and a \
-                     save that silently skipped one would report success about the box it missed \
-                     — nothing was copied out.\n  \
-                     Fix that, or name the boxes to save: `skein save <box>`."
-                )
-            })?
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect(),
+        true => checkouts_on_disk().map_err(|why| {
+            format!(
+                "could not list the boxes in {sandbox} ({why}), and a save that silently skipped \
+                 one would report success about the box it missed — nothing was copied out.\n  \
+                 Fix that, or name the boxes to save: `skein save <box>`."
+            )
+        })?,
         false => only.to_vec(),
     };
     for name in &wanted {
@@ -506,29 +504,11 @@ pub(super) fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRec
     // were not on the machine skein was standing on. Skein is standing in that sandbox now
     // (SKEIN-576), so the second source of truth is always one listing away.
     let root = fleet_root();
-    let roots = match std::fs::read_dir(&root) {
-        Ok(roots) => roots,
-        // No fleet root at all is no boxes on disk, and agrees with an empty census.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
-        Err(e) => return Err(format!("listing {root}: {e}")),
-    };
-    let mut unaccounted: Vec<String> = Vec::new();
-    for entry in roots.flatten() {
-        let path = entry.path();
-        // A box is a directory with a checkout in it. `.skein` — the launcher, the probes, the
-        // server's own files — is not one, and neither is a stray file.
-        if !path.join("tree").is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        if !found.iter().any(|(placed, _)| *placed == name) {
-            unaccounted.push(name);
-        }
-    }
+    let unaccounted: Vec<String> = checkouts_on_disk()?
+        .into_iter()
+        .filter(|name| !found.iter().any(|(placed, _)| placed == name))
+        .collect();
     if !unaccounted.is_empty() {
-        unaccounted.sort();
         return Err(format!(
             "{root} holds {} checkout{} that {} has no placement record for, so nothing could \
              carry {} out: {}",
@@ -540,6 +520,30 @@ pub(super) fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRec
         ));
     }
     Ok(found)
+}
+
+/// The name of every directory in the fleet root with a checkout in it, sorted. `.skein` and
+/// anything else without a `tree` is not a box. No fleet root at all is no boxes.
+fn checkouts_on_disk() -> Result<Vec<String>, String> {
+    let root = fleet_root();
+    let roots = match std::fs::read_dir(&root) {
+        Ok(roots) => roots,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("listing {root}: {e}")),
+    };
+    let mut names = Vec::new();
+    for entry in roots {
+        let path = entry
+            .map_err(|e| format!("reading an entry of {root}: {e}"))?
+            .path();
+        if path.join("tree").is_dir() {
+            if let Some(name) = path.file_name() {
+                names.push(name.to_string_lossy().into_owned());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 fn resize_fleet_inner(

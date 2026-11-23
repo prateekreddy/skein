@@ -314,39 +314,65 @@ fn a_save_that_loses_one_box_still_saves_the_rest_and_names_the_one_it_lost() {
     );
 }
 
-/// **A census that could not be taken is not a fleet with nothing to save** (SKEIN-347, again).
+/// **A fleet root that cannot be listed refuses**, because a save that skipped what it could not
+/// see would hand somebody a report that looks complete.
 ///
-/// A checkout with no placement record is a box skein cannot address and would silently skip. A
-/// save that skipped it would hand somebody a report that looks complete and is short by exactly
-/// the box they are about to destroy — which is worse than refusing, because it is believed.
-///
-/// **What would make this fail**: taking the census with `placed_boxes`, which cannot fail and
-/// answers "no boxes" to a read it could not do. Proved — the save then reported one box copied and
-/// said nothing about the other, firing the first assertion.
+/// **What would make this fail**: reading a listing error as "no boxes".
 #[test]
-fn a_census_that_could_not_be_taken_refuses_rather_than_saving_what_it_could_see() {
+fn a_fleet_root_that_cannot_be_listed_refuses_rather_than_saving_nothing() {
     let _env = env_lock();
     let (root, _log, _stood_in) = stage("census", &["web-main"]);
-    // A checkout nobody has a record for: a record never written, or removed by hand.
-    std::fs::create_dir_all(root.join("boxes").join("stray").join("tree")).unwrap();
+    let boxes = root.join("boxes");
+    std::fs::remove_dir_all(&boxes).unwrap();
+    std::fs::write(&boxes, b"not a directory").unwrap();
 
     let refused = skein::fleet::save_boxes(&[])
-        .expect_err("a save with an unaccounted checkout in the fleet root must refuse");
+        .expect_err("a save that could not list the boxes must refuse");
+    std::fs::remove_file(&boxes).unwrap();
     unstage();
 
-    assert!(
-        refused.contains("stray"),
-        "the refusal does not name the checkout nothing could carry out: {refused}"
-    );
     assert!(
         refused.contains("nothing was copied out"),
         "a refusal that does not say what it did leaves somebody guessing: {refused}"
     );
-    // And it is a refusal somebody can get past without fixing the census first.
     assert!(
         refused.contains("skein save <box>"),
         "the refusal names no way through for somebody who knows which box they want: {refused}"
     );
+}
+
+/// **A save carries every checkout on disk, recorded or not, and a record with no checkout does not
+/// stop it.** Both shapes are on the real fleet, and either one used to refuse the whole save.
+///
+/// **What would make this fail**: taking the list from the placement records again, which misses
+/// `stray` and sends `gone` to a copy that fails.
+#[test]
+fn a_save_carries_an_unrecorded_checkout_and_ignores_a_record_with_no_checkout() {
+    let _env = env_lock();
+    let (root, _log, _stood_in) = stage("shapes", &["web-main", "gone"]);
+    std::fs::remove_dir_all(root.join("boxes").join("gone")).unwrap();
+    let stray = root.join("boxes").join("stray").join("tree");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(stray.join("work.txt"), b"unpushed\n").unwrap();
+
+    let saved = skein::fleet::save_boxes(&[]).expect("the save runs");
+    unstage();
+
+    let names: Vec<&str> = saved.iter().map(|one| one.name.as_str()).collect();
+    assert_eq!(names, ["stray", "web-main"], "the saved boxes: {saved:?}");
+    for one in &saved {
+        assert!(
+            one.error.is_empty(),
+            "{} was not saved: {}",
+            one.name,
+            one.error
+        );
+        assert!(
+            members(&one.archive).contains("work.txt"),
+            "{}'s archive does not hold its work",
+            one.name
+        );
+    }
 }
 
 /// **A name that is not a box refuses before a byte is written.**
