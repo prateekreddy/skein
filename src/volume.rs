@@ -107,6 +107,12 @@ pub fn schema_of(home: &Path) -> Option<u32> {
 /// Called once at startup by both binaries. Every refusal names the fix, because each of them is a
 /// state somebody can be in for a perfectly good reason.
 pub fn ensure_volume() -> Result<(), String> {
+    ensure_volume_unfenced()?;
+    crate::fence::ensure_owner(&skein_home(), true)
+}
+
+/// [`ensure_volume`] without the owner check, for the commands a fenced fleet must still run.
+pub fn ensure_volume_unfenced() -> Result<(), String> {
     let home = skein_home();
     if let Some(target) = moved_to() {
         return Err(format!(

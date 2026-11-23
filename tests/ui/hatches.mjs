@@ -401,7 +401,10 @@ try {
     // A fleet root of its own, so the doorways the servers of the checks above started are not
     // counted with this one's.
     const fleet = path.join(fx.root, "fleet-doorway");
-    fs.mkdirSync(fleet, { recursive: true });
+    fs.mkdirSync(path.join(fleet, ".skein"), { recursive: true });
+    // The same fleet at a second root: the volume is owned, and a stranger would be refused.
+    fs.writeFileSync(path.join(fleet, ".skein/fleet-id"),
+      fs.readFileSync(path.join(common.SKEIN_FLEET_ROOT, ".skein/fleet-id")));
     const { srv } = await serverWith({ SKEIN_FLEET_ROOT: fleet });
     const pinned = childVar(srv, "SKEIN_SERVER_PORT");
     const doorwayPorts = () => {

@@ -2107,6 +2107,7 @@ mod tests {
             "box-session.sh",
             "fleet-size",
             "git-credential-skein",
+            "receive-mode",
             "review-github.token",
             "server-doorway.py",
             "server.door",

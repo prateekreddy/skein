@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:510"]
+["docs/modules.toml:518"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -412,88 +412,88 @@ line = "//"
 window = "// half-read, and never a second empty installation filling up beside the real one.\u000b//\u000b// Except for the two verbs that exist to *answer* a refusal. `repoint` is named by the one about"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:62"]
+["src/bin/skein.rs:69"]
 line = "None => Err(\"usage: skein add <git-url> [--id <id>] [--store <path>]\".into()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:153"]
+["src/bin/skein.rs:161"]
 line = "\"attach\" => match rest.first() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:172"]
+["src/bin/skein.rs:180"]
 line = "}"
 window = "Ok(())\u000b}\u000bother => Err(format!(\"unknown command {other:?} (try: skein help)\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:177"]
+["src/bin/skein.rs:185"]
 line = "eprintln!(\"{DIM}skein:{RESET} {e}\");"
 window = "if let Err(e) = result {\u000beprintln!(\"{DIM}skein:{RESET} {e}\");\u000bstd::process::exit(1);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:282"]
+["src/bin/skein.rs:292"]
 line = "\"unknown shared action {action:?}; usage: skein shared import <box>\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:521"]
+["src/bin/skein.rs:537"]
 line = "Err(e) => {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:579"]
+["src/bin/skein.rs:595"]
 line = "println!(\"{BAD} {prog:<13} not on PATH — {why} unavailable\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:598"]
+["src/bin/skein.rs:614"]
 line = "if !w.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:626"]
+["src/bin/skein.rs:642"]
 line = "println!("
 window = "Err(unread) => {\u000bprintln!(\u000b\"{BAD} model {} on, and {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:639"]
+["src/bin/skein.rs:655"]
 line = "if let Some(detail) = unread.detail() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:666"]
+["src/bin/skein.rs:682"]
 line = "if !s.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:693"]
+["src/bin/skein.rs:709"]
 line = "GhToken::None => println!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:753"]
+["src/bin/skein.rs:769"]
 line = "\"{DIM} → every box holds the same dead token, so each one only LOOKS \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:762"]
+["src/bin/skein.rs:778"]
 line = "println!("
 window = "// never has a login here.\u000bprintln!(\u000b\"{WARN} logins none — `skein login <runtime>` signs the fleet in once \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:788"]
+["src/bin/skein.rs:804"]
 line = "if !g.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:813"]
+["src/bin/skein.rs:829"]
 line = "if !t.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:831"]
+["src/bin/skein.rs:847"]
 line = "println!("
 window = "} else {\u000bprintln!(\u000b\"{BAD} box ceilings {} running outside the fleet's ceiling: {}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:840"]
+["src/bin/skein.rs:856"]
 line = "\"{DIM} → a runaway build in one of these reaches the whole sandbox; \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:857"]
+["src/bin/skein.rs:873"]
 line = "if !d.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:876"]
+["src/bin/skein.rs:892"]
 line = "if !c.fix.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -501,161 +501,161 @@ cited_by = ["docs/recovery-survey.md"]
 historical = "SKEIN-777 deleted this arm. `fleet_exists` is `then_some(true)`, so `Some(false)` was a state no value could hold and the sentence it printed was one nobody could be shown; the survey row is the record of that, and §0b names what replaced it. The address is the 2026-09-09 measurement and is meant to stay put."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:917"]
+["src/bin/skein.rs:933"]
 line = "println!("
 window = "// would trade the wall for a mystery. It is the SENTENCE that is said once.\u000bprintln!(\u000b\"{BAD} review {}: {why}\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:929"]
+["src/bin/skein.rs:945"]
 line = "println!(\"{WARN} kit {DIM}not written yet (server startup / `skein add` installs it){RESET}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:930"]
+["src/bin/skein.rs:946"]
 line = "}"
 window = "println!(\"{WARN} kit {DIM}not written yet (server startup / `skein add` installs it){RESET}\");\u000b}\u000blet cfg = skein::config::load_config();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:931"]
+["src/bin/skein.rs:947"]
 line = "let cfg = skein::config::load_config();"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:936"]
+["src/bin/skein.rs:952"]
 line = "println!(\"{BAD} settings unreadable — {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:963"]
+["src/bin/skein.rs:979"]
 line = "println!("
 window = "skein::gitgate::BoxCredential::None => {\u000bprintln!(\u000b\"{WARN} boxes push nothing chosen — no GitHub credential is placed in a box\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:971"]
+["src/bin/skein.rs:987"]
 line = "println!(\" {DIM}Settings → GitHub & keys: a GitHub App, or a write token on each repo's card under Settings → Repositories. (The account token is seeded from the host's keyring, which is not reachable from inside the fleet.){RESET}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:989"]
+["src/bin/skein.rs:1005"]
 line = "None => println!("
 window = "// is the whole of the answer — `docs/parity.md` §7 records that as the loss.\u000bNone => println!(\u000b\"{WARN} gh secret not seeded, and nothing can seed one {DIM}— both halves were \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1011"]
+["src/bin/skein.rs:1027"]
 line = "false => println!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1026"]
+["src/bin/skein.rs:1042"]
 line = "if fleet.is_empty() {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1027"]
+["src/bin/skein.rs:1043"]
 line = "// **Unreachable, and kept for that reason.** `load_config` repairs a blank `fleet_sandbox`"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1032"]
+["src/bin/skein.rs:1048"]
 line = "println!("
 window = "// line names the invariant rather than telling somebody to set a value they did not unset.\u000bprintln!(\u000b\"\\n{BAD} fleet no sandbox named, which load_config is supposed to make \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1041"]
+["src/bin/skein.rs:1057"]
 line = "// (SKEIN-777). `fleet_exists` is `(sandbox == fleet_sandbox()).then_some(true)`, and"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1052"]
+["src/bin/skein.rs:1068"]
 line = "_ => println!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1104"]
+["src/bin/skein.rs:1120"]
 line = "println!("
 window = "if stated_cpus != cpus {\u000bprintln!(\u000b\"{WARN} this sandbox now reports {cpus} CPUs, so it is not the one \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1112"]
+["src/bin/skein.rs:1128"]
 line = "\"{WARN} fleet size nobody stated this fleet's memory or CPUs; it has {cpus} CPUs\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1115"]
+["src/bin/skein.rs:1131"]
 line = "\"{DIM} sbx fixes both at create and has no resize, so changing them \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1143"]
+["src/bin/skein.rs:1159"]
 line = "println!(\"{BAD} {tool:<13} missing in the sandbox — {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1224"]
+["src/bin/skein.rs:1240"]
 line = "} else {"
 window = ");\u000b} else {\u000bprintln!(\"{BAD} ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1225"]
+["src/bin/skein.rs:1241"]
 line = "println!(\"{BAD} ceilings no cgroup delegation — boxes run UNCAPPED, so one runaway build can kill every other box\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1235"]
+["src/bin/skein.rs:1251"]
 line = "// The judgement is `fleet`'s, beside the code that WRITES these values. It was here, and"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1239"]
+["src/bin/skein.rs:1255"]
 line = "skein::fleet::Ceiling::Good(said) => println!(\"{OK} {cgroup:<13} {said}\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1300"]
+["src/bin/skein.rs:1316"]
 line = "("
 window = "} else if !there {\u000b(\u000bBAD,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1307"]
+["src/bin/skein.rs:1323"]
 line = "} else if beneath {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1318"]
+["src/bin/skein.rs:1334"]
 line = "("
 window = "} else {\u000b(\u000bWARN,"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1446"]
+["src/bin/skein.rs:1462"]
 line = "\"could not refresh {} — a box created now clones from the remote instead\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1553"]
+["src/bin/skein.rs:1587"]
 line = "return Err(format!(\"unsupported runtime {agent:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1586"]
+["src/bin/skein.rs:1620"]
 line = "let Some((program, args)) = argv.split_first() else {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1590"]
+["src/bin/skein.rs:1624"]
 line = "Ok(s) if s.success() => Ok(()),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1595"]
+["src/bin/skein.rs:1629"]
 line = "\"sbx\" => \"sbx not found on PATH — attaching from the host needs the sbx CLI\".into(),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1705"]
+["src/bin/skein.rs:1739"]
 line = "\"{} of {} box{} could not be copied out ({}) — that work is still only inside {sandbox}, \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1741"]
+["src/bin/skein.rs:1775"]
 line = "let asked = [(\"memory\", memory), (\"cpus\", cpus), (\"disk\", disk)]"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1743"]
+["src/bin/skein.rs:1777"]
 line = ".filter(|(_, v)| !v.trim().is_empty())"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1748"]
+["src/bin/skein.rs:1782"]
 line = "\"\\n\\nThe size you asked for ({asked}) is not in that create line — it renders the size \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1772"]
+["src/bin/skein.rs:1806"]
 line = "return Err(format!(\"unsupported runtime {runtime:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1797"]
+["src/bin/skein.rs:1831"]
 line = "return Err(format!("
 window = ".join(\", \");\u000breturn Err(format!(\u000b\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein.rs:1798"]
+["src/bin/skein.rs:1832"]
 line = "\"unsupported runtime {agent:?}; available: {available}\""
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1303,76 +1303,76 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"{why}\\n {name} IS running — its session and namespace came up — but it has \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:602"]
+["src/fleet/start.rs:604"]
 line = "\"{name} is already a {} box, and this would start it as a {} one. Nothing has been \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:619"]
+["src/fleet/start.rs:621"]
 line = "return Err(format!(\"invalid box name {name:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:630"]
+["src/fleet/start.rs:632"]
 line = "ensure_fleet(&sandbox)?;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:672"]
+["src/fleet/start.rs:674"]
 line = "\"the fleet sandbox cannot see {store}, so box {name} would come up with no store.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:691"]
+["src/fleet/start.rs:693"]
 line = "eprintln!(\"skein: {name} is cloning from a mirror that could not be refreshed: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:721"]
+["src/fleet/start.rs:723"]
 line = "eprintln!(\"skein: {name} has no write token yet — {problem}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:810"]
+["src/fleet/start.rs:812"]
 line = "// Every start, not just a migration's. `migrate_box` used to be the only caller, and its call"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/start.rs:827"]
+["src/fleet/start.rs:829"]
 line = "eprintln!(\"skein: could not set {name}'s git identity ({e}); its first commit will ask who you are\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:835"]
+["src/fleet/start.rs:837"]
 line = "eprintln!(\"skein: {name} came up, but its conversation could not be located ({e})\")"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:843"]
+["src/fleet/start.rs:845"]
 line = "\"skein: {name} is running WITHOUT a memory ceiling ({why}); a runaway build in it can \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:853"]
+["src/fleet/start.rs:855"]
 line = "/// whose lifecycle sbx manages. That is one of two possibilities. The other is a box whose start"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:890"]
+["src/fleet/start.rs:892"]
 line = "Some(format!("
 window = "// see, and they no longer see it.\u000bSome(format!(\u000b\"box {name} does not exist: skein has no placement for it{}.\\r\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:950"]
+["src/fleet/start.rs:952"]
 line = "\"skein: {name} has a session nothing can enter — {why} — so it is being ended \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:968"]
+["src/fleet/start.rs:970"]
 line = "\"box {name} has no checkout in {} — `skein start {name}` to build one\","
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:986"]
+["src/fleet/start.rs:988"]
 line = "eprintln!(\"skein: could not refresh the launcher in {} ({e}); {name} starts with whichever copy is already there\", record.sandbox);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1023"]
+["src/fleet/start.rs:1025"]
 line = "eprintln!(\"skein: {name} had no live session, so it was restarted (its work is untouched)\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1054"]
+["src/fleet/start.rs:1056"]
 line = "\"the fleet sandbox reported no usable HOME ({home:?}); every box command would run with \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/start.rs:1766"]
+["src/fleet/start.rs:1768"]
 line = "/// Both inversions have happened. `PROVISION_BUDGET` was 300s against a script allowing 600, and"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -1554,7 +1554,7 @@ cited_by = ["docs/prose-symbols.toml"]
 historical = "`docs/inventory.md` cites `src/lib.rs:35-50` for what the module graph looked like BEFORE SKEIN-576 split it — “was `pub use <mod>::*` over sixteen modules”, past tense, and the point of the paragraph. Lines 61-76 today are `pub mod` declarations, so relocating the citation would move it onto code that does not support the sentence."
 cited_by = ["docs/inventory.md"]
 
-["src/lib.rs:73"]
+["src/lib.rs:74"]
 line = "mod testutil;"
 cited_by = ["docs/modules.toml"]
 
@@ -1844,51 +1844,51 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:112"]
+["src/volume.rs:118"]
 line = "return Err(format!("
 window = "if let Some(target) = moved_to() {\u000breturn Err(format!(\u000b\"this installation was moved to {target}, and $SKEIN_HOME still points at {}.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:121"]
+["src/volume.rs:127"]
 line = "return Err(format!("
 window = "if migrating_path(&home).exists() {\u000breturn Err(format!(\u000b\"{} holds a half-finished move: something copied into it and did not finish, so what \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:130"]
+["src/volume.rs:136"]
 line = "Some(found) if found > SCHEMA => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:138"]
+["src/volume.rs:144"]
 line = "Some(found) if found < SCHEMA => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:190"]
+["src/volume.rs:196"]
 line = "Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:444"]
+["src/volume.rs:450"]
 line = "// on the commonest refusal (the fleet is up, which is now always) it left one on every attempt."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:473"]
+["src/volume.rs:479"]
 line = "\"{} already holds a skein installation ({marker} is there). Move onto an empty \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:493"]
+["src/volume.rs:499"]
 line = "return Err(format!("
 window = "// they are told to type cannot drift from what the warden would run.\u000breturn Err(format!(\u000b\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:494"]
+["src/volume.rs:500"]
 line = "\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:538"]
+["src/volume.rs:544"]
 line = "return Err(format!("
 window = "if have < want {\u000breturn Err(format!(\u000b\"{} has {} free and this needs about {} ({} plus a tenth). Free some room or choose \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:566"]
+["src/volume.rs:572"]
 line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]

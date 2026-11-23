@@ -280,7 +280,7 @@ pub fn load_dotenv() {
 /// Eight bytes nobody outside this process can predict: from `/dev/urandom`, or failing that the
 /// clock's nanoseconds and the stack address mixed together — a weaker answer that still is not a
 /// counter starting at 0.
-fn unguessable() -> u64 {
+pub(crate) fn unguessable() -> u64 {
     use std::io::Read;
     let mut b = [0u8; 8];
     if fs::File::open("/dev/urandom")

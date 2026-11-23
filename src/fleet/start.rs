@@ -471,6 +471,8 @@ pub fn start_box(
     agent_command: &str,
     purpose: crate::place::Purpose,
 ) -> Result<(), String> {
+    // First, so a fenced fleet writes nothing to a volume that is not its own.
+    crate::fence::ensure_owner(&skein_home(), false)?;
     // Whatever happened, the sweep's picture is now older than the act. On success there is a box
     // that was not there; on failure there may be a half-started one — and the caller is a person
     // who just pressed a button and is looking at the row.

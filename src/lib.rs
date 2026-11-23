@@ -39,6 +39,7 @@ pub mod digest;
 pub mod diskask;
 pub mod dockerd;
 pub mod doorway;
+pub mod fence;
 pub mod files;
 pub mod fleet;
 pub mod gitgate;

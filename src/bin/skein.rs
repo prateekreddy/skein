@@ -48,8 +48,15 @@ fn main() {
     // wrong with it — so gating both behind the check would make the fix line unrunnable, which is
     // the failure `tests/fix_lines.rs` exists to stop one layer down. `migrate` reads the source's
     // real path rather than what it records, so it is correct on a volume that records the wrong one.
-    if !matches!(cmd, "repoint" | "migrate") {
-        if let Err(e) = skein::volume::ensure_volume() {
+    //
+    // `fleet-owner` answers a fence the same way. `doctor` and `stop` keep the other checks: one
+    // reports a fence and the other only takes a fenced fleet further from running anything.
+    if !matches!(cmd, "repoint" | "migrate" | "fleet-owner") {
+        let checked = match cmd {
+            "doctor" | "stop" => skein::volume::ensure_volume_unfenced(),
+            _ => skein::volume::ensure_volume(),
+        };
+        if let Err(e) = checked {
             eprintln!("{DIM}skein:{RESET} {e}");
             std::process::exit(1);
         }
@@ -86,6 +93,7 @@ fn main() {
                     .into(),
             ),
         },
+        "fleet-owner" => cmd_fleet_owner(rest),
         "shared" => cmd_shared(rest),
         "start" => match rest.first() {
             Some(name) => cmd_start(name, &rest[1..]),
@@ -211,6 +219,8 @@ skein migrate send <file> [--leave-out-build-output] [--skip-unreadable]\n  \
                       back up this whole skein to one new file (only reads the fleet)\n  \
 skein migrate receive <file> --into <empty-dir>\n  \
                       restore a backup into an empty directory; rerun to resume\n  \
+skein fleet-owner [claim <owner-id>]\n  \
+                      show which fleet owns this volume, or take it from one that is gone\n  \
 skein repoint         after moving a volume by hand: point what it records at where it now is\n  \
 skein version\n  \
 skein help\n\n\
@@ -512,6 +522,12 @@ fn cmd_doctor() -> Result<(), String> {
         skein::health::BUILD_REVISION
     );
 
+    let owner = skein::fence::describe(&skein::config::skein_home());
+    let mark = match owner.starts_with("FENCED") || owner.starts_with("unreadable") {
+        true => BAD,
+        false => OK,
+    };
+    println!("{mark} fleet owner   {DIM}{owner}{RESET}");
     match load_registry() {
         Ok((b, p)) => println!(
             "{OK} registry      {DIM}{}{RESET} ({} boxes)",
@@ -1456,6 +1472,24 @@ fn cmd_pull(id: Option<&str>) -> Result<(), String> {
 /// answering. Three of doctor's own fix lines named `skein restart <box>` while neither verb
 /// existed, so the only thing said to a person looking at a fault was a command that printed
 /// `unknown command`.
+/// `skein fleet-owner`: which fleet may run this volume's boxes, and the way past a fence.
+fn cmd_fleet_owner(rest: &[String]) -> Result<(), String> {
+    use skein::fence;
+    let home = skein::config::skein_home();
+    match rest.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        [] => println!("{}", fence::describe(&home)),
+        ["check"] => {
+            if let Err(why) = fence::ensure_owner(&home, true) {
+                eprintln!("{why}");
+                std::process::exit(fence::FENCED_EXIT);
+            }
+        }
+        ["claim", from] => println!("{}", fence::claim(&home, from)?),
+        _ => return Err("usage: skein fleet-owner [claim <owner-id>]".into()),
+    }
+    Ok(())
+}
+
 fn cmd_stop(name: &str) -> Result<(), String> {
     eprintln!("{DIM}skein:{RESET} stopping {name}…");
     skein::sandbox::stop_box(name)?;

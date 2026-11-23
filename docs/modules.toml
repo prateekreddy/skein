@@ -256,7 +256,7 @@ depends_on = ["util"]
 # `agentpath` for `doctor`'s `box agent` line — whether the first file named `claude` on a box's
 # PATH is the agent. The edge is here and not in `health` for the same reason `ai` is: it SPAWNS,
 # twice, and the health report is polled every fifteen seconds by every open board.
-depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "fleet", "gitgate", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "util", "volume"]
+depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "fence", "fleet", "gitgate", "health", "mailbox", "place", "prq", "registry", "repos", "runtime", "sandbox", "sbx", "sharedhome", "util", "volume"]
 
 [current."bin/skein-server"]
 # `dockerd` because this is the process that runs the Docker watchdog. `dockerd` is pid-1-parented
@@ -368,6 +368,12 @@ depends_on = ["boxfile", "fleet", "mailbox", "place", "substrate", "util"]
 # off the host's copy, and those are two different §2.3 reaches with two different failure modes.
 depends_on = ["answer", "place", "sbx", "source", "util"]
 
+[current.fence]
+# Its own module, below `fleet` and `volume`, because both must ask it and `fleet` depending on
+# `volume` would put `volume` in the knot. Callers pass the volume's path, because asking `config`
+# for it would put this module in the knot too. `util` for the fleet root and the atomic write.
+depends_on = ["util"]
+
 [current.fleet]
 # `dockerd` for one call: `pressure` reads the kernel's counters from that module instead of asking
 # the in-sandbox agent over HTTP. The agent is deleted (§13a, SKEIN-521) and the counters are files
@@ -399,6 +405,8 @@ depends_on = [
   "boxfile",
   "config",
   "dockerd",
+  # `fence` for one call: `start_box` refuses on a fleet that does not own the volume (SKEIN-1539).
+  "fence",
   "gitgate",
   # `jobs` for one path, as for `asks`: the box's job drop-box, removed with the box
   # (`disk::box_side_state`), and `.skein/jobs` known as skein's own (SKEIN-1388).
@@ -692,7 +700,7 @@ depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 # Nothing, and that is the claim rather than an accident — but the claim this row makes is a
 # different one from `assets`, `knock` or `doorway` above, and it is worth saying which.
 #
-# **This whole unit is test code.** `src/lib.rs:73` is `mod testutil;` under the `#[cfg(test)]` on
+# **This whole unit is test code.** `src/lib.rs:74` is `mod testutil;` under the `#[cfg(test)]` on
 # the line above it, so
 # not one byte of `src/testutil.rs` is in a release build. The other empty rows say "this module
 # reaches nothing"; this one says "this module is not in the architecture", which is the same rule
@@ -710,7 +718,7 @@ depends_on = ["boxfile", "config", "fleet", "mailbox", "place", "util"]
 # `#[cfg(test)] mod tests` block.
 #
 # Empty rather than deleted, so the argument stays where the module is and the failure stays loud:
-# take the `#[cfg(test)]` off `src/lib.rs:73`'s declaration and `place` and `registry` come back,
+# take the `#[cfg(test)]` off `src/lib.rs:74`'s declaration and `place` and `registry` come back,
 # with nothing here allowing them.
 depends_on = []
 
@@ -737,7 +745,8 @@ depends_on = ["boxfile", "fleet", "place", "repos", "util"]
 # recipe are the ones the warden's own approval prompt prints, and `operation_id`, so asking twice
 # about the same move names one operation rather than two. No request is made from here — this
 # module reports and prints; a person runs it on the host.
-depends_on = ["config", "fleet", "operation", "util", "warden_client"]
+# `fence` because `ensure_volume` is where a server or CLI start learns it may not use this volume.
+depends_on = ["config", "fence", "fleet", "operation", "util", "warden_client"]
 
 [current.operation]
 # Nothing. The primitive is a shape — desired, a tri-state check, a printable recipe, a class — and

@@ -184,6 +184,16 @@ if [ ! -w "$fleet_root" ] && ! { mkdir -p "$fleet_root" 2>/dev/null && [ -w "$fl
   chmod 755 "$fleet_root"
 fi
 
+# ---- receive mode: a sandbox waiting to be moved onto, which leaves the volume alone --------------
+#
+# Installs the binaries and stops before the door and before any write to the volume. The marker is
+# VM-local and outlives this run, so a later plain run of this file cannot open the door either.
+receive_marker="$skein_dir/receive-mode"
+if [ "${SKEIN_BOOTSTRAP_RECEIVE:-}" = 1 ]; then
+  mkdir -p "$skein_dir"
+  : > "$receive_marker"
+fi
+
 # ---- what the image does not ship, and the build cannot do without --------------------------------
 
 # `cc`. A Rust toolchain is not a build: rustc links through the system C compiler, so the `shell`
@@ -481,6 +491,8 @@ if [ -z "$skein_home" ]; then
 *}" ]; then
     skein_home="$found"
     say "the fleet volume is $skein_home"
+  elif [ -f "$receive_marker" ]; then
+    say "receive mode: no single fleet volume is mounted, and this install does not need one"
   else
     say "cannot tell which directory is the fleet volume, and guessing is the bug this replaces."
     say "The volume is the path named on the create -- \$HOME/.skein unless you moved it -- and it"
@@ -839,8 +851,26 @@ fi
 # Here rather than beside the other paths at the top, because `$skein_home` is not known until the
 # discovery above has run: written earlier it recorded an empty line, which is the same bug one
 # level quieter.
-printf '%s\n' "$skein_home" > "$skein_dir/skein-home.new"
-mv "$skein_dir/skein-home.new" "$skein_dir/skein-home"
+if [ -n "$skein_home" ]; then
+  printf '%s\n' "$skein_home" > "$skein_dir/skein-home.new"
+  mv "$skein_dir/skein-home.new" "$skein_dir/skein-home"
+fi
+
+# ---- the fence, before the door and before anything else writes to the volume ---------------------
+
+if [ -f "$receive_marker" ]; then
+  say "installed in receive mode: the volume was not written and the door was not opened"
+  printf '%s\n' "$revision"
+  exit 0
+fi
+
+# Only exit 3 is a fence. Adopts a volume nothing owns, which is what an upgrade of a live fleet does.
+fence_rc=0
+fence_said=$(SKEIN_HOME="$skein_home" SKEIN_FLEET_ROOT="$fleet_root" "$skein_dir/skein" fleet-owner check 2>&1) || fence_rc=$?
+if [ "$fence_rc" = 3 ]; then
+  printf '%s\n' "$fence_said" | sed 's/^/skein: /' >&2
+  exit 1
+fi
 
 # ---- the door, which is opened before anything is put behind it ----------------------------------
 
