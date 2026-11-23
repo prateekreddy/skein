@@ -402,9 +402,12 @@ try {
     // counted with this one's.
     const fleet = path.join(fx.root, "fleet-doorway");
     fs.mkdirSync(path.join(fleet, ".skein"), { recursive: true });
-    // The same fleet at a second root: the volume is owned, and a stranger would be refused.
-    fs.writeFileSync(path.join(fleet, ".skein/fleet-id"),
-      fs.readFileSync(path.join(common.SKEIN_FLEET_ROOT, ".skein/fleet-id")));
+    // The same fleet at a second root: the volume is owned, and a stranger would be refused. A run
+    // inside a box adopts nothing, so there the volume has no owner and no id to carry over.
+    const fleetId = path.join(common.SKEIN_FLEET_ROOT, ".skein/fleet-id");
+    if (fs.existsSync(fleetId)) {
+      fs.writeFileSync(path.join(fleet, ".skein/fleet-id"), fs.readFileSync(fleetId));
+    }
     const { srv } = await serverWith({ SKEIN_FLEET_ROOT: fleet });
     const pinned = childVar(srv, "SKEIN_SERVER_PORT");
     const doorwayPorts = () => {
