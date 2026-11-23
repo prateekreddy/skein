@@ -2186,15 +2186,15 @@ cited_by = ["docs/recovery-survey.md"]
 line = "said(\"makesaid\", body.error || `it was not accepted (${answer.status})`, \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["tests/common/mod.rs:978"]
+["tests/common/mod.rs:979"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1016"]
+["tests/common/mod.rs:1017"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1030"]
+["tests/common/mod.rs:1031"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 

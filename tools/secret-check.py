@@ -90,6 +90,21 @@ FIXTURE_PREFIX = "skein-test-"
 # `path::fn` (or `path` for a script) -> (how many, why). A 0600 write that cannot go through
 # `crate::secret` because it does not happen in this process.
 WRITERS = {
+    "src/volume/bundle.rs::write_entry_header": (
+        1,
+        "the mode recorded in a tar pax header inside a backup. It writes no file, and the entry "
+        "is metadata rather than a credential",
+    ),
+    "src/volume/bundle.rs::extract": (
+        1,
+        "a restored file made private until its recorded mode is applied. A backup carries no "
+        "credentials, so this is not a credential writer",
+    ),
+    "src/volume/send.rs::migrate_send": (
+        1,
+        "the backup file itself. It holds conversations and .env files, so it is private, but it "
+        "never holds a credential and must stream, which crate::secret's whole-value write cannot",
+    ),
     "src/fleet/login.rs::<const>": (
         1,
         "LOGIN_MERGE_PY runs inside the fleet sandbox and writes a login into a box's HOME there; "

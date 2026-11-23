@@ -342,6 +342,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // `git` because the workshop-restart tests commit the checkout they restart from
     // (`startscripts.rs::restart_workshop`, SKEIN-1173) and skip without it (SKEIN-1192).
     ("isolation_bwrap", &[BWRAP, GIT, JQ, PYTHON3, TMUX]),
+    ("migrate_backup", &[BWRAP, GIT]),
     ("migrate_plan", &[BWRAP, GIT]),
     ("mail_provenance", &[JQ, FLOCK, GIT]),
     // The launcher's package-request leg shells out through `jq` to file the request; a machine
