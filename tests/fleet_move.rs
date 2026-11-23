@@ -1353,22 +1353,35 @@ impl Install {
             s = skein.join("skein-server").display(),
             st = skein.join("server.door").display(),
         );
-        let ok = Command::new("tmux")
-            .args([
-                "-S",
-                sock,
-                "new-session",
-                "-d",
-                "-s",
-                "skein-server",
-                &supervise,
-            ])
-            .env_clear()
-            .env("PATH", self.path())
-            .env("HOME", self.root.join("container-home"))
-            .status()
-            .is_ok_and(|s| s.success());
-        assert!(ok, "could not start a supervisor on {sock}");
+        // A server just told to die still answers on its socket for a moment, and a client that
+        // reaches it then gets this one message. Any other failure is real and ends the test.
+        let mut said = String::new();
+        for _ in 0..50 {
+            let out = Command::new("tmux")
+                .args([
+                    "-S",
+                    sock,
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "skein-server",
+                    &supervise,
+                ])
+                .env_clear()
+                .env("PATH", self.path())
+                .env("HOME", self.root.join("container-home"))
+                .output()
+                .expect("tmux runs");
+            if out.status.success() {
+                return;
+            }
+            said = String::from_utf8_lossy(&out.stderr).into_owned();
+            if !said.contains("server exited unexpectedly") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("could not start a supervisor on {sock}: {said}");
     }
 
     /// End the tmux server on `sock` and wait until nothing holds the port.
