@@ -1358,4 +1358,53 @@ mod tests {
         let shown = with_blocker(granted, Some(&grants()), now);
         assert_eq!(shown.access.unwrap().status, "waiting");
     }
+
+    /// **Each fact the status is derived from reaches it**, through the listing's own reads rather
+    /// than a record built by hand.
+    #[test]
+    fn a_granted_row_is_derived_from_the_token_the_scope_and_the_grants_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_lock, dir, _env) = fleet_with_no_way_to_mint();
+        let home = dir.join("home");
+        let now = chrono::Utc::now();
+        tokens_for(&["acme/thing"]);
+        let asked = asked_by("web-main", "20261113-100505-3", "acme/thing", "pending");
+        record(&asked, Some(24)).unwrap();
+        let granted = Request {
+            state: "granted".into(),
+            ..asked
+        };
+        let status = |on_record: Option<&[Grant]>| {
+            with_blocker(granted.clone(), on_record, now)
+                .access
+                .unwrap()
+                .status
+        };
+
+        let token = std::path::PathBuf::from(token_file("web-main", "acme/thing"));
+        std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+        std::fs::write(&token, "fixture-value").unwrap();
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Fails if `shown_access` looks anywhere but the box's own token file.
+        assert_eq!(status(Some(&grants())), "granted");
+
+        // Fails if `shown_access` drops what GitHub said about the stored token.
+        let pats = home.join("github-pats.json");
+        let kept = std::fs::read_to_string(&pats).unwrap();
+        let mut described: serde_json::Value = serde_json::from_str(&kept).unwrap();
+        described[0]["turned_down"] = "401 Bad credentials".into();
+        std::fs::write(&pats, described.to_string()).unwrap();
+        assert_eq!(status(Some(&grants())), "token_refused");
+        std::fs::write(&pats, kept).unwrap();
+
+        // Fails if `wanted` stops following the box's scope: this box holds the fleet credential.
+        set_box_scope("web-main", Some("fleet")).unwrap();
+        assert_eq!(status(Some(&grants())), "not_in_use");
+        set_box_scope("web-main", None).unwrap();
+        assert_eq!(status(Some(&grants())), "granted");
+
+        // Fails if a grants file skein cannot read is read as "withdrawn".
+        std::fs::write(grants_path(), "not json").unwrap();
+        assert_eq!(status(grants_on_record().as_deref()), "unknown");
+    }
 }
