@@ -42,7 +42,7 @@ pub struct Cleanable {
 /// Download caches under a box's home, and what each one is. A fixed list on purpose: a box's
 /// `~/.cache` also holds whatever its agent chose to put there — logs, patches, backups of files it
 /// was editing — measured on a live fleet, so "everything under `~/.cache`" is not regenerable.
-const DOWNLOAD_CACHES: &[&str] = &[
+pub(crate) const DOWNLOAD_CACHES: &[&str] = &[
     ".cache/ms-playwright",
     ".cache/pip",
     ".cache/uv",

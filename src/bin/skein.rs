@@ -68,7 +68,15 @@ fn main() {
         },
         "doctor" => cmd_doctor(),
         "announce" => cmd_announce(),
-        "migrate" => match rest.first() {
+        "migrate" => match rest.first().map(String::as_str) {
+            Some("plan") if rest.len() == 1 => {
+                skein::volume::migrate_plan().map(|report| println!("{report}"))
+            }
+            Some("plan") => Err(
+                "usage: skein migrate plan   (takes no arguments; to move the \
+                 volume into a directory named plan, write ./plan)"
+                    .into(),
+            ),
             Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
             None => Err(
                 "usage: skein migrate <directory>   (the volume moves there; nothing is \
@@ -196,6 +204,7 @@ skein doctor          check registry, tools, and the shared sandbox if one is on
 skein announce        tell the fleet if its disk has just crossed the line (nothing is\n  \
                       deleted; silent while the figure has not moved across it)\n  \
 skein migrate <dir>   copy this installation onto another volume (nothing is deleted)\n  \
+skein migrate plan    report what moving this whole skein would involve (changes nothing)\n  \
 skein repoint         after moving a volume by hand: point what it records at where it now is\n  \
 skein version\n  \
 skein help\n\n\

@@ -476,26 +476,11 @@ pub fn resize_fleet(memory: &str, cpus: &str, disk: &str, drop_docker: bool) -> 
 /// unpushed work destroyed by a command that then reports complete success.
 pub(super) fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRecord)>, String> {
     let dir = skein_home().join("places");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        // Nothing has ever been placed. The one reading of "no boxes" that is a fact.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("listing {}: {e}", dir.display())),
-    };
     let mut found: Vec<(String, PlaceRecord)> = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("reading an entry of {}: {e}", dir.display()))?;
-        let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(name) = file.strip_suffix(".json") else {
-            continue; // the lock files and whatever else lives beside the records
-        };
-        let path = entry.path();
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        let record: PlaceRecord =
-            serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    for (name, record) in place_records()? {
+        let record = record?;
         if record.sandbox == sandbox {
-            found.push((name.to_string(), record));
+            found.push((name, record));
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -522,9 +507,41 @@ pub(super) fn census_placed_boxes(sandbox: &str) -> Result<Vec<(String, PlaceRec
     Ok(found)
 }
 
+/// A box name and its placement record, or why that record could not be read.
+pub(crate) type ReadRecord = (String, Result<PlaceRecord, String>);
+
+/// Every placement record on disk, in any sandbox, each with why it could not be read if it could
+/// not. `Err` is a `places` directory that could not be listed; an absent one is no records.
+pub(crate) fn place_records() -> Result<Vec<ReadRecord>, String> {
+    let dir = skein_home().join("places");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // Nothing has ever been placed. The one reading of "no boxes" that is a fact.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("listing {}: {e}", dir.display())),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading an entry of {}: {e}", dir.display()))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(name) = file.strip_suffix(".json") else {
+            continue; // the lock files and whatever else lives beside the records
+        };
+        let path = entry.path();
+        let record = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))
+            .and_then(|text| {
+                serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
+            });
+        records.push((name.to_string(), record));
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(records)
+}
+
 /// The name of every directory in the fleet root with a checkout in it, sorted. `.skein` and
 /// anything else without a `tree` is not a box. No fleet root at all is no boxes.
-fn checkouts_on_disk() -> Result<Vec<String>, String> {
+pub(crate) fn checkouts_on_disk() -> Result<Vec<String>, String> {
     let root = fleet_root();
     let roots = match std::fs::read_dir(&root) {
         Ok(roots) => roots,

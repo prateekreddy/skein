@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod plan;
+pub use plan::migrate_plan;
+
 /// The volume layout this binary understands.
 pub const SCHEMA: u32 = 1;
 
