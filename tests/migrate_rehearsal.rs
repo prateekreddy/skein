@@ -1191,6 +1191,8 @@ esac
             }
             if opened.exists() {
                 assert!(fs::read(&opened).unwrap() == plain, "{when}: a torn backup");
+                // Refused because the destination exists, and it still clears the leftover.
+                let _ = rig.run(NEW, &args);
             } else {
                 rig.must(NEW, &args);
                 assert!(
@@ -1198,6 +1200,14 @@ esac
                     "{when}: the rerun differs"
                 );
             }
+            let left = fs::read_dir(rig.base.join("out"))
+                .unwrap()
+                .filter(|e| {
+                    let e = e.as_ref().unwrap();
+                    e.file_name().to_string_lossy().starts_with(&partial)
+                })
+                .count();
+            assert_eq!(left, 0, "{when}: decrypted data outlived the rerun");
         }
         assert!(
             temps_seen > 0,

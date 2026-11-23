@@ -983,6 +983,69 @@ fn send_leaves_the_source_byte_identical_and_runs_nothing_from_a_box() {
     assert!(!marker.exists(), "a command from a box's config ran");
 }
 
+/// Fails if a sweep removes the temp of an unseal that is still running, or leaves a dead one's.
+#[test]
+fn only_a_dead_unseals_temp_is_removed() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-sweep");
+    assert!(seal(&fx, &phrase).status.success());
+    let sealed = fs::read(sealed_path(&fx)).unwrap();
+    fs::create_dir_all(fx.base.join("pipe")).unwrap();
+    let pipe = fx.base.join("pipe/sealed.fifo");
+    let c_pipe = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_pipe.as_ptr(), 0o600) }, 0);
+    let out = fx.base.join("out");
+    let listing = names_in(&out);
+    let mut live = Command::new(env!("CARGO_BIN_EXE_skein"))
+        .args(["migrate", "unseal"])
+        .arg(&pipe)
+        .arg(unsealed_path(&fx))
+        .arg("--passphrase-file")
+        .arg(&phrase)
+        .current_dir(&fx.base)
+        .env("SKEIN_HOME", &fx.home)
+        .env("SKEIN_FLEET_ROOT", &fx.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut feed = fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+    std::io::Write::write_all(&mut feed, &sealed[..sealed.len() - 1]).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while names_in(&out) == listing {
+        assert!(std::time::Instant::now() < deadline, "no temp appeared");
+        assert!(live.try_wait().unwrap().is_none(), "unseal ended early");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let with_temp = names_in(&out);
+
+    // A second run to the same name, while the first is alive. Its wrong passphrase ends it.
+    let wrong = fx.base.join("elsewhere/wrong-phrase");
+    write(&wrong, "not the passphrase\n");
+    let second = unseal(&fx, &sealed_path(&fx), &wrong);
+    assert!(!second.status.success(), "{second:?}");
+    assert_eq!(
+        names_in(&out),
+        with_temp,
+        "a live unseal's temp was removed"
+    );
+
+    live.kill().unwrap();
+    live.wait().unwrap();
+    drop(feed);
+    assert_eq!(names_in(&out), with_temp, "SIGKILL should leave the temp");
+    let third = unseal(&fx, &sealed_path(&fx), &wrong);
+    assert!(!third.status.success(), "{third:?}");
+    assert_eq!(
+        names_in(&out),
+        listing,
+        "a dead unseal's plaintext is still here"
+    );
+}
+
 fn dir_times(dir: &Path) -> BTreeMap<PathBuf, (i64, i64)> {
     let mut times = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];

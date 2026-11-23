@@ -9,7 +9,9 @@
 //! destination and linked into place, which cannot replace a file that appeared in the meantime.
 //! An unseal that is interrupted would otherwise leave readable plaintext, so the temp is removed
 //! on SIGINT, SIGTERM and SIGHUP as well as on every error. SIGKILL cannot be caught: what it leaves
-//! is a 0600 file named `.<destination>.partial.<pid>.<n>`.
+//! is a 0600 file named `.<destination>.partial.<pid>.<n>`. The writer holds a lock on it for its
+//! whole life and the kernel drops that lock on any death, so the next seal or unseal to the same
+//! destination can tell a dead run's file from a live one and removes only the dead.
 
 use super::available_kb;
 use super::bundle::{BundleReader, Closing, Manifest, Stop, UnitHead, FORMAT, KIND_END};
@@ -18,13 +20,15 @@ use crate::secret::create_private;
 use crate::util::Sha256;
 use age::secrecy::{ExposeSecret, SecretString};
 use age::{scrypt, DecryptError, Decryptor, Encryptor};
+use fs2::FileExt;
 use std::cell::UnsafeCell;
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -141,6 +145,72 @@ fn catch_signals() {
 /// The private file output grows in, removed unless it was placed.
 struct Temp {
     path: PathBuf,
+    /// Keeps the lock when the writer's handle is closed before the file is placed.
+    _held: Option<File>,
+}
+
+/// The name of a temp for `destination`: `.<name>.partial.<pid>.<n>`.
+fn is_temp_of(destination: &Path, found: &OsStr) -> bool {
+    let name = destination
+        .file_name()
+        .unwrap_or(OsStr::new("backup"))
+        .to_string_lossy();
+    let prefix = format!(".{name}.partial.");
+    let found = found.to_string_lossy();
+    let Some(rest) = found.strip_prefix(&prefix) else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    rest.split_once('.')
+        .is_some_and(|(pid, n)| digits(pid) && digits(n))
+}
+
+/// Remove what a killed run left for `destination`. A file whose lock cannot be taken belongs to a
+/// run still alive, and a filesystem with no locks leaves everything in place.
+fn remove_dead_temps(destination: &Path) {
+    let Ok(entries) = fs::read_dir(parent_of(destination)) else {
+        return;
+    };
+    // SAFETY: `geteuid` takes nothing and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !is_temp_of(destination, &entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let plain = fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.file_type().is_file() && meta.uid() == me);
+        if !plain {
+            continue;
+        }
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        else {
+            continue;
+        };
+        if file.try_lock_exclusive().is_ok() && fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        eprintln!("skein: removed {removed} unfinished file(s) left by an interrupted run");
+    }
+}
+
+/// Lock a new temp. `false` means another run's sweep reached it first, so it must not be used.
+fn hold(path: &Path, file: &File) -> Result<bool, io::Error> {
+    if let Err(e) = file.try_lock_exclusive() {
+        return if e.kind() == io::ErrorKind::WouldBlock {
+            Ok(false)
+        } else {
+            Err(e)
+        };
+    }
+    let mine = file.metadata()?;
+    Ok(fs::symlink_metadata(path).is_ok_and(|at| at.dev() == mine.dev() && at.ino() == mine.ino()))
 }
 
 impl Temp {
@@ -150,26 +220,42 @@ impl Temp {
             .file_name()
             .unwrap_or(OsStr::new("backup"))
             .to_string_lossy();
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path =
-            parent_of(destination).join(format!(".{name}.partial.{}.{n}", std::process::id()));
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| format!("{} is not a usable path", path.display()))?;
-        // Armed before the file exists, so no moment has a file the handler would not remove.
-        let old = TEMP_PATH.swap(c_path.into_raw(), Ordering::AcqRel);
-        if !old.is_null() {
-            // SAFETY: every value stored here came from `CString::into_raw`.
-            drop(unsafe { CString::from_raw(old) });
-        }
-        catch_signals();
-        let file = create_private(&path).map_err(|e| format!("creating {}: {e}", path.display()));
-        match file {
-            Ok(file) => Ok((Temp { path }, file)),
-            Err(why) => {
-                disarm();
-                Err(why)
+        for _ in 0..8 {
+            let n = SEQ.fetch_add(1, Ordering::Relaxed);
+            let path =
+                parent_of(destination).join(format!(".{name}.partial.{}.{n}", std::process::id()));
+            let c_path = CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| format!("{} is not a usable path", path.display()))?;
+            // Armed before the file exists, so no moment has a file the handler would not remove.
+            let old = TEMP_PATH.swap(c_path.into_raw(), Ordering::AcqRel);
+            if !old.is_null() {
+                // SAFETY: every value stored here came from `CString::into_raw`.
+                drop(unsafe { CString::from_raw(old) });
             }
+            catch_signals();
+            let file = match create_private(&path) {
+                Ok(file) => file,
+                Err(e) => {
+                    disarm();
+                    return Err(format!("creating {}: {e}", path.display()));
+                }
+            };
+            let held = match hold(&path, &file) {
+                Ok(true) => file.try_clone().ok(),
+                Ok(false) => {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                // No locks here. Nothing can sweep this file either, so it is safe to write.
+                Err(_) => None,
+            };
+            return Ok((Temp { path, _held: held }, file));
         }
+        disarm();
+        Err(format!(
+            "could not reserve a private file beside {}, so nothing was written.",
+            destination.display()
+        ))
     }
 
     /// Give it the destination's name, refusing if that name has been taken since the first check.
@@ -520,6 +606,7 @@ fn fingerprint(path: &Path) -> Result<(u64, Option<SystemTime>), String> {
 
 /// Encrypt the finished backup at `bundle` to `sealed`, leaving the backup where it is.
 pub fn migrate_seal(bundle: &Path, sealed: &Path, from: &PassphraseFrom) -> Result<String, String> {
+    remove_dead_temps(sealed);
     check_destination(sealed)?;
     if is_sealed(bundle) {
         return Err(format!(
@@ -595,6 +682,8 @@ pub fn migrate_unseal(
     bundle: &Path,
     from: &PassphraseFrom,
 ) -> Result<String, String> {
+    // First, so a run refused below still clears the plaintext a killed one left.
+    remove_dead_temps(bundle);
     check_destination(bundle)?;
     let mut source =
         File::open(sealed).map_err(|e| format!("opening {}: {e}", sealed.display()))?;
