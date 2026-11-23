@@ -28,9 +28,13 @@ use std::time::Duration;
 mod bundle;
 mod plan;
 mod receive;
+mod seal;
 mod send;
 pub use plan::migrate_plan;
 pub use receive::migrate_receive;
+pub use seal::{
+    migrate_seal, migrate_seal_command, migrate_unseal, migrate_unseal_command, PassphraseFrom,
+};
 pub use send::{migrate_send, SendOptions};
 
 /// The volume layout this binary understands.

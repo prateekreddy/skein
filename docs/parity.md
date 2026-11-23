@@ -34,7 +34,7 @@ grep -c '\.route('  src/bin/skein-server/main.rs               # 112  (NOT '.rou
 grep -oE 'id="[a-zA-Z0-9_-]+"' src/web/index.html | sort -u | wc -l   # 184 unique, 189 occurrences
 grep -c 'function ' src/web/index.html                          # 470
 grep -c 'CheckLabel::named(' src/health/report.rs              # 14 checks on the health banner
-sed -n '16,178p' src/bin/skein.rs                               # the dispatch: subcommands and flags
+sed -n '16,184p' src/bin/skein.rs                               # the dispatch: subcommands and flags
 ```
 
 **Line citations below are grep-able rather than numbered wherever a name exists**, because the

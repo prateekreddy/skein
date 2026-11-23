@@ -1118,3 +1118,532 @@ fn an_unreadable_file_refuses_unless_told_and_is_then_named() {
     assert!(said.contains("UNREADABLE, so NOT backed up (1)"), "{said}");
     assert!(said.contains("fleet/no-tree-dir/locked"), "{said}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// `seal` and `unseal`
+// ---------------------------------------------------------------------------------------------
+
+const PASSPHRASE: &str = "skein-test-correct-horse-battery";
+const CARRIED: &str = "PLAINTEXT-THE-BUNDLE-DOES-CARRY";
+
+/// A backup holding `CARRIED`, and a passphrase file kept away from it.
+fn sealable(tag: &str) -> (Fixture, PathBuf) {
+    let fx = fixture(tag);
+    write(&fx.root.join("box-one/tree/carried.txt"), CARRIED);
+    fx.send();
+    let phrase = fx.base.join("keys/phrase");
+    write(&phrase, &format!("{PASSPHRASE}\n"));
+    (fx, phrase)
+}
+
+fn sealed_path(fx: &Fixture) -> PathBuf {
+    fx.base.join("out/skein.sealed")
+}
+
+fn unsealed_path(fx: &Fixture) -> PathBuf {
+    fx.base.join("out/skein.unsealed")
+}
+
+fn seal(fx: &Fixture, phrase: &Path) -> Output {
+    fx.skein(&[
+        "migrate",
+        "seal",
+        fx.bundle().to_str().unwrap(),
+        sealed_path(fx).to_str().unwrap(),
+        "--passphrase-file",
+        phrase.to_str().unwrap(),
+    ])
+}
+
+fn unseal(fx: &Fixture, from: &Path, phrase: &Path) -> Output {
+    fx.skein(&[
+        "migrate",
+        "unseal",
+        from.to_str().unwrap(),
+        unsealed_path(fx).to_str().unwrap(),
+        "--passphrase-file",
+        phrase.to_str().unwrap(),
+    ])
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Fails if seal, unseal or receive changes one byte of the work, or seal removes the plain file
+/// or stops saying it is still there.
+#[test]
+fn a_sealed_backup_restores_to_identical_work() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-round");
+    let plain = fs::read(fx.bundle()).unwrap();
+    assert!(contains(&plain, CARRIED.as_bytes()), "no plaintext to hide");
+
+    let out = seal(&fx, &phrase);
+    assert!(out.status.success(), "seal failed: {out:?}");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("still at") && said.contains("NOT encrypted"),
+        "{said}"
+    );
+    assert_eq!(
+        fs::read(fx.bundle()).unwrap(),
+        plain,
+        "seal touched the plain file"
+    );
+    let mode = fs::metadata(sealed_path(&fx)).unwrap().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the sealed file is not private");
+
+    let out = unseal(&fx, &sealed_path(&fx), &phrase);
+    assert!(out.status.success(), "unseal failed: {out:?}");
+    assert_eq!(fs::read(unsealed_path(&fx)).unwrap(), plain);
+    let mode = fs::metadata(unsealed_path(&fx)).unwrap().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the unsealed file is not private");
+
+    let out = fx.receive_from(&unsealed_path(&fx));
+    assert!(out.status.success(), "receive failed: {out:?}");
+    let source = fx.root.join("box-one/tree");
+    let copy = fx.target().join("fleet/box-one/tree");
+    let (from, to) = (print_of(&source), print_of(&copy));
+    assert!(from.len() > 40, "the fixture is not populated");
+    assert_eq!(from, to, "the restored tree differs");
+}
+
+/// Fails if the sealed file holds plaintext or the passphrase, if anything else is left in the
+/// directory, or if the passphrase reaches any process's argv, a helper's included.
+#[test]
+fn neither_plaintext_nor_passphrase_is_in_the_sealed_file_or_argv() {
+    if !usable() {
+        return;
+    }
+    let (fx, _) = sealable("seal-leak");
+    // Unique to this run: `ps` reads the whole machine, where another process may be showing this
+    // file's source, and a fixed string would then match that.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let secret = format!("skein-test-{}-{nanos}", std::process::id());
+    let before = names_in(&fx.base.join("out"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skein"))
+        .args(["migrate", "seal"])
+        .arg(fx.bundle())
+        .arg(sealed_path(&fx))
+        .args(["--passphrase-fd", "0"])
+        .current_dir(&fx.base)
+        .env("SKEIN_HOME", &fx.home)
+        .env("SKEIN_FLEET_ROOT", &fx.root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let table = || {
+        let out = Command::new("ps")
+            .args(["-axww", "-o", "pid=,command="])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ps failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // Seen while it waits for the passphrase, so an empty process table cannot pass.
+    let pid = child.id().to_string();
+    let seen = (0..200).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        table()
+            .lines()
+            .any(|line| line.trim_start().starts_with(&format!("{pid} ")) && line.contains("seal"))
+    });
+    assert!(seen, "ps never showed the running seal");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(format!("{secret}\n").as_bytes()).unwrap();
+    }
+    while child.try_wait().unwrap().is_none() {
+        let listed = table();
+        assert!(
+            !listed.contains(&secret),
+            "the passphrase is in a process's argv"
+        );
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "seal failed: {out:?}");
+    assert!(!contains(&out.stdout, secret.as_bytes()));
+    assert!(!contains(&out.stderr, secret.as_bytes()));
+
+    let mut expected = before;
+    expected.push("skein.sealed".into());
+    expected.sort();
+    assert_eq!(
+        names_in(&fx.base.join("out")),
+        expected,
+        "something else was left"
+    );
+    let sealed = fs::read(sealed_path(&fx)).unwrap();
+    assert!(
+        !contains(&sealed, CARRIED.as_bytes()),
+        "plaintext in the sealed file"
+    );
+    assert!(
+        !contains(&sealed, secret.as_bytes()),
+        "passphrase in the sealed file"
+    );
+}
+
+/// Fails if a wrong passphrase, a flipped byte in the header or the body, or a cut at any depth
+/// leaves an output or temp file, or exits as though it worked.
+#[test]
+fn a_wrong_passphrase_or_damaged_file_writes_nothing() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-refuse");
+    let out = seal(&fx, &phrase);
+    assert!(out.status.success(), "seal failed: {out:?}");
+    let good = fs::read(sealed_path(&fx)).unwrap();
+    let damaged = fx.base.join("damaged/skein.sealed");
+    write(&damaged, "");
+    let listing = names_in(&fx.base.join("out"));
+    let refused = |bytes: &[u8], key: &Path, what: &str| {
+        fs::write(&damaged, bytes).unwrap();
+        let out = unseal(&fx, &damaged, key);
+        assert!(!out.status.success(), "{what} was accepted");
+        assert_eq!(
+            names_in(&fx.base.join("out")),
+            listing,
+            "{what} left a file"
+        );
+        assert_eq!(
+            names_in(&fx.base.join("damaged")),
+            ["skein.sealed"],
+            "{what}"
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let wrong = fx.base.join("keys/wrong");
+    write(&wrong, "skein-test-not-the-passphrase\n");
+    let said = refused(&good, &wrong, "a wrong passphrase");
+    assert!(said.contains("wrong passphrase"), "{said}");
+
+    let body = good.windows(4).position(|w| w == b"\n---").unwrap();
+    for (at, what) in [
+        (30, "a flipped header byte"),
+        (body + 60, "a flipped body byte"),
+        (good.len() - 1, "a flipped last byte"),
+    ] {
+        let mut bytes = good.clone();
+        bytes[at] ^= 0x01;
+        refused(&bytes, &phrase, what);
+    }
+    for (keep, what) in [
+        (good.len() - 1, "a file missing its last byte"),
+        (good.len() / 2, "a file cut in half"),
+        (body + 10, "a file cut after its header"),
+        (10, "a file cut inside its header"),
+    ] {
+        refused(&good[..keep], &phrase, what);
+    }
+
+    let out = unseal(&fx, &sealed_path(&fx), &phrase);
+    assert!(
+        out.status.success(),
+        "the undamaged file stopped opening: {out:?}"
+    );
+}
+
+/// Fails if either command opens its destination for overwriting, follows a dangling link there,
+/// or if `seal` accepts a backup `send` did not finish.
+#[test]
+fn seal_and_unseal_never_overwrite_and_refuse_a_partial_backup() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-exists");
+    fs::write(sealed_path(&fx), "precious").unwrap();
+    let out = seal(&fx, &phrase);
+    assert!(!out.status.success(), "seal overwrote a file");
+    assert_eq!(fs::read(sealed_path(&fx)).unwrap(), b"precious");
+    fs::remove_file(sealed_path(&fx)).unwrap();
+
+    let outside = fx.base.join("out/elsewhere");
+    symlink(&outside, sealed_path(&fx)).unwrap();
+    let out = seal(&fx, &phrase);
+    assert!(!out.status.success(), "seal wrote through a dangling link");
+    assert!(!outside.exists());
+    fs::remove_file(sealed_path(&fx)).unwrap();
+
+    let out = seal(&fx, &phrase);
+    assert!(out.status.success(), "seal failed: {out:?}");
+    fs::write(unsealed_path(&fx), "precious").unwrap();
+    let out = unseal(&fx, &sealed_path(&fx), &phrase);
+    assert!(!out.status.success(), "unseal overwrote a file");
+    assert_eq!(fs::read(unsealed_path(&fx)).unwrap(), b"precious");
+    fs::remove_file(unsealed_path(&fx)).unwrap();
+    fs::remove_file(sealed_path(&fx)).unwrap();
+
+    let whole = fs::read(fx.bundle()).unwrap();
+    fs::write(fx.bundle(), &whole[..whole.len() - 40]).unwrap();
+    let listing = names_in(&fx.base.join("out"));
+    let out = seal(&fx, &phrase);
+    assert!(!out.status.success(), "sealed a backup that was cut short");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a whole skein backup"));
+    assert_eq!(names_in(&fx.base.join("out")), listing);
+}
+
+/// Fails if `receive` starts on a sealed file, creates its target, or stops naming the command.
+#[test]
+fn receive_refuses_a_sealed_file_and_names_unseal() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-receive");
+    assert!(seal(&fx, &phrase).status.success());
+    let out = fx.receive_from(&sealed_path(&fx));
+    assert!(!out.status.success(), "receive accepted a sealed file");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("skein migrate unseal"), "{said}");
+    assert_eq!(
+        said.trim().matches(". ").count(),
+        0,
+        "not one sentence: {said}"
+    );
+    assert!(!fx.target().exists(), "receive created its target");
+}
+
+/// Fails if a passphrase file beside the backup is accepted, which is the storage this forbids.
+#[test]
+fn a_passphrase_file_beside_the_backup_is_refused() {
+    if !usable() {
+        return;
+    }
+    let (fx, _) = sealable("seal-beside");
+    let beside = fx.base.join("out/phrase");
+    write(&beside, &format!("{PASSPHRASE}\n"));
+    let listing = names_in(&fx.base.join("out"));
+    let out = seal(&fx, &beside);
+    assert!(
+        !out.status.success(),
+        "accepted a passphrase kept beside the backup"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("same directory"));
+    assert_eq!(names_in(&fx.base.join("out")), listing);
+}
+
+/// A terminal driven through a real pty.
+struct Terminal {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    writer: Box<dyn std::io::Write + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Terminal {
+    fn run(fx: &Fixture, args: &[&str]) -> Terminal {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_skein"));
+        command.args(args);
+        command.cwd(&fx.base);
+        command.env("SKEIN_HOME", &fx.home);
+        command.env("SKEIN_FLEET_ROOT", &fx.root);
+        let child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = pair.master.take_writer().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buffer = [0u8; 4096];
+            while let Ok(got) = reader.read(&mut buffer) {
+                if got == 0 {
+                    break;
+                }
+                sink.lock().unwrap().extend_from_slice(&buffer[..got]);
+            }
+        });
+        Terminal {
+            seen,
+            writer,
+            child,
+            _master: pair.master,
+        }
+    }
+
+    fn wait_for(&self, prompt: &str, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let text = String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned();
+            if text.matches(prompt).count() >= count {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no {prompt:?} in {text:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn answer(&mut self, prompt: &str, count: usize, line: &str) {
+        self.wait_for(prompt, count);
+        self.writer
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
+        self.writer.flush().unwrap();
+    }
+
+    fn finish(mut self) -> (bool, String) {
+        let status = self.child.wait().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let text = String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned();
+        (status.success(), text)
+    }
+}
+
+/// Fails if the prompt echoes, if seal asks only once, or if two different answers are accepted.
+#[test]
+fn the_prompt_does_not_echo_and_seal_asks_twice() {
+    if !usable() {
+        return;
+    }
+    let (fx, _) = sealable("seal-prompt");
+    let (bundle, sealed) = (fx.bundle(), sealed_path(&fx));
+    let args = [
+        "migrate",
+        "seal",
+        bundle.to_str().unwrap(),
+        sealed.to_str().unwrap(),
+    ];
+
+    let mut term = Terminal::run(&fx, &args);
+    term.answer("Passphrase: ", 1, PASSPHRASE);
+    term.answer("Passphrase again: ", 1, "skein-test-a-different-answer");
+    let (ok, text) = term.finish();
+    assert!(!ok, "two different answers were accepted: {text}");
+    assert!(text.contains("differ"), "{text}");
+    assert!(!sealed.exists());
+
+    let mut term = Terminal::run(&fx, &args);
+    term.answer("Passphrase: ", 1, PASSPHRASE);
+    term.answer("Passphrase again: ", 1, PASSPHRASE);
+    let (ok, text) = term.finish();
+    assert!(ok, "seal failed: {text}");
+    assert!(!text.contains(PASSPHRASE), "the terminal echoed it: {text}");
+
+    let unsealed = unsealed_path(&fx);
+    let args = [
+        "migrate",
+        "unseal",
+        sealed.to_str().unwrap(),
+        unsealed.to_str().unwrap(),
+    ];
+    let mut term = Terminal::run(&fx, &args);
+    term.answer("Passphrase: ", 1, PASSPHRASE);
+    let (ok, text) = term.finish();
+    assert!(ok, "unseal failed: {text}");
+    assert!(
+        !text.contains("Passphrase again"),
+        "unseal asked twice: {text}"
+    );
+    assert_eq!(fs::read(unsealed).unwrap(), fs::read(fx.bundle()).unwrap());
+}
+
+/// Fails if Ctrl-C at the prompt leaves the terminal with echo off, which is the person's shell
+/// afterwards. Echo is read as off first, so a prompt that never changed it cannot pass.
+#[test]
+fn an_interrupted_prompt_gives_the_terminal_its_echo_back() {
+    if !usable() {
+        return;
+    }
+    let (fx, _) = sealable("seal-ctrl-c");
+    let (bundle, sealed) = (fx.bundle(), sealed_path(&fx));
+    let mut term = Terminal::run(
+        &fx,
+        &[
+            "migrate",
+            "seal",
+            bundle.to_str().unwrap(),
+            sealed.to_str().unwrap(),
+        ],
+    );
+    let fd = term
+        ._master
+        .as_raw_fd()
+        .expect("a pty master has a descriptor");
+    let echoing = || {
+        let mut now = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `fd` is the open master and `now` is a valid out-pointer.
+        assert_eq!(unsafe { libc::tcgetattr(fd, now.as_mut_ptr()) }, 0);
+        // SAFETY: tcgetattr succeeded.
+        unsafe { now.assume_init() }.c_lflag & libc::ECHO != 0
+    };
+    term.wait_for("Passphrase: ", 1);
+    assert!(!echoing(), "echo was on at the prompt");
+    term.writer.write_all(b"\x03").unwrap();
+    term.writer.flush().unwrap();
+    let status = term.child.wait().unwrap();
+    assert!(!status.success(), "Ctrl-C did not stop it");
+    assert!(echoing(), "the terminal was left with echo off");
+    assert!(!sealed.exists());
+}
+
+/// Fails if an interrupted unseal leaves its temp behind, which would be plaintext on disk. The
+/// temp is seen to exist first, so a run that never made one cannot pass.
+#[test]
+fn an_interrupted_unseal_removes_its_temp() {
+    if !usable() {
+        return;
+    }
+    let (fx, phrase) = sealable("seal-signal");
+    assert!(seal(&fx, &phrase).status.success());
+    let sealed = fs::read(sealed_path(&fx)).unwrap();
+    fs::create_dir_all(fx.base.join("pipe")).unwrap();
+    let pipe = fx.base.join("pipe/sealed.fifo");
+    let c_pipe = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_pipe.as_ptr(), 0o600) }, 0);
+    let listing = names_in(&fx.base.join("out"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skein"))
+        .args(["migrate", "unseal"])
+        .arg(&pipe)
+        .arg(unsealed_path(&fx))
+        .arg("--passphrase-file")
+        .arg(&phrase)
+        .current_dir(&fx.base)
+        .env("SKEIN_HOME", &fx.home)
+        .env("SKEIN_FLEET_ROOT", &fx.root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut feed = fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+    std::io::Write::write_all(&mut feed, &sealed[..sealed.len() - 1]).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while names_in(&fx.base.join("out")) == listing {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no temp ever appeared"
+        );
+        assert!(child.try_wait().unwrap().is_none(), "unseal ended early");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // SAFETY: signalling a child this test still holds.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let status = child.wait().unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&status),
+        Some(libc::SIGTERM)
+    );
+    drop(feed);
+    assert_eq!(names_in(&fx.base.join("out")), listing, "the temp survived");
+}

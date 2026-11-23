@@ -75,24 +75,30 @@ fn main() {
         },
         "doctor" => cmd_doctor(),
         "announce" => cmd_announce(),
-        "migrate" => match rest.first().map(String::as_str) {
-            Some("plan") if rest.len() == 1 => {
-                skein::volume::migrate_plan().map(|report| println!("{report}"))
-            }
-            Some("plan") => Err(
-                "usage: skein migrate plan   (takes no arguments; to move the \
+        "migrate" => {
+            match rest.first().map(String::as_str) {
+                Some("plan") if rest.len() == 1 => {
+                    skein::volume::migrate_plan().map(|report| println!("{report}"))
+                }
+                Some("plan") => Err(
+                    "usage: skein migrate plan   (takes no arguments; to move the \
                  volume into a directory named plan, write ./plan)"
-                    .into(),
-            ),
-            Some("send") => cmd_migrate_send(&rest[1..]),
-            Some("receive") => cmd_migrate_receive(&rest[1..]),
-            Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
-            None => Err(
-                "usage: skein migrate <directory>   (the volume moves there; nothing is \
+                        .into(),
+                ),
+                Some("send") => cmd_migrate_send(&rest[1..]),
+                Some("receive") => cmd_migrate_receive(&rest[1..]),
+                Some("seal") => skein::volume::migrate_seal_command(&rest[1..])
+                    .map(|report| println!("{report}")),
+                Some("unseal") => skein::volume::migrate_unseal_command(&rest[1..])
+                    .map(|report| println!("{report}")),
+                Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
+                None => Err(
+                    "usage: skein migrate <directory>   (the volume moves there; nothing is \
                  deleted)"
-                    .into(),
-            ),
-        },
+                        .into(),
+                ),
+            }
+        }
         "fleet-owner" => cmd_fleet_owner(rest),
         "shared" => cmd_shared(rest),
         "start" => match rest.first() {
@@ -219,6 +225,10 @@ skein migrate send <file> [--leave-out-build-output] [--skip-unreadable]\n  \
                       back up this whole skein to one new file (only reads the fleet)\n  \
 skein migrate receive <file> --into <empty-dir>\n  \
                       restore a backup into an empty directory; rerun to resume\n  \
+skein migrate seal <bundle> <sealed-file> [--passphrase-fd <n> | --passphrase-file <path>]\n  \
+                      encrypt a finished backup under a passphrase (keeps the plain file)\n  \
+skein migrate unseal <sealed-file> <bundle> [--passphrase-fd <n> | --passphrase-file <path>]\n  \
+                      decrypt a sealed backup to a new file for `migrate receive`\n  \
 skein fleet-owner [claim <owner-id>]\n  \
                       show which fleet owns this volume, or take it from one that is gone\n  \
 skein repoint         after moving a volume by hand: point what it records at where it now is\n  \

@@ -747,7 +747,9 @@ depends_on = ["boxfile", "fleet", "place", "repos", "util"]
 # about the same move names one operation rather than two. No request is made from here — this
 # module reports and prints; a person runs it on the host.
 # `fence` because `ensure_volume` is where a server or CLI start learns it may not use this volume.
-depends_on = ["config", "fence", "fleet", "operation", "util", "warden_client"]
+# `secret` for `create_private`: `migrate seal` and `unseal` stream into a temp that must be 0600
+# from its creation, which is the one helper that promises it.
+depends_on = ["config", "fence", "fleet", "operation", "secret", "util", "warden_client"]
 
 [current.operation]
 # Nothing. The primitive is a shape — desired, a tri-state check, a printable recipe, a class — and

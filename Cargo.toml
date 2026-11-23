@@ -77,3 +77,14 @@ fs2 = "0.4"
 # load config from a local .env at startup, so the registry/repo paths don't have to be typed
 # on every invocation; real env vars set on the command line still win (dotenv never overrides).
 dotenvy = "0.15"
+# `skein migrate seal`: a backup holds conversations and .env files, and passphrase encryption is
+# not something to write by hand. No default features, so none of its plugin or ssh code.
+age = { version = "0.12", default-features = false }
+
+# scrypt is built to be slow, and unoptimised it is many times slower again: every seal test derives
+# a key more than once. This changes debug builds only.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3

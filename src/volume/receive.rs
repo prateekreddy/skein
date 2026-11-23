@@ -273,6 +273,12 @@ fn walk_units<R: Read + Seek>(
 /// Restore the backup at `file` into `into`, which must be empty or hold this backup's own
 /// unfinished restore.
 pub fn migrate_receive(file: &str, into: &str) -> Result<String, String> {
+    if super::seal::is_sealed(Path::new(file)) {
+        return Err(format!(
+            "{file} is sealed, so nothing was restored: run `skein migrate unseal <sealed-file> \
+             <bundle>` and receive the bundle it writes."
+        ));
+    }
     let into = Path::new(into);
     let bundle = fs::File::open(file).map_err(|e| format!("opening {file}: {e}"))?;
     let size = bundle.metadata().map_or(0, |m| m.len());
