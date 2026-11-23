@@ -142,7 +142,7 @@ EXPOSED = {
     "src/github.rs::config": "curl's config, fed to curl over stdin so the header never reaches argv",
     "src/apiauth.rs::stored": "handed to `skein doctor` as a String to print the cockpit URL. The "
     "?t= URL is Rule 4's open question (SKEIN-516), and this door closes when that is decided",
-    "src/bin/skein-server/main.rs::serve": "the cockpit URL, `?t=`, printed at start — the delivery "
+    "src/bin/skein-server/main.rs::listen": "the cockpit URL, `?t=`, printed at start — the delivery "
     "channel Rule 4 says becomes a one-time exchange. That changes what a person opens, so it "
     "waits for the owner (SKEIN-516)",
     "src/gitgate/credentials.rs::gh_login": "the remembered `gh` login copied into a fresh Secret "

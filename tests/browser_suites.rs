@@ -128,7 +128,7 @@ const NODE_SUITES: [&str; 25] = [
 ];
 
 /// Needs Playwright's chromium as well.
-const BROWSER_SUITES: [&str; 21] = [
+const BROWSER_SUITES: [&str; 22] = [
     "actfail",
     // Adding a private repository from the add dialog, with a pasted token and with the token
     // another repo has: the clone uses the token chosen, a refused one is never saved, a share
@@ -181,6 +181,9 @@ const BROWSER_SUITES: [&str; 21] = [
     // card is the exact defect — and because the recovery it measures arrives on the page's own
     // `EventSource`.
     "recovery",
+    // A fleet that does not own its volume: the banner on both pages, the confirmation, a stale
+    // owner refused, and a take-over that brings the cockpit back (SKEIN-1539).
+    "fence",
     // "Restart on new build" against a real doorway: an old build running, a new one installed, one
     // click, and the same page served by the new build; and a server with no doorway, which is
     // told so rather than sent anything (SKEIN-1029).

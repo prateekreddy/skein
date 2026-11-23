@@ -307,7 +307,8 @@ depends_on = ["agentpath", "ai", "announce", "apiauth", "board", "config", "fenc
 #
 # `diskask` for one route: the owner's approve or deny on a box's disk ask, from its row in the
 # decision inbox (SKEIN-1425).
-depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "diskask", "dockerd", "doorway", "files", "fleet", "gitgate", "health", "jobs", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "resource_signal", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client"]
+# `fence` because a server that does not own the volume serves only the take-over (`fenced.rs`).
+depends_on = ["act", "ai", "announce", "apiauth", "asks", "assets", "board", "cockpit", "config", "diff", "digest", "diskask", "dockerd", "doorway", "fence", "files", "fleet", "gitgate", "health", "jobs", "kit", "knock", "machine", "mailbox", "moduledocs", "place", "probes", "prq", "queue", "repos", "resource_signal", "runtime", "sandbox", "sbx", "shape", "stream", "substrate", "tracking", "transcript", "update", "usage", "util", "volume", "warden_client"]
 
 [current.knock]
 # Nothing. The doorstep hands out places and takes them back; it knows nothing about sockets,

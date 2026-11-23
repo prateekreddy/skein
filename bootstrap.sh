@@ -865,11 +865,15 @@ if [ -f "$receive_marker" ]; then
 fi
 
 # Only exit 3 is a fence. Adopts a volume nothing owns, which is what an upgrade of a live fleet does.
+# A fenced install still opens the door, because the cockpit is where it is taken over, and writes
+# nothing to the volume: the log is held and the fleet kit below is left as the owner wrote it.
 fence_rc=0
 fence_said=$(SKEIN_HOME="$skein_home" SKEIN_FLEET_ROOT="$fleet_root" "$skein_dir/skein" fleet-owner check 2>&1) || fence_rc=$?
 if [ "$fence_rc" = 3 ]; then
   printf '%s\n' "$fence_said" | sed 's/^/skein: /' >&2
-  exit 1
+  mkdir -p "$private"
+  chmod 700 "$private"
+  : > "$private/fenced"
 fi
 
 # ---- the door, which is opened before anything is put behind it ----------------------------------
@@ -967,7 +971,7 @@ fi
 log_max=10485760
 supervise="while [ -f '$doorway' ]; do \
 began=\$(date +%s); \
-skein_logged '$skein_home/server.log' $log_max env SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
+SKEIN_LOG_HOLD='$private/fenced' skein_logged '$skein_home/server.log' $log_max env SKEIN_HOME='$skein_home' python3 '$doorway' '$port' '$server' '$stamp'; \
 [ \$((\$(date +%s) - began)) -lt 5 ] && sleep 2; \
 done"
 
@@ -1083,6 +1087,8 @@ skein_door_reload() {
 # doorway as the child of the pane's shell, and a pipeline would make it a grandchild. The reader
 # is not waited for, because something the server started can hold its output open and the
 # supervisor must not hang on that. If the FIFO cannot be made, COMMAND runs unlogged.
+# While the file `$SKEIN_LOG_HOLD` names exists, lines are printed and not kept: a fleet that does
+# not own the volume must not write to it.
 # `PYTHONUNBUFFERED`, because the doorway is python and would otherwise hold its lines back.
 skein_logged() {
   _log_file=$1
@@ -1093,6 +1099,7 @@ skein_logged() {
       _log_n=$(($(cat "$_log_file" 2>/dev/null | wc -c) + 0))
       while IFS= read -r _log_line || [ -n "$_log_line" ]; do
         printf '%s\n' "$_log_line"
+        [ -e "${SKEIN_LOG_HOLD:-}" ] && continue
         printf '%s\n' "$_log_line" >>"$_log_file"
         _log_n=$((_log_n + ${#_log_line} + 1))
         if [ "$_log_n" -gt "$_log_max" ]; then
@@ -1198,6 +1205,7 @@ mv "$skein_dir/start-door.sh.new" "$skein_dir/start-door.sh"
 # the fleet. The heredoc is QUOTED for start-door.sh's reason: nothing here is interpolated, and the
 # fleet root is written in literally because that is what the running sandbox will be.
 fleet_kit="$skein_home/fleet-kit"
+if [ "$fence_rc" != 3 ]; then
 mkdir -p "$fleet_kit"
 cat > "$fleet_kit/spec.yaml.new" <<'KITEOF'
 schemaVersion: "1"
@@ -1235,6 +1243,7 @@ commands:
       description: Put the cockpit's door back after a sandbox start
 KITEOF
 mv "$fleet_kit/spec.yaml.new" "$fleet_kit/spec.yaml"
+fi
 
 "$skein_dir/start-door.sh"
 

@@ -107,32 +107,58 @@ pub fn schema_of(home: &Path) -> Option<u32> {
 /// Called once at startup by both binaries. Every refusal names the fix, because each of them is a
 /// state somebody can be in for a perfectly good reason.
 pub fn ensure_volume() -> Result<(), String> {
-    ensure_volume_unfenced()?;
-    crate::fence::ensure_owner(&skein_home(), true)
+    let home = skein_home();
+    refuse_unusable(&home)?;
+    crate::fence::ensure_owner(&home, true)?;
+    ensure_volume_unfenced()
 }
 
 /// [`ensure_volume`] without the owner check, for the commands a fenced fleet must still run.
 pub fn ensure_volume_unfenced() -> Result<(), String> {
     let home = skein_home();
+    refuse_unusable(&home)?;
+    // What follows stamps the volume, which is its owner's to do.
+    if matches!(
+        crate::fence::standing(&home),
+        crate::fence::Standing::Fenced(_) | crate::fence::Standing::Receiving
+    ) {
+        return Ok(());
+    }
+    match schema_of(&home) {
+        Some(_) => opened_where_it_was_written(&home),
+        // No VERSION: an installation made before versioning existed. Adopting it is the whole of
+        // the upgrade — nothing about its layout differs from schema 1, which is what schema 1 was
+        // defined to be.
+        None => {
+            if !home.is_dir() {
+                return Ok(()); // nothing here yet; the first write makes it
+            }
+            stamp(&home)
+        }
+    }
+}
+
+/// Every refusal [`ensure_volume`] makes without writing anything.
+pub fn refuse_unusable(home: &Path) -> Result<(), String> {
     if let Some(target) = moved_to() {
         return Err(format!(
             "this installation was moved to {target}, and $SKEIN_HOME still points at {}.\n\
              Set it and try again:  export SKEIN_HOME={target}\n\
              Or, if you meant to keep using this one:  rm {}",
             home.display(),
-            moved_path(&home).display()
+            moved_path(home).display()
         ));
     }
-    if migrating_path(&home).exists() {
+    if migrating_path(home).exists() {
         return Err(format!(
             "{} holds a half-finished move: something copied into it and did not finish, so what \
              is there is not a whole installation.\n\
              Delete it and move again, or remove {} if you know the copy completed.",
             home.display(),
-            migrating_path(&home).display()
+            migrating_path(home).display()
         ));
     }
-    match schema_of(&home) {
+    match schema_of(home) {
         Some(found) if found > SCHEMA => Err(format!(
             "{} was written by a newer skein (volume schema {found}; this one understands {SCHEMA}).\n\
              Upgrade skein, or point $SKEIN_HOME at another volume. Reading it anyway would drop \
@@ -146,16 +172,7 @@ pub fn ensure_volume_unfenced() -> Result<(), String> {
              them. Use a skein that understands {found}.",
             home.display()
         )),
-        Some(_) => opened_where_it_was_written(&home),
-        // No VERSION: an installation made before versioning existed. Adopting it is the whole of
-        // the upgrade — nothing about its layout differs from schema 1, which is what schema 1 was
-        // defined to be.
-        None => {
-            if !home.is_dir() {
-                return Ok(()); // nothing here yet; the first write makes it
-            }
-            stamp(&home)
-        }
+        _ => Ok(()),
     }
 }
 

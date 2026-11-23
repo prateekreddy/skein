@@ -82,6 +82,8 @@ skein_door_reload() {
 # doorway as the child of the pane's shell, and a pipeline would make it a grandchild. The reader
 # is not waited for, because something the server started can hold its output open and the
 # supervisor must not hang on that. If the FIFO cannot be made, COMMAND runs unlogged.
+# While the file `$SKEIN_LOG_HOLD` names exists, lines are printed and not kept: a fleet that does
+# not own the volume must not write to it.
 # `PYTHONUNBUFFERED`, because the doorway is python and would otherwise hold its lines back.
 skein_logged() {
   _log_file=$1
@@ -92,6 +94,7 @@ skein_logged() {
       _log_n=$(($(cat "$_log_file" 2>/dev/null | wc -c) + 0))
       while IFS= read -r _log_line || [ -n "$_log_line" ]; do
         printf '%s\n' "$_log_line"
+        [ -e "${SKEIN_LOG_HOLD:-}" ] && continue
         printf '%s\n' "$_log_line" >>"$_log_file"
         _log_n=$((_log_n + ${#_log_line} + 1))
         if [ "$_log_n" -gt "$_log_max" ]; then

@@ -41,6 +41,7 @@ mod asks;
 mod boxes;
 mod door;
 mod events;
+mod fenced;
 mod fleet;
 mod git;
 mod health;
@@ -135,6 +136,23 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // Pick up a local .env so the registry/repo paths needn't be typed each run (real env vars
     // still win; a malformed file is reported, not silently half-applied). See skein::util::load_dotenv.
     skein::util::load_dotenv();
+    // Before anything below can write. A fleet that does not own the volume serves the take-over
+    // banner from a router of its own, and starts none of the work that follows.
+    let home = skein::config::skein_home();
+    if let skein::fence::Standing::Fenced(owner) = skein::fence::standing(&home) {
+        if let Err(e) = skein::volume::refuse_unusable(&home) {
+            eprintln!("skein-server: {e}");
+            std::process::exit(1);
+        }
+        skein::apiauth::never_mint();
+        skein::fence::hold_log();
+        eprintln!(
+            "skein-server: fleet {} on {} owns this volume, so this cockpit only offers a take-over",
+            owner.fleet_id, owner.machine
+        );
+        return listen(fenced::router(), handed, listen_addr()).await;
+    }
+    skein::fence::release_log();
     // Before the probe install, the kit and the port: those all write to the volume, and a volume
     // this binary does not understand must be refused rather than written to. `load_dotenv` comes
     // first because $SKEIN_HOME may be in the .env, and checking the wrong volume proves nothing.
@@ -345,14 +363,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // like `SKEIN_ADDR=<tailnet-ip>:7878`. The terminal's origin guard already trusts `*.ts.net` and
     // tailnet IPs, so either the `tailscale serve` hostname or a raw off-loopback bind works with no
     // per-host config; the tailnet is the auth boundary in both cases (see README "Remote access").
-    // Mutable because a socket that was handed in is already bound, and to somewhere: the address
-    // printed below has to be the one a browser can reach, not the one this process would have
-    // chosen. `$SKEIN_ADDR` decides where to bind; an inherited descriptor decides nothing and
-    // reports.
-    let mut addr = std::env::var("SKEIN_ADDR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_ADDR.into());
+    let addr = listen_addr();
     let app = Router::new()
         .route("/", get(index))
         // Beside `/`, not instead of it: the cutover is its own change, and a reversible one.
@@ -364,6 +375,7 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         // The cockpit's own pure functions, built from `cockpit/src`. Served the same way as the
         // vendored ones because it is the same kind of thing: bytes the page needs, in the binary.
         .route("/vendor/cockpit.js", get(|| asset("cockpit.js")))
+        .route("/vendor/fence.js", get(|| asset("fence.js")))
         // One route, no code per file. This is what a built bundle is served by.
         .route("/assets/*path", get(any_asset))
         .route("/api/boxes/:name/files", get(api_files))
@@ -411,6 +423,8 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
         .route("/api/repos/:id/review/:number/shape", get(api_pr_shape))
         .route("/api/boxes/:name/shape", get(api_box_shape))
         .route("/api/settings", get(api_settings).post(api_set_settings))
+        .route("/api/fleet/owner", get(fenced::api_fleet_owner))
+        .route("/api/fleet/take-over", post(fenced::api_take_over))
         .route("/api/fleet/plan", get(api_fleet_plan))
         .route("/api/fleet/create", post(api_fleet_create))
         .route("/api/fleet/resize", post(api_fleet_resize))
@@ -556,6 +570,20 @@ async fn serve(handed: Result<Option<std::os::fd::RawFd>, String>) {
     // needing it.
     let app = app.layer(axum::middleware::from_fn(security_headers));
 
+    listen(app, handed, addr).await
+}
+
+/// `$SKEIN_ADDR`, or the default. An inherited socket overrides it in [`listen`], because the
+/// address printed has to be the one a browser can reach.
+fn listen_addr() -> String {
+    std::env::var("SKEIN_ADDR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_ADDR.into())
+}
+
+/// Take the socket and serve `app` on it for ever.
+async fn listen(app: Router, handed: Result<Option<std::os::fd::RawFd>, String>, mut addr: String) {
     // The socket, and who opened it. `skein::doorway` says why this is not simply a bind: one
     // network namespace plus a port mapping that outlives skein means a box that binds the
     // cockpit's port *first* becomes the cockpit, and the browser hands it the fleet's token on the
@@ -1392,13 +1420,17 @@ mod cockpit_routes {
     /// change. It survived because this list named only the two HTML files, and two tests asserted
     /// the broken string rather than the route table. One list, used by both gates, so the bundle
     /// cannot fall out of one of them.
-    fn scanned() -> [(&'static str, &'static str); 3] {
+    fn scanned() -> [(&'static str, &'static str); 4] {
         [
             ("src/web/index.html", include_str!("../../web/index.html")),
             ("src/web/v2.html", include_str!("../../web/v2.html")),
             (
                 "src/web/vendor/cockpit.js",
                 include_str!("../../web/vendor/cockpit.js"),
+            ),
+            (
+                "src/web/vendor/fence.js",
+                include_str!("../../web/vendor/fence.js"),
             ),
         ]
     }

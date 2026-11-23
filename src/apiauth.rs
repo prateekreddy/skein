@@ -196,6 +196,14 @@ pub fn stored() -> Option<String> {
         .map(|s| s.expose().to_string())
 }
 
+/// Set for the life of a fenced server, which must not write a token to another fleet's volume.
+static NEVER_MINT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// From here on this process only reads the token.
+pub fn never_mint() {
+    NEVER_MINT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The fleet's API token as a [`crate::secret::Secret`], minting one on first use.
 ///
 /// 32 bytes from the kernel, hex — 256 bits, so guessing is not a threat model anyone has to think
@@ -211,6 +219,9 @@ fn minted() -> Result<crate::secret::Secret, String> {
     // than a refactor.
     if let Ok(Some(existing)) = crate::secret::read(&path) {
         return Ok(existing);
+    }
+    if NEVER_MINT.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("this fleet does not own the volume, so it mints no token there".to_string());
     }
     let home = crate::config::skein_home();
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;

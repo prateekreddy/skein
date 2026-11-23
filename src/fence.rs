@@ -25,6 +25,9 @@ const RECEIVE_MARKER: &str = "receive-mode";
 /// How `skein fleet-owner check` reports a fence, so `bootstrap.sh` can tell it from anything else.
 pub const FENCED_EXIT: i32 = 3;
 
+/// Inside `.skein/private`, while this fleet's server may not write its log to the volume.
+const LOG_HOLD: &str = "fenced";
+
 /// The fleet a volume belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Owner {
@@ -259,8 +262,8 @@ fn fenced(home: &Path, dot: &Path, owner: &Owner) -> String {
          It belongs to fleet {id} on {machine} (epoch {epoch}); this fleet is {mine}. Two fleets \
          on one volume would run the same boxes, so nothing was started.\n\
          If that fleet is still running, use it, or stop it first.\n\
-         If it is gone, for example because this sandbox was rebuilt and lost its id, run this \
-         inside this sandbox and start skein again:\n  \
+         If it is gone, for example because this sandbox was rebuilt and lost its id, press Take \
+         over this fleet in the cockpit, or run this inside this sandbox and start skein again:\n  \
          {skein} fleet-owner claim {id}",
         home = home.display(),
         id = owner.fleet_id,
@@ -384,6 +387,109 @@ pub fn claim(home: &Path, from: &str) -> Result<String, String> {
         home.display(),
         now.epoch
     ))
+}
+
+/// What this fleet is to the volume, read without writing anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// No owner yet, or no fleet here to compare.
+    Free,
+    Owner(Owner),
+    /// Another fleet owns the volume.
+    Fenced(Owner),
+    /// In receive mode, and not the owner.
+    Receiving,
+    Unreadable(String),
+}
+
+/// This process's standing on the volume at `home`.
+pub fn standing(home: &Path) -> Standing {
+    let Some(dot) = fleet_dir() else {
+        return Standing::Free;
+    };
+    if !home.is_dir() {
+        return Standing::Free;
+    }
+    match read_owner(home) {
+        Err(why) => Standing::Unreadable(why),
+        Ok(Some(owner)) if fleet_id_in(&dot).as_deref() == Some(owner.fleet_id.as_str()) => {
+            Standing::Owner(owner)
+        }
+        Ok(_) if dot.join(RECEIVE_MARKER).exists() => Standing::Receiving,
+        Ok(Some(owner)) => Standing::Fenced(owner),
+        Ok(None) => Standing::Free,
+    }
+}
+
+/// This fleet's id, if it has one. Never mints.
+pub fn fleet_id_here() -> Option<String> {
+    fleet_id_in(&fleet_dir()?)
+}
+
+/// The CLI line that does what the cockpit's button does.
+pub fn claim_command(owner: &Owner) -> Option<String> {
+    Some(format!(
+        "{} fleet-owner claim {}",
+        fleet_dir()?.join("skein").display(),
+        owner.fleet_id
+    ))
+}
+
+/// Stop the log reader writing to the volume. VM-local, and written before the server prints.
+pub fn hold_log() {
+    if let Some(dot) = fleet_dir() {
+        let private = dot.join("private");
+        if fs::create_dir_all(&private).is_ok() {
+            let _ = fs::write(private.join(LOG_HOLD), "");
+        }
+    }
+}
+
+/// Let the log reader write to the volume again.
+pub fn release_log() {
+    if let Some(dot) = fleet_dir() {
+        let _ = fs::remove_file(dot.join("private").join(LOG_HOLD));
+    }
+}
+
+/// What a take-over did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Took {
+    /// This fleet is now the owner.
+    Now(Owner),
+    /// It already was, so nothing changed.
+    Already(Owner),
+}
+
+/// Why a take-over was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TakeOverError {
+    /// The volume is no longer held by the owner the person was shown.
+    Stale(Option<Owner>),
+    Failed(String),
+}
+
+/// Take the volume from the owner the person was shown, and only from that owner.
+pub fn take_over(home: &Path, fleet_id: &str, epoch: u64) -> Result<Took, TakeOverError> {
+    let dot = fleet_dir().ok_or_else(|| TakeOverError::Failed("no fleet root is set".into()))?;
+    let current = read_owner(home).map_err(TakeOverError::Failed)?;
+    let Some(owner) = current else {
+        return Err(TakeOverError::Stale(None));
+    };
+    if fleet_id_in(&dot).as_deref() == Some(owner.fleet_id.as_str()) {
+        return Ok(Took::Already(owner));
+    }
+    if owner.fleet_id != fleet_id || owner.epoch != epoch {
+        return Err(TakeOverError::Stale(Some(owner)));
+    }
+    fs::create_dir_all(&dot).map_err(|e| TakeOverError::Failed(format!("{e}")))?;
+    let mine = ensure_fleet_id(&dot).map_err(TakeOverError::Failed)?;
+    let now = flip(home, Some(&owner), &mine, &this_machine()).map_err(|e| match e {
+        FlipError::Lost(held) => TakeOverError::Stale(held),
+        FlipError::Failed(why) => TakeOverError::Failed(why),
+    })?;
+    let _ = fs::remove_file(dot.join(RECEIVE_MARKER));
+    Ok(Took::Now(now))
 }
 
 /// One line for `skein doctor` and `skein fleet-owner`.

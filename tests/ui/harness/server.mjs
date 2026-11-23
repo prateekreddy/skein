@@ -329,7 +329,7 @@ function fixtureTmuxDir(base) {
  * and only the removal is conditional. `fixtureScopes` says why the kill cannot reach another
  * agent's run.
  */
-export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100, program = null }) {
+export async function startServer({ door, env = {}, token = "", cwd = REPO, tries = 100, program = null, ready = "/api/boxes" }) {
   const { port } = door;
   // First, so a suite that pinned neither path is refused before anything is written or started.
   const base = fixtureBase(env);
@@ -454,7 +454,7 @@ export async function startServer({ door, env = {}, token = "", cwd = REPO, trie
     // reading acme: …` when a mirror cannot be made), and a suite that swallows that sentence makes
     // every downstream check fail without its diagnosis.
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/boxes`, { headers, signal: AbortSignal.timeout(2000) });
+      const r = await fetch(`http://127.0.0.1:${port}${ready}`, { headers, signal: AbortSignal.timeout(2000) });
       if (r.ok) return { srv, log: () => log };
     } catch {}
     await new Promise(r => setTimeout(r, 100));

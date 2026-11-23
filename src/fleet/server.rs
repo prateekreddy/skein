@@ -102,8 +102,12 @@ pub fn server_log_path() -> String {
 /// reader and its reasons live in door.sh, because start-door.sh runs the same supervisor before
 /// any skein binary exists and carries that file byte for byte (SKEIN-1317); a script that calls
 /// this must start with [`DOOR_SH`] so the function is defined.
-fn logged(argv: &str, log: &str, max: u64) -> String {
-    format!("skein_logged {} {max} {argv};", sh_quote(log))
+fn logged(argv: &str, log: &str, hold: &str, max: u64) -> String {
+    format!(
+        "SKEIN_LOG_HOLD={} skein_logged {} {max} {argv};",
+        sh_quote(hold),
+        sh_quote(log)
+    )
 }
 
 /// A supervisor loop around `script`: run `body` for ever, and stop when `script` itself is gone.
@@ -478,6 +482,7 @@ fn server_supervisor() -> String {
                     stamp = sh_quote(&server_door_stamp_path()),
                 ),
                 &server_log_path(),
+                &format!("{}/fenced", fleet_private_dir()),
                 SERVER_LOG_MAX,
             ),
         ),
@@ -921,6 +926,7 @@ mod tests {
                         logged(
                             &format!("sh -c {}", sh_quote(command)),
                             &log.to_string_lossy(),
+                            &dir.join("held").to_string_lossy(),
                             64
                         )
                     ),

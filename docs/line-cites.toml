@@ -69,7 +69,7 @@ line = "|---|---|"
 window = "| architecture said | code says |\u000b|---|---|\u000b| no displayed state from an edge alone | …without saying so (§5) |"
 cited_by = ["docs/prose-symbols.toml"]
 
-["docs/modules.toml:518"]
+["docs/modules.toml:519"]
 line = "# (`seed_shared_paths`, `record_repo_source`) and for `write_atomic` to record where that checkout"
 cited_by = ["docs/prose-symbols.toml"]
 
@@ -243,55 +243,56 @@ cited_by = ["docs/recovery-survey.md"]
 line = "sbx: skein::health::HealthCheck::unknown(\"the health check itself failed\"),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:131"]
+["src/bin/skein-server/main.rs:132"]
 line = "eprintln!(\"skein-server: {msg}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:142"]
+["src/bin/skein-server/main.rs:160"]
 line = "eprintln!(\"skein-server: {e}\");"
+window = "if let Err(e) = skein::volume::ensure_volume() {\u000beprintln!(\"skein-server: {e}\");\u000bstd::process::exit(1);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:148"]
+["src/bin/skein-server/main.rs:166"]
 line = "eprintln!(\"skein: turn-state probe not installed ({e}); boxes will show live/stale only\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:154"]
+["src/bin/skein-server/main.rs:172"]
 line = "eprintln!(\"skein: ensure_fleet_kit: {e}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:157"]
+["src/bin/skein-server/main.rs:175"]
 line = "eprintln!(\"skein: kit not installed ({e}); boxes will fail to provision\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:164"]
+["src/bin/skein-server/main.rs:182"]
 line = "eprintln!(\"skein: could not heal the fleet sandbox ({e}); boxes may start with a stale launcher or stale ceilings\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:172"]
+["src/bin/skein-server/main.rs:190"]
 line = "// to be the agent's, on exactly that reasoning, and moved here rather than being deleted with"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:185"]
+["src/bin/skein-server/main.rs:203"]
 line = "\"skein: the docker watchdog could not be started ({e}); a dockerd that dies will \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:255"]
+["src/bin/skein-server/main.rs:273"]
 line = "eprintln!(\"skein: {}\", skein::health::warden_report().detail);"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:577"]
+["src/bin/skein-server/main.rs:605"]
 line = "eprintln!(\"{}\", skein::doorway::missing());"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:587"]
+["src/bin/skein-server/main.rs:615"]
 line = "eprintln!(\"skein-server: {why}\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:678"]
+["src/bin/skein-server/main.rs:706"]
 line = "\"skein-server: cannot accept connections ({e}) — {refused} in a row. The \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/bin/skein-server/main.rs:684"]
+["src/bin/skein-server/main.rs:712"]
 line = "\"skein-server: {refused} consecutive accept failures ({e}) and not one \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1271,19 +1272,19 @@ cited_by = ["docs/recovery-survey.md"]
 line = "fn parse_resources(out: &str) -> Option<FleetResources> {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:162"]
+["src/fleet/server.rs:166"]
 line = "return Err(format!(\"invalid session name {session:?}\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:247"]
+["src/fleet/server.rs:251"]
 line = "/// session; the same call with a short one created it. `MAX_IMSGSIZE` is 16384 and the header eats"
 cited_by = ["docs/prose-symbols.toml"]
 
-["src/fleet/server.rs:387"]
+["src/fleet/server.rs:391"]
 line = "fn door_settles(sandbox: &str, port: u16) -> bool {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/server.rs:626"]
+["src/fleet/server.rs:631"]
 line = "\"the cockpit's port :{port} in {sandbox} is not held by the doorway, so do not publish \\"
 cited_by = ["docs/recovery-survey.md"]
 
@@ -1844,51 +1845,51 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:118"]
+["src/volume.rs:144"]
 line = "return Err(format!("
 window = "if let Some(target) = moved_to() {\u000breturn Err(format!(\u000b\"this installation was moved to {target}, and $SKEIN_HOME still points at {}.\\n\\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:127"]
+["src/volume.rs:153"]
 line = "return Err(format!("
-window = "if migrating_path(&home).exists() {\u000breturn Err(format!(\u000b\"{} holds a half-finished move: something copied into it and did not finish, so what \\"
+window = "if migrating_path(home).exists() {\u000breturn Err(format!(\u000b\"{} holds a half-finished move: something copied into it and did not finish, so what \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:136"]
+["src/volume.rs:162"]
 line = "Some(found) if found > SCHEMA => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:144"]
+["src/volume.rs:170"]
 line = "Some(found) if found < SCHEMA => Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:196"]
+["src/volume.rs:213"]
 line = "Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:450"]
+["src/volume.rs:467"]
 line = "// on the commonest refusal (the fleet is up, which is now always) it left one on every attempt."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:479"]
+["src/volume.rs:496"]
 line = "\"{} already holds a skein installation ({marker} is there). Move onto an empty \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:499"]
+["src/volume.rs:516"]
 line = "return Err(format!("
 window = "// they are told to type cannot drift from what the warden would run.\u000breturn Err(format!(\u000b\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:500"]
+["src/volume.rs:517"]
 line = "\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:544"]
+["src/volume.rs:561"]
 line = "return Err(format!("
 window = "if have < want {\u000breturn Err(format!(\u000b\"{} has {} free and this needs about {} ({} plus a tenth). Free some room or choose \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:572"]
+["src/volume.rs:589"]
 line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]
@@ -2162,39 +2163,39 @@ cited_by = ["docs/recovery-survey.md"]
 line = ".catch(() => toast(\"send failed\"));"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:257"]
+["src/web/v2.html:258"]
 line = "events.onerror = () => { events.close(); setTimeout(follow, 4000); };"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:325"]
+["src/web/v2.html:326"]
 line = "changeEl.innerHTML = `<div class=\"csum\">${esc(body.error || \"the change could not be read\")}</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:330"]
+["src/web/v2.html:331"]
 line = "changeEl.innerHTML = `<div class=\"csum\">the change could not be read</div>`;"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:382"]
+["src/web/v2.html:383"]
 line = "ws.onclose = () => term.write(\"\\r\\n\\x1b[2m— disconnected —\\x1b[0m\\r\\n\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:457"]
+["src/web/v2.html:458"]
 line = "said(\"addsaid\", body.error || (await answer.text?.()) || \"it could not be added\", \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/web/v2.html:515"]
+["src/web/v2.html:516"]
 line = "said(\"makesaid\", body.error || `it was not accepted (${answer.status})`, \"warm\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["tests/common/mod.rs:979"]
+["tests/common/mod.rs:981"]
 line = "pub fn env_pins() -> EnvPins {"
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1017"]
+["tests/common/mod.rs:1019"]
 line = "/// Set `name` to `value`, or remove it when there is no value."
 cited_by = ["docs/env-lock.toml"]
 
-["tests/common/mod.rs:1031"]
+["tests/common/mod.rs:1033"]
 line = "fn put(name: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {"
 cited_by = ["docs/env-lock.toml"]
 
