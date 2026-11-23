@@ -79,7 +79,7 @@ fs2 = "0.4"
 dotenvy = "0.15"
 # `skein migrate seal`: a backup holds conversations and .env files, and passphrase encryption is
 # not something to write by hand. No default features, so none of its plugin or ssh code.
-age = { version = "0.12", default-features = false }
+age = { version = "=0.11.2", default-features = false }
 
 # scrypt is built to be slow, and unoptimised it is many times slower again: every seal test derives
 # a key more than once. This changes debug builds only.
