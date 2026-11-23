@@ -204,6 +204,16 @@ pub fn never_mint() {
     NEVER_MINT.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Give the volume at `home` a token if it has none. A restore needs one for its take-over page,
+/// because a backup never carries the old one.
+pub fn mint_at(home: &std::path::Path) -> Result<(), String> {
+    let path = home.join("api-token");
+    if std::fs::symlink_metadata(&path).is_err() {
+        crate::secret::mint(&path, 32)?;
+    }
+    Ok(())
+}
+
 /// The fleet's API token as a [`crate::secret::Secret`], minting one on first use.
 ///
 /// 32 bytes from the kernel, hex — 256 bits, so guessing is not a threat model anyone has to think

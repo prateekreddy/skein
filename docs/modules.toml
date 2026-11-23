@@ -749,7 +749,8 @@ depends_on = ["boxfile", "fleet", "place", "repos", "util"]
 # `fence` because `ensure_volume` is where a server or CLI start learns it may not use this volume.
 # `secret` for `create_private`: `migrate seal` and `unseal` stream into a temp that must be 0600
 # from its creation, which is the one helper that promises it.
-depends_on = ["config", "fence", "fleet", "operation", "secret", "util", "warden_client"]
+# `apiauth`: a restored volume gets a new cockpit token through the module that owns its path, because a backup never carries the old one and the take-over page needs a signed-in session.
+depends_on = ["apiauth", "config", "fence", "fleet", "operation", "secret", "util", "warden_client"]
 
 [current.operation]
 # Nothing. The primitive is a shape — desired, a tri-state check, a printable recipe, a class — and

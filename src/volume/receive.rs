@@ -270,6 +270,14 @@ fn walk_units<R: Read + Seek>(
     })
 }
 
+/// A restored volume belongs to no fleet until a person takes it over. It gets a new cockpit token
+/// of its own, because the old one is never in a backup and a take-over needs a signed-in page.
+fn prepare_for_take_over(home: &Path) -> Result<(), String> {
+    fs::create_dir_all(home).map_err(|e| format!("creating {}: {e}", home.display()))?;
+    crate::fence::mark_restored(home)?;
+    crate::apiauth::mint_at(home)
+}
+
 /// Restore the backup at `file` into `into`, which must be empty or hold this backup's own
 /// unfinished restore.
 pub fn migrate_receive(file: &str, into: &str) -> Result<String, String> {
@@ -329,12 +337,15 @@ pub fn migrate_receive(file: &str, into: &str) -> Result<String, String> {
     let mut finished = 0;
     match walk_units(&mut reader, &manifest, into, &mut receipt, &mut finished) {
         Ok(outcome) => {
+            prepare_for_take_over(&into.join("home"))?;
             receipt.complete = true;
             save_receipt(into, &receipt)?;
             Ok(format!(
                 "Restored into {}\n{total} of {total} unit(s) verified by SHA-256 ({} restored \
                  now, {} already done).\nThe restored fleet is in fleet/ and skein's state in \
                  home/. It was not started, and nothing outside this directory was written.\n\
+                 A fleet started on it waits for you to press Take over in its cockpit, so only do \
+                 that once the fleet it came from is stopped.\n\
                  Git worktrees here still point at their original paths, so do not run git \
                  inside one until it is back at that path: it would act on the original.\n\n\
                  NOT in this backup:\n  {}\n{}Credentials were never in it, so sign in again \

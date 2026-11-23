@@ -492,6 +492,21 @@ pub fn take_over(home: &Path, fleet_id: &str, epoch: u64) -> Result<Took, TakeOv
     Ok(Took::Now(now))
 }
 
+/// The owner a restored volume names until a person takes it over. No fleet has this id, so every
+/// fleet is fenced from it, and the fleet the backup came from may still be running.
+pub const RESTORED_FLEET: &str = "restored-backup";
+const RESTORED_MACHINE: &str = "a-backup";
+
+/// Make a restored volume wait for a take-over. Safe to repeat on an interrupted restore.
+pub fn mark_restored(home: &Path) -> Result<(), String> {
+    // `flip` answers Ok when the volume already names this owner, which is the repeat.
+    match flip(home, None, RESTORED_FLEET, RESTORED_MACHINE) {
+        Ok(_) => Ok(()),
+        Err(FlipError::Lost(_)) => Err("this restore already has another owner".to_string()),
+        Err(FlipError::Failed(why)) => Err(why),
+    }
+}
+
 /// One line for `skein doctor` and `skein fleet-owner`.
 pub fn describe(home: &Path) -> String {
     let mine = fleet_dir().and_then(|dot| fleet_id_in(&dot));

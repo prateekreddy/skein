@@ -26,19 +26,29 @@
     banner(card, state, note);
   }
 
+  // `RESTORED_FLEET` in src/fence.rs.
+  const RESTORED = "restored-backup";
+
   function banner(card, state, note) {
     const { owner, claim } = state;
     card.replaceChildren();
-    const title = el("h2", "margin:0 0 10px;font-size:18px", "Another fleet owns these boxes");
+    const restored = owner.fleet_id === RESTORED;
+    const title = el("h2", "margin:0 0 10px;font-size:18px",
+      restored ? "These boxes were restored from a backup" : "Another fleet owns these boxes");
     title.id = "fence-title";
     card.append(title);
     const who = el("p", "margin:0 0 10px");
     who.id = "fence-owner";
-    who.textContent = `They belong to fleet ${owner.fleet_id} on ${owner.machine}. `
-      + "Boxes will not start here while that is so.";
+    who.textContent = restored
+      ? "Boxes will not start here until you take them over."
+      : `They belong to fleet ${owner.fleet_id} on ${owner.machine}. `
+        + "Boxes will not start here while that is so.";
     card.append(who);
-    card.append(el("p", "margin:0 0 14px", "Take over only if that fleet is stopped. If it is "
-      + "still running, two fleets would run the same boxes and could overwrite each other's work."));
+    card.append(el("p", "margin:0 0 14px", restored
+      ? "Take over only if the fleet this backup came from is stopped. If it is still running, "
+        + "both could push to the same branches and work on the same tasks."
+      : "Take over only if that fleet is stopped. If it is "
+        + "still running, two fleets would run the same boxes and could overwrite each other's work."));
     if (note) {
       const said = el("p", "margin:0 0 14px;color:#e0a458", note);
       said.id = "fence-note";
@@ -63,12 +73,16 @@
   function ask(card, state) {
     const { owner } = state;
     card.replaceChildren();
-    const title = el("h2", "margin:0 0 10px;font-size:18px", `Take over from ${owner.fleet_id}?`);
+    const restored = owner.fleet_id === RESTORED;
+    const title = el("h2", "margin:0 0 10px;font-size:18px",
+      restored ? "Take over this restored backup?" : `Take over from ${owner.fleet_id}?`);
     title.id = "fence-title";
     card.append(title);
-    card.append(el("p", "margin:0 0 16px", `Confirm that the fleet on ${owner.machine} is stopped. `
-      + "Once this fleet takes over, that one is refused, even if it starts again. No box or file "
-      + "is deleted."));
+    card.append(el("p", "margin:0 0 16px", restored
+      ? "Confirm that the fleet this backup came from is stopped. No box or file is deleted."
+      : `Confirm that the fleet on ${owner.machine} is stopped. `
+        + "Once this fleet takes over, that one is refused, even if it starts again. No box or file "
+        + "is deleted."));
     const row = el("div", "display:flex;gap:8px;justify-content:flex-end");
     const cancel = el("button", BUTTON, "Cancel");
     cancel.type = "button";

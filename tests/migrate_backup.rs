@@ -1087,6 +1087,58 @@ fn a_thin_backup_leaves_out_declared_caches_and_keeps_their_neighbours() {
     );
 }
 
+/// Fails if a restored volume is left ownerless, so that the first fleet adopts it, if it has no
+/// token for a signed-in take-over, or if a repeat of the restore replaces that token.
+#[test]
+fn a_restored_volume_waits_for_a_take_over() {
+    if !usable() {
+        return;
+    }
+    let fx = fixture("restored-owner");
+    fx.send();
+    fx.receive();
+    let home = fx.target().join("home");
+    let fleet = fx.target().join("fleet");
+    fs::create_dir_all(fleet.join(".skein")).unwrap();
+    let owner = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_skein"))
+            .arg("fleet-owner")
+            .args(args)
+            .current_dir(&fx.base)
+            .env("SKEIN_HOME", &home)
+            .env("SKEIN_FLEET_ROOT", &fleet)
+            .env_remove("SKEIN_BOX")
+            .output()
+            .unwrap()
+    };
+    let token = fs::read(home.join("api-token")).unwrap();
+    assert_eq!(token.len(), 64, "a restored volume has no cockpit token");
+    assert_eq!(
+        fs::metadata(home.join("api-token")).unwrap().mode() & 0o777,
+        0o600
+    );
+    let fenced = owner(&["check"]);
+    assert_eq!(
+        fenced.status.code(),
+        Some(3),
+        "adopted silently: {fenced:?}"
+    );
+    // Run again over the finished restore: the owner and the token must both survive it.
+    fx.receive();
+    assert_eq!(fs::read(home.join("api-token")).unwrap(), token);
+    assert_eq!(
+        owner(&["check"]).status.code(),
+        Some(3),
+        "a repeat lifted the fence"
+    );
+
+    let taken = owner(&["claim", "restored-backup"]);
+    assert!(taken.status.success(), "{taken:?}");
+    let after = owner(&["check"]);
+    assert!(after.status.success(), "still fenced: {after:?}");
+    assert_eq!(fs::read(home.join("api-token")).unwrap(), token);
+}
+
 /// Fails if an unreadable file is skipped without being asked and without being named.
 #[test]
 fn an_unreadable_file_refuses_unless_told_and_is_then_named() {
