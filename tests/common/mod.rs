@@ -346,6 +346,7 @@ pub const REQUIREMENTS: &[(&str, &[Tool])] = &[
     // `python3` because the take-over tests run the real doorway.
     ("migrate_fence", &[PYTHON3]),
     ("migrate_plan", &[BWRAP, GIT]),
+    ("migrate_rehearsal", &[BWRAP, GIT]),
     ("mail_provenance", &[JQ, FLOCK, GIT]),
     // The launcher's package-request leg shells out through `jq` to file the request; a machine
     // without it skips both tests that drive that leg.

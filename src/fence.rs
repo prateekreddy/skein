@@ -362,6 +362,18 @@ pub fn claim(home: &Path, from: &str) -> Result<String, String> {
                 home.display()
             )
         })?;
+    // A claim killed after its commit point left this fleet the owner, so running it again finds
+    // the job done. It takes nothing from anyone, which is why the id named no longer matters.
+    if fleet_id_in(&dot).as_deref() == Some(owner.fleet_id.as_str()) {
+        heal_record(home, &owner);
+        let _ = fs::remove_file(dot.join(RECEIVE_MARKER));
+        return Ok(format!(
+            "this fleet ({}) already owns {} at epoch {}, so nothing changed.",
+            owner.fleet_id,
+            home.display(),
+            owner.epoch
+        ));
+    }
     if owner.fleet_id != from {
         return Err(format!(
             "the volume at {} belongs to {}, not {from}, so nothing changed. Check that fleet is \

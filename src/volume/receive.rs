@@ -47,6 +47,26 @@ fn save_receipt(into: &Path, receipt: &Receipt) -> Result<(), String> {
     fs::rename(&next, &path).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
+/// A restore killed before its first receipt reached its name leaves only its own directory, and
+/// at most that unfinished receipt. Nothing of the backup is in place, so it starts again.
+fn never_started(into: &Path) -> bool {
+    let names = |dir: &Path| -> Option<Vec<std::ffi::OsString>> {
+        fs::read_dir(dir)
+            .ok()?
+            .map(|entry| entry.ok().map(|e| e.file_name()))
+            .collect()
+    };
+    let work = into.join(WORK_DIR);
+    let unfinished = receipt_path(into).with_extension("json.next");
+    names(into).is_some_and(|found| found == [WORK_DIR])
+        && fs::symlink_metadata(&work).is_ok_and(|m| m.is_dir())
+        && names(&work).is_some_and(|found| {
+            found
+                .iter()
+                .all(|name| Some(name.as_os_str()) == unfinished.file_name())
+        })
+}
+
 /// The receipt to continue from, after refusing a target this bundle did not start.
 fn open_target(into: &Path, bundle: &str) -> Result<Receipt, String> {
     match fs::symlink_metadata(into) {
@@ -66,8 +86,11 @@ fn open_target(into: &Path, bundle: &str) -> Result<Receipt, String> {
         .map_err(|e| format!("listing {}: {e}", into.display()))?
         .next()
         .is_none();
-    if empty {
-        fs::create_dir(into.join(WORK_DIR)).map_err(|e| format!("preparing the target: {e}"))?;
+    if empty || never_started(into) {
+        if empty {
+            fs::create_dir(into.join(WORK_DIR))
+                .map_err(|e| format!("preparing the target: {e}"))?;
+        }
         let receipt = Receipt {
             bundle: bundle.to_string(),
             ..Receipt::default()
