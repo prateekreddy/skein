@@ -25,8 +25,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod bundle;
 mod plan;
+mod receive;
+mod send;
 pub use plan::migrate_plan;
+pub use receive::migrate_receive;
+pub use send::{migrate_send, SendOptions};
 
 /// The volume layout this binary understands.
 pub const SCHEMA: u32 = 1;

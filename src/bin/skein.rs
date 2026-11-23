@@ -77,6 +77,8 @@ fn main() {
                  volume into a directory named plan, write ./plan)"
                     .into(),
             ),
+            Some("send") => cmd_migrate_send(&rest[1..]),
+            Some("receive") => cmd_migrate_receive(&rest[1..]),
             Some(target) => skein::volume::migrate(target).map(|report| println!("{report}")),
             None => Err(
                 "usage: skein migrate <directory>   (the volume moves there; nothing is \
@@ -205,6 +207,10 @@ skein announce        tell the fleet if its disk has just crossed the line (noth
                       deleted; silent while the figure has not moved across it)\n  \
 skein migrate <dir>   copy this installation onto another volume (nothing is deleted)\n  \
 skein migrate plan    report what moving this whole skein would involve (changes nothing)\n  \
+skein migrate send <file> [--leave-out-build-output] [--skip-unreadable]\n  \
+                      back up this whole skein to one new file (only reads the fleet)\n  \
+skein migrate receive <file> --into <empty-dir>\n  \
+                      restore a backup into an empty directory; rerun to resume\n  \
 skein repoint         after moving a volume by hand: point what it records at where it now is\n  \
 skein version\n  \
 skein help\n\n\
@@ -359,6 +365,36 @@ fn cmd_repos() -> Result<(), String> {
     }
     println!("\n{DIM}{} repos{RESET}", repos.len());
     Ok(())
+}
+
+fn cmd_migrate_send(args: &[String]) -> Result<(), String> {
+    const USAGE: &str = "usage: skein migrate send <file> [--leave-out-build-output] \
+                         [--skip-unreadable]   (to move the volume into a directory named send, \
+                         write ./send)";
+    let mut file = None;
+    let mut options = skein::volume::SendOptions::default();
+    for arg in args {
+        match arg.as_str() {
+            "--leave-out-build-output" => options.leave_out_build_output = true,
+            "--skip-unreadable" => options.skip_unreadable = true,
+            flag if flag.starts_with("--") => return Err(USAGE.into()),
+            path if file.is_none() => file = Some(path),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let file = file.ok_or(USAGE)?;
+    skein::volume::migrate_send(file, &options).map(|report| println!("{report}"))
+}
+
+fn cmd_migrate_receive(args: &[String]) -> Result<(), String> {
+    const USAGE: &str = "usage: skein migrate receive <file> --into <empty-dir>   (to move the \
+                         volume into a directory named receive, write ./receive)";
+    match args {
+        [file, flag, into] if flag == "--into" && !file.starts_with("--") => {
+            skein::volume::migrate_receive(file, into).map(|report| println!("{report}"))
+        }
+        _ => Err(USAGE.into()),
+    }
 }
 
 fn cmd_ls() -> Result<(), String> {

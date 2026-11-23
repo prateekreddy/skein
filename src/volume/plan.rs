@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// Room a move must leave free on the disk it lands on.
-const FLOOR_KB: u64 = 10 * 1024 * 1024;
+pub(super) const FLOOR_KB: u64 = 10 * 1024 * 1024;
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Where the sandboxed git binary is mounted.
@@ -102,6 +102,32 @@ fn holds_credentials(name: &OsStr, parent: &Path) -> bool {
         || name.starts_with(".credentials")
         || name.ends_with(".pem")
         || (name == "private" && parent.file_name() == Some(OsStr::new(".skein")))
+}
+
+/// What never leaves this machine in a bundle: [`holds_credentials`] and the other secrets a box
+/// or a volume keeps under a fixed name.
+pub(super) fn never_moves(name: &OsStr, parent: &Path) -> bool {
+    if holds_credentials(name, parent) {
+        return true;
+    }
+    let name = name.to_string_lossy();
+    let dir = parent.file_name().map(OsStr::to_string_lossy);
+    let dir = dir.as_deref().unwrap_or("");
+    let above = parent.parent().and_then(Path::file_name);
+    matches!(
+        name.as_ref(),
+        "api-token" | "github-read-token" | "github-pats.json" | ".git-credentials" | ".netrc"
+    ) || name.starts_with("fleet-agent.")
+        || (name == "secret" && dir == "warden")
+        || (name == "env" && dir == "sync" && above == Some(OsStr::new(".config")))
+        || (dir == ".ssh" && name.starts_with("id_") && !name.ends_with(".pub"))
+        || (name == "credentials" && dir == ".aws")
+        || (name == "hosts.yml" && dir == "gh" && above == Some(OsStr::new(".config")))
+}
+
+/// Whether anything under `path` holds its own git history.
+pub(super) fn holds_git_history(path: &Path) -> bool {
+    walk(path, &mut Links::default()).holds_git
 }
 
 #[derive(Default)]
@@ -327,7 +353,7 @@ fn sandboxed_git_args(git: &Path, tree: &Path) -> Vec<std::ffi::OsString> {
 }
 
 /// What this tree's own git reports as ignored, as paths relative to the tree.
-fn ignored_by_own_git(tree: &Path) -> Result<Vec<PathBuf>, String> {
+pub(super) fn ignored_by_own_git(tree: &Path) -> Result<Vec<PathBuf>, String> {
     if !tree.is_absolute() || fs::symlink_metadata(tree).map_or(true, |m| !m.is_dir()) {
         return Err("its tree is not a plain directory".into());
     }
@@ -360,7 +386,7 @@ fn ignored_by_own_git(tree: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// Whether `relative` names something under `tree` with no link on the way to it.
-fn stays_inside(tree: &Path, relative: &Path) -> bool {
+pub(super) fn stays_inside(tree: &Path, relative: &Path) -> bool {
     let mut at = tree.to_path_buf();
     let mut parts = relative.components().peekable();
     while let Some(part) = parts.next() {
@@ -378,7 +404,7 @@ fn stays_inside(tree: &Path, relative: &Path) -> bool {
 }
 
 /// Every tool-cache path relative to a box directory.
-fn tool_caches() -> impl Iterator<Item = String> {
+pub(super) fn tool_caches() -> impl Iterator<Item = String> {
     DOWNLOAD_CACHES
         .iter()
         .filter(|rel| rel.starts_with(".cache/"))
@@ -497,7 +523,7 @@ struct Entry {
 }
 
 /// One line of terminal text from a name something else chose.
-fn plain(text: &str) -> String {
+pub(super) fn plain(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
@@ -643,6 +669,19 @@ fn ask_docker() -> Result<Docker, String> {
         found.images.push((plain(image), size));
     }
     Ok(found)
+}
+
+/// Docker's volumes and locally built images by name, for saying what a bundle does not hold.
+pub(super) fn docker_names() -> Result<(Vec<String>, Vec<String>), String> {
+    let found = ask_docker()?;
+    let volumes = found
+        .named
+        .iter()
+        .chain(&found.anonymous)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    let images = found.images.iter().map(|(name, _)| name.clone()).collect();
+    Ok((volumes, images))
 }
 
 fn survey(sandbox: &str) -> Result<(Vec<Entry>, u64), String> {
