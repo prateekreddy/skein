@@ -180,6 +180,7 @@ fn plant_credentials(fx: &Fixture) {
         "home/.config/sync/env",
         "tree/.skein/private/key",
         "home/.git-credentials",
+        "home/.claude.json",
         "home/.netrc",
         "home/.ssh/id_ed25519",
         "home/.aws/credentials",

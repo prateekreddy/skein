@@ -119,6 +119,8 @@ pub(super) fn never_moves(name: &OsStr, parent: &Path) -> bool {
         "api-token" | "github-read-token" | "github-pats.json" | ".git-credentials" | ".netrc"
     ) || name.starts_with("fleet-agent.")
         || (name == "secret" && dir == "warden")
+        // Claude's account record, and possibly an API key. The launcher rebuilds what a box needs.
+        || (name == ".claude.json" && matches!(dir, "home" | "fleet-home"))
         || (name == "env" && dir == "sync" && above == Some(OsStr::new(".config")))
         || (dir == ".ssh" && name.starts_with("id_") && !name.ends_with(".pub"))
         || (name == "credentials" && dir == ".aws")
