@@ -255,11 +255,12 @@ pub fn save_boxes(only: &[String]) -> Result<Vec<SavedBox>, String> {
 /// which images and volumes actually reach it.
 ///
 /// `echo asked` is the marker that distinguishes "Docker answered, and holds nothing worth saving"
-/// from "Docker did not answer". Without it both are the empty string, and the safe reading of one
-/// is the unsafe reading of the other.
-const DOCKER_PROBE_SH: &str = "docker volume ls --format '{{.Name}}' 2>/dev/null \
-     | grep -vx '[0-9a-f]\\{64\\}' | sed 's/^/volume /'; \
-     docker image ls --digests --format '{{.Digest}} {{.Repository}}:{{.Tag}}' 2>/dev/null \
+/// from "Docker did not answer", and it prints only when both `docker` commands succeeded.
+const DOCKER_PROBE_SH: &str = "volumes=$(docker volume ls --format '{{.Name}}' 2>/dev/null) || exit 0; \
+     images=$(docker image ls --digests --format '{{.Digest}} {{.Repository}}:{{.Tag}}' 2>/dev/null) \
+     || exit 0; \
+     printf '%s\n' \"$volumes\" | grep -vxe '[0-9a-f]\\{64\\}' -e '' | sed 's/^/volume /'; \
+     printf '%s\n' \"$images\" \
      | awk '$1==\"<none>\" && $2!=\"<none>:<none>\" {print \"image\", $2}'; \
      echo asked";
 
@@ -799,6 +800,44 @@ mod tests {
             "kept: named volumes and images no registry has a copy of. dropped: the anonymous \
              volume, the pulled image, the dangling layer"
         );
+    }
+
+    /// **A Docker that fails is not a Docker with nothing in it.** Each command fails in turn, and
+    /// the marker must be absent. An empty but working Docker still prints it, or every resize on
+    /// a clean fleet would refuse. Printing the marker unconditionally fails the first two cases.
+    #[test]
+    fn the_probe_says_asked_only_when_docker_answered() {
+        let dir = tempdir();
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (body, answered) in [
+            ("\"volume ls\") exit 1 ;;\n\"image ls\") exit 0 ;;", false),
+            ("\"volume ls\") exit 0 ;;\n\"image ls\") exit 1 ;;", false),
+            ("\"volume ls\") exit 0 ;;\n\"image ls\") exit 0 ;;", true),
+        ] {
+            let path = bin.join("docker");
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\ncase \"$1 $2\" in\n{body}\nesac\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                &path,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )
+            .unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(DOCKER_PROBE_SH)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .output()
+                .expect("run the probe");
+            let said = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = said.lines().collect();
+            let want: Vec<&str> = if answered { vec!["asked"] } else { vec![] };
+            assert_eq!(lines, want, "docker stub: {body}");
+        }
     }
 
     /// The refusal has to be worth reading, because the alternative to reading it is `sbx rm -f`.

@@ -1206,59 +1206,59 @@ cited_by = ["docs/recovery-survey.md"]
 line = "\"no box is placed in {sandbox}, so there is nothing to save\""
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:373"]
+["src/fleet/resize.rs:374"]
 line = "eprintln!(\"skein: could not measure the space this needs; continuing\");"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:380"]
+["src/fleet/resize.rs:381"]
 line = "\"copying the boxes out needs about {needed} MiB and the host has {free} MiB free — \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:498"]
+["src/fleet/resize.rs:499"]
 line = "\"{root} holds {} checkout{} that {} has no placement record for, so nothing could \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:501"]
+["src/fleet/resize.rs:502"]
 line = "if unaccounted.len() == 1 { \"\" } else { \"s\" },"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:507"]
+["src/fleet/resize.rs:508"]
 line = "Ok(found)"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:521"]
+["src/fleet/resize.rs:522"]
 line = "Err(e) => return Err(format!(\"listing {}: {e}\", dir.display())),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:549"]
+["src/fleet/resize.rs:550"]
 line = "Err(e) => return Err(format!(\"listing {root}: {e}\")),"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:566"]
+["src/fleet/resize.rs:567"]
 line = "fn resize_fleet_inner("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:622"]
+["src/fleet/resize.rs:623"]
 line = "\"could not check what Docker is holding ({why}), and a resize destroys \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:700"]
+["src/fleet/resize.rs:701"]
 line = "match crate::warden_client::perform(&crate::warden_client::Act::Destroy {"
 cited_by = ["docs/decisions/warden-or-prompt.md"]
 
-["src/fleet/resize.rs:715"]
+["src/fleet/resize.rs:716"]
 line = "// A destroy that may have happened is the one answer no command can be offered for: running"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:720"]
+["src/fleet/resize.rs:721"]
 line = "\"could not tell whether {sandbox} was destroyed: {} — every box's work is copied \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:1235"]
+["src/fleet/resize.rs:1274"]
 line = "/// them, the sentence that told a person \"`skein resize 8g` is safe to re-run — creating the"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/fleet/resize.rs:1243"]
+["src/fleet/resize.rs:1282"]
 line = "let body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");"
 window = "fn the_resize_stops_at_the_destroy_and_promises_nothing_beyond_it() {\u000blet body = fn_body(include_str!(\"resize.rs\"), \"fn resize_fleet_inner(\");\u000bfor gone in ["
 cited_by = ["docs/recovery-survey.md"]
