@@ -1033,6 +1033,60 @@ fn leaving_out_build_output_is_opt_in_and_keeps_hand_made_files() {
     assert!(thin.join(".worktrees/lane/unpushed.txt").is_file());
 }
 
+/// Fails if the backup and the plan disagree on a declared cache, or the backup drops a neighbour.
+#[test]
+fn a_thin_backup_leaves_out_declared_caches_and_keeps_their_neighbours() {
+    if !usable() {
+        return;
+    }
+    let fx = fixture("declared");
+    let cache = fx.root.join("box-one/home/.cache");
+    write(&cache.join("some-target/.rustc_info.json"), "{}");
+    write(&cache.join("some-target/out.bin"), "built");
+    write(&cache.join("agent-work/notes.txt"), "keep me");
+    let tagged = fx.root.join("box-one").join("home").join("tagged-work");
+    write(&tagged.join(".rustc_info.json"), "{}");
+    std::os::unix::fs::symlink("../tagged-work", cache.join("linked")).unwrap();
+    fx.send();
+    fx.receive();
+    let full = fx.target().join("fleet/box-one/home/.cache");
+    assert!(
+        full.join("some-target/out.bin").is_file(),
+        "left out unasked"
+    );
+
+    let bundle = fx.base.join("out/declared.bundle");
+    let out = fx.skein(&[
+        "migrate",
+        "send",
+        bundle.to_str().unwrap(),
+        "--leave-out-build-output",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let into = fx.base.join("restored-declared");
+    let out = fx.skein(&[
+        "migrate",
+        "receive",
+        bundle.to_str().unwrap(),
+        "--into",
+        into.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    let copied = into.join("fleet/box-one/home/.cache");
+    assert!(
+        !copied.join("some-target").exists(),
+        "the target was carried"
+    );
+    assert!(
+        fs::symlink_metadata(copied.join("linked")).is_ok(),
+        "a link was read as the directory it points at"
+    );
+    assert_eq!(
+        fs::read(copied.join("agent-work/notes.txt")).unwrap(),
+        b"keep me"
+    );
+}
+
 /// Fails if an unreadable file is skipped without being asked and without being named.
 #[test]
 fn an_unreadable_file_refuses_unless_told_and_is_then_named() {

@@ -32,6 +32,8 @@ const TOOL_CACHES: &[&str] = &[
     ".pnpm-store",
     "pnpm-store",
 ];
+/// The first bytes of a `CACHEDIR.TAG`, from the Cache Directory Tagging Specification.
+const CACHEDIR_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
 /// A size in KiB: exact when `high == Some(low)`, and `high: None` when nothing bounds it above.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -414,6 +416,55 @@ pub(super) fn tool_caches() -> impl Iterator<Item = String> {
         .chain(TOOL_CACHES.iter().map(|rel| rel.to_string()))
 }
 
+/// Whether a directory says it can be made again: a valid cache tag, or Cargo's own marker of a
+/// target directory. Neither may be a link, because a link is not the directory speaking.
+fn declares_itself_rebuildable(dir: &Path) -> bool {
+    let regular = |name: &str| {
+        fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.file_type().is_file())
+    };
+    if regular(".rustc_info.json") {
+        return true;
+    }
+    let mut start = [0; CACHEDIR_SIGNATURE.len()];
+    regular("CACHEDIR.TAG")
+        && fs::File::open(dir.join("CACHEDIR.TAG"))
+            .and_then(|mut tag| tag.read_exact(&mut start))
+            .is_ok()
+        && start == CACHEDIR_SIGNATURE
+}
+
+/// Build output kept directly in `home/.cache`: the compiler cache, and each directory that
+/// declares itself. A full copy carries these. skein's own directory is never one of them.
+pub(super) fn declared_output(box_dir: &Path) -> Vec<String> {
+    if !stays_inside(box_dir, Path::new("home/.cache/skein")) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(box_dir.join("home/.cache")) else {
+        return Vec::new();
+    };
+    let named: Vec<String> = tool_caches().collect();
+    let mut output = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let rel = format!("home/.cache/{name}");
+        if name != "skein"
+            && !named.contains(&rel)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && (name == "sccache" || declares_itself_rebuildable(&entry.path()))
+        {
+            output.push(rel);
+        }
+    }
+    output
+}
+
+/// Everything a thin copy leaves out of this box's home.
+fn caches_of(box_dir: &Path) -> Vec<String> {
+    tool_caches().chain(declared_output(box_dir)).collect()
+}
+
 /// What of a box can be made again.
 struct Rebuild {
     ignored: Size,
@@ -463,7 +514,7 @@ fn rebuildable(box_dir: &Path, has_tree: bool) -> Rebuild {
     };
     links.part = 1;
     let mut caches = Size::ZERO;
-    for rel in tool_caches() {
+    for rel in caches_of(box_dir) {
         let path = box_dir.join(&rel);
         if stays_inside(box_dir, Path::new(&rel)) && fs::symlink_metadata(&path).is_ok() {
             caches = caches.plus(walk(&path, &mut links).size());
@@ -488,7 +539,10 @@ fn cache_carried(box_dir: &Path) -> (Size, Size) {
     let whole = walk(&cache, &mut Links::default()).size();
     let mut links = Links::default();
     let mut tools = Size::ZERO;
-    for rel in tool_caches().filter(|rel| rel.starts_with("home/.cache/")) {
+    for rel in caches_of(box_dir)
+        .into_iter()
+        .filter(|rel| rel.starts_with("home/.cache/"))
+    {
         let path = box_dir.join(&rel);
         if stays_inside(box_dir, Path::new(&rel)) && fs::symlink_metadata(&path).is_ok() {
             tools = tools.plus(walk(&path, &mut links).size());

@@ -553,3 +553,51 @@ fn a_tree_that_is_not_a_repository_says_so() {
     let said = stdout(&plan(&fx));
     assert!(said.contains("its tree is not a git repository"), "{said}");
 }
+
+/// Fails if the tag's signature goes unchecked, a link counts, or skein's own directory can be
+/// declared away. Fails the other way if a real tag or Cargo marker stops counting.
+#[test]
+fn only_a_directory_that_declares_itself_leaves_home_cache() {
+    if !usable() {
+        return;
+    }
+    const SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
+    let size = 200_000;
+    let cases: &[(&str, &[(&str, &str)], bool)] = &[
+        ("tagged", &[("CACHEDIR.TAG", SIGNATURE)], true),
+        ("cargo-target", &[(".rustc_info.json", "{}")], true),
+        ("sccache", &[], true),
+        (
+            "wrong-tag",
+            &[(
+                "CACHEDIR.TAG",
+                "Signature: 00000000000000000000000000000000\n",
+            )],
+            false,
+        ),
+        ("no-marker", &[], false),
+        ("skein", &[("CACHEDIR.TAG", SIGNATURE)], false),
+    ];
+    for (name, markers, leaves) in cases {
+        let fx = fixture(&format!("declared-{name}"));
+        let dir = fx.root.join("checkout-unrecorded/home/.cache").join(name);
+        write(&dir.join("payload"), &"p".repeat(size));
+        for (marker, text) in *markers {
+            write(&dir.join(marker), text);
+        }
+        let said = stdout(&plan(&fx));
+        let line = line_of(&said, "checkout-unrecorded");
+        assert_eq!(tool_caches_kb(line) >= 195, *leaves, "{name}: {line}");
+    }
+
+    let fx = fixture("declared-link");
+    let elsewhere = fx.base.join("elsewhere");
+    write(&elsewhere.join("payload"), &"p".repeat(size));
+    write(&elsewhere.join("CACHEDIR.TAG"), SIGNATURE);
+    let cache = fx.root.join("checkout-unrecorded/home/.cache");
+    fs::create_dir_all(&cache).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, cache.join("linked")).unwrap();
+    let said = stdout(&plan(&fx));
+    let line = line_of(&said, "checkout-unrecorded");
+    assert!(tool_caches_kb(line) < 100, "a link was followed: {line}");
+}

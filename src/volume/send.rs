@@ -10,8 +10,8 @@ use super::bundle::{
     MAGIC,
 };
 use super::plan::{
-    docker_names, holds_git_history, ignored_by_own_git, never_moves, plain, stays_inside,
-    tool_caches, FLOOR_KB,
+    declared_output, docker_names, holds_git_history, ignored_by_own_git, never_moves, plain,
+    stays_inside, tool_caches, FLOOR_KB,
 };
 use super::{available_kb, human, migrating_path, moved_to, schema_of, SCHEMA};
 use crate::config::skein_home;
@@ -236,8 +236,12 @@ fn plan_units(options: &SendOptions, left: &mut LeftOut) -> Result<Vec<Unit>, St
         } else if real_dir(&path) {
             let mut unit = Unit::new(format!("box:{}", plain(&text)));
             unit.caches = box_caches(&path);
-            if options.leave_out_build_output && real_dir(&path.join("tree")) {
-                unit.build = box_build_output(&path.join("tree"), left);
+            if options.leave_out_build_output {
+                if real_dir(&path.join("tree")) {
+                    unit.build = box_build_output(&path.join("tree"), left);
+                }
+                unit.build
+                    .extend(declared_output(&path).into_iter().map(|rel| path.join(rel)));
             }
             unit.roots.push(Root {
                 source: path,
