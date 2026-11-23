@@ -802,7 +802,7 @@ cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:2655"]
 line = "binds+=(--bind-fd \"$repo_tools_fd\" \"$HOME/.repo-tools\")"
-cited_by = ["docs/threat-model.md", "docs/decisions/repos-are-the-trust-boundary.md"]
+cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
 ["src/box-session.sh:2749"]
 line = "[ -d \"$run_user\" ] && binds+=(--tmpfs \"$run_user\")"
@@ -846,7 +846,7 @@ cited_by = ["docs/threat-model.md"]
 
 ["src/box-session.sh:4148"]
 line = "export SKEIN_REPO_TOOLS=\"$repo_tools\" CARGO_INSTALL_ROOT=\"$repo_tools/tools\" \\"
-cited_by = ["docs/threat-model.md", "docs/decisions/repos-are-the-trust-boundary.md"]
+cited_by = ["docs/decisions/repos-are-the-trust-boundary.md", "docs/threat-model.md"]
 
 ["src/config.rs:25"]
 line = "pub fn skein_home() -> PathBuf {"
@@ -1862,25 +1862,29 @@ cited_by = ["docs/recovery-survey.md"]
 line = "Err(format!("
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:449"]
+["src/volume.rs:436"]
 line = "// on the commonest refusal (the fleet is up, which is now always) it left one on every attempt."
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:478"]
+["src/volume.rs:465"]
 line = "\"{} already holds a skein installation ({marker} is there). Move onto an empty \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:498"]
+["src/volume.rs:485"]
 line = "return Err(format!("
 window = "// they are told to type cannot drift from what the warden would run.\u000breturn Err(format!(\u000b\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:543"]
+["src/volume.rs:486"]
+line = "\"the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \\"
+cited_by = ["docs/recovery-survey.md"]
+
+["src/volume.rs:530"]
 line = "return Err(format!("
 window = "if have < want {\u000breturn Err(format!(\u000b\"{} has {} free and this needs about {} ({} plus a tenth). Free some room or choose \\"
 cited_by = ["docs/recovery-survey.md"]
 
-["src/volume.rs:571"]
+["src/volume.rs:558"]
 line = "return Err(format!("
 window = "if !out.status.success() {\u000breturn Err(format!(\u000b\"copying to {} failed, and the half-copy is left in place with its MIGRATING marker so \\"
 cited_by = ["docs/recovery-survey.md"]

@@ -328,11 +328,9 @@ fn nearest_existing(path: &Path) -> PathBuf {
 /// in skein performs this; a person does, on the host, where the process being interrupted is not
 /// the one doing the interrupting.
 ///
-/// # The recipe is warden acts, rendered by the warden's own renderer
+/// # The recipe runs nothing
 ///
-/// The two `sbx` lines come from `warden_client::Act::command`, which is what the warden's approval
-/// prompt prints and what `skein doctor` already offers — so what somebody is told to type and what
-/// the warden would run cannot drift apart. The `mv` between them is the only step that is neither.
+/// It is comments only, because no sequence of commands keeps the checkouts yet (SKEIN-1535).
 ///
 /// The id is derived the same way a warden request's is (`warden_client::operation_id`): from the
 /// verb, the sandbox and the argv, so asking twice about the same move names one operation rather
@@ -366,29 +364,18 @@ pub fn move_to(target: &str) -> crate::operation::Operation {
         Check::Unsatisfied(format!("the volume is at {}", source.display()))
     };
 
-    let mut recipe = Vec::new();
-    // Always the first line, because a fleet always has a name (SKEIN-772). The `!is_empty()` that
-    // used to wrap this was dead — `load_config` repairs a blank `fleet_sandbox` (`src/config.rs:459`)
-    // — and its else arm would have printed a recipe that moves the volume out from under a running
-    // sandbox without stopping it first.
-    recipe.push(format!(
-        "{}   # stops skein with it",
-        crate::warden_client::Act::Destroy {
-            sandbox: sandbox.clone()
-        }
-        .command()
-    ));
-    recipe.push(format!("mv {} {}", source.display(), resolved.display()));
-    recipe.push(format!("export SKEIN_HOME={}", resolved.display()));
-    match crate::fleet::create_line(&sandbox) {
-        Ok(line) => recipe.push(format!("{line}   # with the volume at its new path")),
-        // The mounts are fixed at create and are worked out from this installation, so a line that
-        // could not be worked out is not one to guess at.
-        Err(why) => recipe.push(format!(
-            "# the `sbx create` line could not be worked out from here — {why} — so run \
-             `skein doctor` and copy the one it prints"
-        )),
-    }
+    // Comments only, so nothing here can be pasted into a shell and do harm. A volume's path is
+    // fixed when the sandbox is created, so moving it means replacing the sandbox, and every box's
+    // checkout lives inside that sandbox. Until a move carries them (SKEIN-1535), there is no
+    // sequence of commands to offer.
+    let recipe = vec![
+        format!("# do not remove {sandbox}: every box's checkout lives inside it, and only there"),
+        format!(
+            "# skein cannot move this volume to {} safely yet, so there is nothing to run",
+            resolved.display()
+        ),
+        "# your fleet is unchanged and can keep running".to_string(),
+    ];
 
     Operation {
         id: crate::warden_client::operation_id("move-volume", &sandbox, &recipe),
@@ -498,7 +485,7 @@ pub fn migrate(target: &str) -> Result<String, String> {
         return Err(format!(
             "the fleet sandbox {sandbox} is up, and its boxes are reading the volume you are \
              moving — including this process, whose own state is on it. This is a job for the \
-             host:\n\n{}\nEvery box's work is on the volume and travels with it.",
+             host:\n\n{}\nThe volume does not hold every box's work: checkouts stay in the sandbox.",
             move_to(&target.to_string_lossy()).render()
         ));
     }
@@ -1183,9 +1170,8 @@ mod tests {
     /// not run it.
     ///
     /// **What makes this fail**: giving the operation `Class::Idempotent`, which would let anything
-    /// that reads an unsatisfied check drive a move that kills the fleet; or composing the recipe
-    /// here instead of from `Act::command`, which is how what a person is told drifts from what the
-    /// warden would run.
+    /// that reads an unsatisfied check drive a move that kills the fleet; or adding any runnable
+    /// line to the recipe, since each one risks the checkouts inside the sandbox.
     #[test]
     fn moving_the_volume_is_reported_with_its_recipe_and_never_driven() {
         let _g = env_lock();
@@ -1217,20 +1203,17 @@ mod tests {
             "a move that stops the fleet — and this process with it — was offered to a driver"
         );
 
-        // The recipe, and the halves that must come from elsewhere rather than be spelled here.
-        let said = op.render();
-        let destroy = crate::warden_client::Act::Destroy {
-            sandbox: "skein-fleet".into(),
-        }
-        .command();
+        // Checkouts live only inside the sandbox, so a line that removes it, or moves the volume
+        // from under it, loses work. Putting either back into the recipe fails here.
         assert!(
-            said.contains(&destroy),
-            "the destroy line is not the warden's own rendering, so it can drift from what the \
-             warden would run: {said}"
+            op.recipe.iter().all(|line| line.starts_with('#')),
+            "the recipe offers a command, and none is safe until a move carries the checkouts: {:?}",
+            op.recipe
         );
+        let said = op.render();
         assert!(
-            said.contains(&format!("export SKEIN_HOME={}", target.display())),
-            "the one variable that points at a volume is not in the recipe: {said}"
+            said.contains("do not remove skein-fleet"),
+            "the recipe does not warn against removing the sandbox: {said}"
         );
         assert!(
             said.contains("skein never runs it for you"),
