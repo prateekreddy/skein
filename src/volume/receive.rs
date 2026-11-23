@@ -356,11 +356,13 @@ pub fn migrate_receive(file: &str, into: &str) -> Result<String, String> {
         }
     }
 
+    // Before the first unit lands, so a restore killed partway is never a volume a fleet adopts.
+    prepare_for_take_over(&into.join("home"))?;
+
     let total = manifest.units.len();
     let mut finished = 0;
     match walk_units(&mut reader, &manifest, into, &mut receipt, &mut finished) {
         Ok(outcome) => {
-            prepare_for_take_over(&into.join("home"))?;
             receipt.complete = true;
             save_receipt(into, &receipt)?;
             Ok(format!(

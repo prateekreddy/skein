@@ -609,7 +609,11 @@ esac
             git_in(&second, &["commit", "-qm", "second"]);
 
             let box_home = self.old.join("box-one").join("home");
-            for rel in [".claude/.credentials.json", ".ssh/id_ed25519", "tokens/acct"] {
+            for rel in [
+                ".claude/.credentials.json",
+                ".ssh/id_ed25519",
+                "tokens/acct",
+            ] {
                 write(&box_home.join(rel), SENTINEL);
             }
             write(&self.old.join(".skein/asks/q1/ask.json"), "{\"q\":1}\n");
@@ -1292,6 +1296,34 @@ esac
             assert_ne!(read_owner(&home).unwrap().unwrap().fleet_id, RESTORED_FLEET);
             reset();
         }
+    }
+
+    /// Fails if a fleet can adopt a restore that was killed before it finished.
+    #[test]
+    fn a_restore_killed_partway_is_not_adopted_by_a_fleet() {
+        let Some(rig) = rig("partway") else { return };
+        let bundle = rig.bundle("partway.bundle");
+        let counted = rig.base.join("counted");
+        let total = rig.count(NEW, &refs(&Rig::receive_args(&bundle, &counted)));
+        remove(&counted);
+        let mut home_seen = 0;
+        for at in points(total, 0, 12) {
+            let into = rig.base.join(format!("partway-{at}"));
+            rig.traced(NEW, &refs(&Rig::receive_args(&bundle, &into)), Some(at));
+            if !into.join("home").is_dir() {
+                continue;
+            }
+            home_seen += 1;
+            fs::create_dir_all(into.join("fleet/.skein")).unwrap();
+            let check = rig.on_restored(&into, &["fleet-owner", "check"]);
+            assert_eq!(
+                check.status.code(),
+                Some(FENCED_EXIT),
+                "killed at change {at} of {total}: a fleet adopted a partial restore: {}",
+                said(&check)
+            );
+        }
+        assert!(home_seen > 0, "no kill left a partial home");
     }
 
     /// Fails if a flip killed at any change leaves two fleets able to run or none, or if running
