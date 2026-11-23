@@ -106,7 +106,9 @@ try {
   check("and the row is redrawn in its real state, with nothing left to press",
     { grantButtons: await grant().count(),
       state: await card().locator(".sq-state").first().textContent().catch(() => "") },
-    { grantButtons: 0, state: "granted" });
+    // Withdrawn, not granted: this fixture records the answer and no grant stands behind it, and a
+    // row says what the access is now (`state::access::derive`).
+    { grantButtons: 0, state: "withdrawn" });
 
   sayBlips();
   check("the panel raised no page errors", errors, []);
