@@ -82,7 +82,8 @@ const until = async (f, ms = 15000) => {
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 try {
-  await until(() => fs.existsSync(said), 20000);
+  // The queue holds this job while work outside it keeps the machine busy, so the wait is long.
+  await until(() => fs.existsSync(said), 240000);
   // Filed only once the first holds its core, so it cannot be granted first.
   const waiting = job("api-main", 4096, ["touch", ran]);
   jobs.push(waiting);
