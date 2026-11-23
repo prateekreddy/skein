@@ -445,8 +445,9 @@ try {
   await page2.evaluate(UNWRAP);
   // From here the page's clock only moves when this says so, so every delay below is measured
   // exactly. Node-side waits only: a paused clock stops the page's own animation frames, which is
-  // what `waitForFunction` polls on.
-  await page2.clock.pauseAt(await page2.evaluate(() => Date.now() + 10));
+  // what `waitForFunction` polls on. The target is seconds ahead because `pauseAt` refuses a time
+  // already past, and on a loaded machine the round trip can outlast a shorter lead.
+  await page2.clock.pauseAt(await page2.evaluate(() => Date.now() + 5000));
   const nap = ms => new Promise(r => setTimeout(r, ms));
   const settled = async k => {
     for (const end = Date.now() + 20000; Date.now() < end; await nap(50)) {
