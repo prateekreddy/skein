@@ -563,7 +563,8 @@ fn only_a_directory_that_declares_itself_leaves_home_cache() {
     }
     const SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55\n";
     let size = 200_000;
-    let cases: &[(&str, &[(&str, &str)], bool)] = &[
+    type Markers<'a> = &'a [(&'a str, &'a str)];
+    let cases: &[(&str, Markers, bool)] = &[
         ("tagged", &[("CACHEDIR.TAG", SIGNATURE)], true),
         ("cargo-target", &[(".rustc_info.json", "{}")], true),
         ("sccache", &[], true),
