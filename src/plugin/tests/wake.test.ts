@@ -36,6 +36,10 @@ type Box = {
   listed: string[]
   /** How many times `mailbox.sh wake` was run. */
   wakeRuns: number
+  /** How many coming submits the engine refuses with `{ drop }`, as it does after a stopped turn. */
+  refuse: number
+  /** How many coming submits throw. */
+  fail: number
 }
 
 /** A message as `mailbox::send_message` writes it into an owner inbox. */
@@ -62,7 +66,7 @@ function wakeStandIn(b: Box): string {
 }
 
 function engine(on: On, store: Record<string, unknown> = {}): Box {
-  const b: Box = { clock: mock.clock(on, { now: NOW }), files: new Map(), submitted: [], listed: [], wakeRuns: 0 }
+  const b: Box = { clock: mock.clock(on, { now: NOW }), files: new Map(), submitted: [], listed: [], wakeRuns: 0, refuse: 0, fail: 0 }
   mock.env(on, { HOME, SKEIN_BOX: BOX, SKEIN_STATE: STATE })
   mock.store(on, store)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -102,6 +106,15 @@ function engine(on: On, store: Record<string, unknown> = {}): Box {
     return { value: { exitCode: ok ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('prompt.submit', (_, e) => {
+    if (b.fail > 0) {
+      b.fail -= 1
+      throw new Error('the session is closing')
+    }
+    if (b.refuse > 0) {
+      b.refuse -= 1
+
+      return { drop: 'the person stopped the turn' }
+    }
     b.submitted.push(e.text)
 
     return { text: e.text }
@@ -125,6 +138,71 @@ test('an idle session is woken once with the owner answer, and not again at the 
   // Marked in the turn-boundary hooks' own record, so `mailbox.sh inbox` does not deliver it again.
   expect(b.files.get(SEEN)).toBe('100-skein.json\n')
 
+  await b.clock.advance(TICK)
+  expect(b.submitted.length).toBe(1)
+})
+
+// What would make it fail: `tick` ignoring `{ drop }`, so the answer is marked delivered and told by
+// no path (SKEIN-1551); or the kept copy not cleared once accepted, so it is told at every tick.
+test('an answer whose prompt the engine refused is told once at the next idle tick', async ($, on) => {
+  const b = engine(on)
+  await $.session.start(START)
+  b.refuse = 1
+  b.files.set(`${INBOX}/100-skein.json`, owner('question q-12ab34cd, "use the new table"'))
+
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual([])
+  expect(b.files.get(SEEN)).toBe('100-skein.json\n')
+
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual(['skein: the owner answered your question q-12ab34cd: "use the new table".'])
+
+  await b.clock.advance(TICK * 2)
+  expect(b.submitted.length).toBe(1)
+})
+
+// What would make it fail: the kept copy living in a module variable, which a reload starts over.
+test('an answer refused before a reload is still told after it', async ($, on) => {
+  const store: Record<string, unknown> = {}
+  const b = engine(on, store)
+  await $.session.start(START)
+  b.refuse = 1
+  b.files.set(`${INBOX}/100-skein.json`, owner('question q-12ab34cd, "yes"'))
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual([])
+
+  await $.session.start(START)
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual(['skein: the owner answered your question q-12ab34cd: "yes".'])
+})
+
+// What would make it fail: the copy written only after the submit, so a submit that throws loses it.
+test('an answer whose submit threw is told at the next idle tick', async ($, on) => {
+  const b = engine(on)
+  await $.session.start(START)
+  b.fail = 1
+  b.files.set(`${INBOX}/100-skein.json`, owner('question q-12ab34cd, "yes"'))
+
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual([])
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual(['skein: the owner answered your question q-12ab34cd: "yes".'])
+})
+
+// What would make it fail: a retry that carries only what is new, or tells the old line twice.
+test('mail refused once goes out with what arrives next, each line once', async ($, on) => {
+  const b = engine(on)
+  await $.session.start(START)
+  b.refuse = 1
+  b.files.set(`${MAILBOX}/1.json`, boxMail('api-main', 'first'))
+  await b.clock.advance(TICK)
+  expect(b.submitted).toEqual([])
+
+  b.files.set(`${INBOX}/100-skein.json`, owner('question q-12ab34cd, "yes"'))
+  await b.clock.advance(TICK)
+  expect(b.submitted.length).toBe(1)
+  expect(b.submitted[0]?.split('first').length).toBe(2)
+  expect(b.submitted[0]).toContain('q-12ab34cd')
   await b.clock.advance(TICK)
   expect(b.submitted.length).toBe(1)
 })

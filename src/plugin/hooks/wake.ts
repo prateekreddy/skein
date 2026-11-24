@@ -29,7 +29,9 @@
 //   from the owner's inbox in `$HOME/.skein-mail-seen`, one file name a line (the inbox itself
 //   cannot be written from in here). This feature reads that record and skips what is in it, and
 //   appends to it **before** it submits, the same way `mailbox.sh` does, so the hook that runs as
-//   the woken turn starts finds it delivered. An answer whose mark cannot be appended is left to the
+//   the woken turn starts finds it delivered. Until a prompt carrying it is accepted it is also kept
+//   in `$.store` and retried, because the engine can refuse a submit (SKEIN-1551). An answer whose
+//   mark cannot be appended is left to the
 //   turn-boundary path, which delivers it once. What it wakes for is also kept in `$.store`, so a
 //   reload, a resumed session or a lost `$HOME` record never wakes for it twice. Shared mail is
 //   taken by `mailbox.sh wake`, which marks `seenBy` under the mailbox lock through the same step
@@ -52,6 +54,13 @@ export const POLL_MS = 15_000
 
 /** `$.store` key: the inbox files this feature woke the session for, by name. */
 export const WOKEN_KEY = 'wake.woken'
+
+/**
+ * `$.store` key: lines already taken and marked delivered that no accepted prompt has carried yet.
+ * The engine can refuse a submit, as it does after the person stops a turn, and by then the
+ * turn-boundary hooks will find these marked and say nothing, so this is the only copy (SKEIN-1551).
+ */
+export const UNTOLD_KEY = 'wake.untold'
 
 /** The woken-for names kept: far more than one box is ever asked. */
 const KEEP = 200
@@ -116,11 +125,16 @@ export async function tick($: Engine): Promise<void> {
     // The owner's answers are told last, after the boxes' mail, as `mailbox.sh inbox` tells them:
     // last is where the eye ends.
     const owner = await ownerAnswers($)
-    const said = [...(await mail($)), ...owner]
+    const fresh = [...(await mail($)), ...owner]
+    const said = [...(await strings($, UNTOLD_KEY)), ...fresh]
     if (said.length === 0) return
+    // Kept until a prompt carrying them is accepted: they are marked delivered, so a refused or
+    // failed submit would otherwise deliver them by neither path. The next idle tick tries again.
+    if (fresh.length > 0) await $.store.set(UNTOLD_KEY, said)
     // Submitted even if a turn began since the look above: a plugin's prompt waits for the session
     // to be idle, and it is marked delivered now, so returning here would deliver it by neither path.
-    await $.prompt.submit({ text: said.join('\n') })
+    const entered = await $.prompt.submit({ text: said.join('\n') })
+    if (!('drop' in entered)) await $.store.set(UNTOLD_KEY, [])
   } finally {
     isLooking = false
   }
@@ -143,7 +157,7 @@ async function ownerAnswers($: Engine): Promise<string[]> {
   names.sort()
   const seenFile = `${home}/.skein-mail-seen`
   const seen = new Set(await lines($, seenFile))
-  const woken = new Set(await strings($))
+  const woken = new Set(await strings($, WOKEN_KEY))
 
   const found: { name: string; line: string }[] = []
   for (const name of names) {
@@ -251,8 +265,8 @@ async function mark($: Engine, seenFile: string, ids: string[]): Promise<boolean
   }
 }
 
-async function strings($: Engine): Promise<string[]> {
-  const v = await $.store.get(WOKEN_KEY)
+async function strings($: Engine, key: string): Promise<string[]> {
+  const v = await $.store.get(key)
 
   return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []
 }
