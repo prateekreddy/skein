@@ -1195,6 +1195,11 @@ step() {
   fi
 }
 
+# A full local run shares its machine with other boxes, and the browser suites read the page after
+# fixed waits: at load 18 to 32 they failed concurrently and passed one at a time (SKEIN-1549). CI
+# calls `run <gate>`, which does not reach this line, and keeps its own concurrency.
+export SKEIN_UI_LANES="${SKEIN_UI_LANES:-1}"
+
 echo "=== gates for $root at $tested === run $run_id"
 # What the preflight above looked for, printed like `tests/ui/harness/leaks.mjs` prints the fixture
 # names it derived: a check whose subject is invisible is a check nobody can tell has gone narrow.
