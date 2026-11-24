@@ -1618,6 +1618,13 @@ fi
 # a second prompt for a question whose answer never depended on the first. Standing alone, a box with
 # no login shows the login screen and nothing after it.
 #
+# THE ROOT IS NEVER LEFT TRUSTED (SKEIN-960). Three of the owner's boxes were found with
+# `projects["/"].hasTrustDialogAccepted = true`, which skein did not write. Trust is inherited, so
+# that one entry vouches for every folder in the box, and an agent working outside a git checkout
+# would run that folder's hooks unasked. The owner chose (2026-11-24) that skein turns it off here
+# and says so: only that one key of `/`'s entry changes, to false, and the start that changes it is
+# the one that prints the line, so it is said once.
+#
 # Same discipline as the onboarding flag: read, modify, write through a temp file and a rename; absent
 # or empty is written; present and unreadable — or a `projects`, or an entry for this tree, that is
 # not an object — is LEFT ALONE and said out loud, so the person meets one trust dialog rather than
@@ -1659,7 +1666,11 @@ if entry is None:
     entry = {}
 elif not isinstance(entry, dict):
     sys.exit(1)
-if entry.get("hasTrustDialogAccepted") is True:
+root = projects.get("/")
+untrusted_root = tree != "/" and isinstance(root, dict) and root.get("hasTrustDialogAccepted") is True
+if untrusted_root:
+    root["hasTrustDialogAccepted"] = False
+if entry.get("hasTrustDialogAccepted") is True and not untrusted_root:
     sys.exit(0)
 entry["hasTrustDialogAccepted"] = True
 projects[tree] = entry
@@ -1683,8 +1694,13 @@ except Exception:
     except OSError:
         pass
     sys.exit(1)
+sys.exit(3 if untrusted_root else 0)
 PY
-  [ "$workspace_trust" -eq 0 ] || echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude.json could not be read or is not JSON this can extend — it is left exactly as it is, so the agent may ask you once to trust $tree" >&2
+  case "$workspace_trust" in
+    0) ;;
+    3) echo "skein: ${SKEIN_BOX:-this box}'s Claude Code trusted the whole filesystem (/), which skein never set; that is turned off, so only $tree is trusted and a folder outside it asks before running its hooks" >&2 ;;
+    *) echo "skein: ${SKEIN_BOX:-this box}'s ~/.claude.json could not be read or is not JSON this can extend — it is left exactly as it is, so the agent may ask you once to trust $tree" >&2 ;;
+  esac
   unset workspace_trust
 fi
 

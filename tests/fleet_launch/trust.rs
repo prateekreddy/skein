@@ -292,3 +292,86 @@ fn the_tree_skein_cloned_is_trusted_and_no_other_path_is() {
          {left_alone} left alone, which is not the split its cases were written to have"
     );
 }
+
+/// A box whose Claude Code trusts `/` has that turned off at its start, said once (SKEIN-960).
+///
+/// **What makes each assertion fail**, planted and watched: dropping
+/// `root["hasTrustDialogAccepted"] = False` (`/` still trusted); the early `sys.exit(0)` for an
+/// already-trusted tree left ahead of the root check (the second case keeps `/` trusted); replacing
+/// `/`'s entry rather than changing one key (`allowedTools` lost); the `3)` line removed (nothing
+/// said); the exit 3 given whatever happened (the box whose `/` was never trusted is told it was).
+#[test]
+fn a_trusted_root_is_turned_off_at_the_start_and_said_once() {
+    if !have("python3") {
+        return skip("the launcher writes this key with python3, and there is none here");
+    }
+    let dir = scratch_named("untrust-root");
+    for (n, tree_trusted) in [false, true].into_iter().enumerate() {
+        let at = dir.join(format!("box-{n}"));
+        let home = at.join("home");
+        let tree_dir = at.join("tree");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&tree_dir).unwrap();
+        let tree = tree_dir.display().to_string();
+        fs::write(
+            home.join(".claude.json"),
+            format!(
+                r#"{{"userID":"u","projects":{{"/":{{"hasTrustDialogAccepted":true,"allowedTools":["Bash(ls)"]}},"{tree}":{{"hasTrustDialogAccepted":{tree_trusted}}}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let first = run_trust_block(&home, &tree_dir);
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        let said = String::from_utf8_lossy(&first.stderr).to_string();
+        assert!(
+            said.contains("trusted the whole filesystem (/)"),
+            "tree trusted {tree_trusted}: turning off `/` was not said: {said:?}"
+        );
+        assert_eq!(
+            trust_of(&home, "/"),
+            Some(serde_json::Value::Bool(false)),
+            "tree trusted {tree_trusted}: `/` is still trusted"
+        );
+        assert_eq!(trust_of(&home, &tree), Some(serde_json::Value::Bool(true)));
+        let text = fs::read_to_string(home.join(".claude.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["projects"]["/"]["allowedTools"],
+            serde_json::json!(["Bash(ls)"]),
+            "`/`'s entry lost a field: {text}"
+        );
+        assert_eq!(parsed["userID"], "u");
+
+        let again = run_trust_block(&home, &tree_dir);
+        assert!(again.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&again.stderr),
+            "",
+            "tree trusted {tree_trusted}: a second start said something again"
+        );
+        assert_eq!(fs::read_to_string(home.join(".claude.json")).unwrap(), text);
+    }
+
+    // And a box whose `/` was never trusted gets its tree trusted in silence.
+    let home = dir.join("plain").join("home");
+    let tree_dir = dir.join("plain").join("tree");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&tree_dir).unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        r#"{"projects":{"/":{"allowedTools":[]}}}"#,
+    )
+    .unwrap();
+    let out = run_trust_block(&home, &tree_dir);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "a box whose `/` was never trusted was told it was"
+    );
+}
