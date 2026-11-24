@@ -191,9 +191,20 @@ mod tests {
         // is asked once rather than once per pull request — and that is a different property, tested
         // in `a_refusal_about_the_setup_is_only_asked_once`. Here it would mean every case after the
         // first got the first one's answer.
+        // A stub just written can fail to start with `ETXTBSY` while a test in another thread forks
+        // with the write still open (CI run 45325085595); that is the harness, not a missing
+        // binary, so the start is tried again. See `cockpit_port_operation` for the measurement.
         let ask = |bin: &str, timeout| {
-            forget_refusal();
-            tried(bin, "m", "hi", timeout, Turn::Alone, None)
+            for _ in 0..50 {
+                forget_refusal();
+                match tried(bin, "m", "hi", timeout, Turn::Alone, None) {
+                    Err(Unread::Missing { why, .. }) if why.contains("Text file busy") => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    other => return other,
+                }
+            }
+            panic!("{bin} stayed busy for a second");
         };
 
         // Not on PATH — the commonest one by far, and the one the old message never named. Its
