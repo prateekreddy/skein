@@ -287,7 +287,9 @@ await check("an .md inside a folder opens and renders", async () => {
 });
 await check("a relative link in a doc navigates the browser", async () => {
   await page.click('#filespane .fmd a[href="../README.md"]');
-  await settle();
+  // Waits for the page rather than a fixed time: at load 30 the fetch outlasted `settle` (SKEIN-1549).
+  await page.waitForFunction(() => document.querySelector("#filespane .fmd h1")?.textContent.trim() === "smoke",
+    null, { timeout: 10000 }).catch(() => {});
   if ((await text("#filespane .fmd h1")) !== "smoke") throw new Error("the link did not land on README");
   if ((await text("#filespane .fcrumb")).includes("docs")) throw new Error("the list did not follow the link out of docs/");
 });
@@ -337,6 +339,8 @@ await check("the open file survives leaving the tab and coming back", async () =
   await settle();
   await openTab("diff");
   await openTab("files");
+  await page.waitForFunction(() => document.querySelector("#filespane .fraw")?.textContent.includes("plain text"),
+    null, { timeout: 10000 }).catch(() => {});
   if (!(await text("#filespane .fraw")).includes("plain text")) throw new Error("the file did not reopen");
 });
 

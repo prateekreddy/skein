@@ -291,6 +291,24 @@ provision() {
         ;;
     esac
   done < <(git submodule status 2>/dev/null)
+  provision_browser
+}
+
+# **A fresh worktree links the main checkout's browser packages (SKEIN-1549).** `node_modules` is
+# gitignored, so a new worktree has none. `noskip-check` then reports the browser suites as a tier
+# this machine cannot host, the run goes green without them, and cb262d49 reached master that way
+# with a failing suite. The machine could host them: the packages were one directory away.
+#
+# Only a worktree with nothing at that path is touched, and only when the main checkout has the
+# package. With no copy anywhere the skip stays, and `noskip-check` still names it.
+provision_browser() {
+  local main
+  [ -e tests/ui/node_modules ] || [ -L tests/ui/node_modules ] && return 0
+  main=$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+  [ -n "$main" ] && [ -f "$main/tests/ui/node_modules/playwright/package.json" ] || return 0
+  if ln -s "$main/tests/ui/node_modules" tests/ui/node_modules 2>/dev/null; then
+    echo "provision: tests/ui/node_modules was missing in this worktree — linked the main checkout's, so the browser suites run"
+  fi
 }
 
 field() { # field <line> <n>

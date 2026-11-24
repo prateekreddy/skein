@@ -26,5 +26,5 @@ that, fix with a new commit.
 - Taking the gates off the lane instead: that removes its ability to correct itself.
 
 **Enforced at.** Nothing mechanical. `tools/gates.sh` exits 3 when the tree changes during a run
-(`tools/gates.sh:1231`), and `--verify` checks a receipt against its run (`tools/gates.sh:717`), but
+(`tools/gates.sh:1249`), and `--verify` checks a receipt against its run (`tools/gates.sh:735`), but
 neither can tell whether the work was committed first. The lane brief carries the rule.

@@ -502,6 +502,78 @@ fn the_gate_runner_checks_out_a_worktrees_uninitialised_submodule_and_moves_no_o
     );
 }
 
+/// A fresh worktree gets the main checkout's browser packages, so a full run cannot go green with
+/// the browser suites skipped while the machine could have run them (SKEIN-1549).
+///
+/// **What makes it fail:** `provision` not linking fails the first assertion; linking with no
+/// package in the main checkout fails the second; dropping the check for something already there
+/// puts a link inside a worktree's own `node_modules` and fails the third.
+#[test]
+fn the_gate_runner_links_browser_packages_only_into_a_worktree_with_none() {
+    let scratch = Scratch::temp("skein-gates-browser");
+    let root = scratch.to_path_buf();
+    let main = root.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    git_in(&main, &["init", "-q"]);
+    std::fs::write(main.join("a"), "one").unwrap();
+    git_in(&main, &["add", "a"]);
+    git_in(&main, &["commit", "-qm", "one"]);
+    let worktree = |name: &str| {
+        let at = root.join(name);
+        git_in(&main, &["worktree", "add", "-q", at.to_str().unwrap()]);
+        std::fs::create_dir_all(at.join("tests/ui")).unwrap();
+        at
+    };
+    let gates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/gates.sh");
+    let provision = |at: &std::path::Path| {
+        let out = std::process::Command::new("bash")
+            .arg(&gates)
+            .arg("--provision")
+            .arg(at)
+            .output()
+            .expect("bash runs the gate runner");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    let before_any_package = worktree("none");
+    provision(&before_any_package);
+    let none = before_any_package.join("tests/ui/node_modules");
+    let linked_to_nothing = std::fs::symlink_metadata(&none).is_ok();
+
+    let packages = main.join("tests/ui/node_modules");
+    std::fs::create_dir_all(packages.join("playwright")).unwrap();
+    std::fs::write(packages.join("playwright/package.json"), "{}").unwrap();
+
+    let fresh = worktree("fresh");
+    provision(&fresh);
+    assert_eq!(
+        std::fs::read_link(fresh.join("tests/ui/node_modules")).ok(),
+        std::fs::canonicalize(&main)
+            .ok()
+            .map(|m| m.join("tests/ui/node_modules")),
+        "a fresh worktree was not linked to the main checkout's browser packages"
+    );
+    assert!(
+        !linked_to_nothing,
+        "a worktree was linked to a main checkout with no browser packages"
+    );
+
+    let own = worktree("own");
+    std::fs::create_dir_all(own.join("tests/ui/node_modules")).unwrap();
+    provision(&own);
+    assert_eq!(
+        std::fs::read_dir(own.join("tests/ui/node_modules"))
+            .unwrap()
+            .count(),
+        0,
+        "the runner wrote into a worktree's own node_modules"
+    );
+}
+
 /// Every `skein-server` a test starts is told the warden is somewhere nothing listens.
 ///
 /// A server asks the warden at every start now (SKEIN-1130), and one with no `$SKEIN_WARDEN` asks
