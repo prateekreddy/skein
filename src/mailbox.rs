@@ -892,6 +892,76 @@ mod tests {
         assert_eq!(run("boxB", &["unread"]), "0");
     }
 
+    // On the store's virtiofs mount a message being marked seen by another box (a rename over it)
+    // can briefly read as missing (SKEIN-1552). A scan that stops at the first missing entry holds
+    // back every later message. Stood in for here by an entry that is always missing: a dangling
+    // link sorting first. What would make it fail: any scan loop going back to `|| break`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_entry_is_skipped_and_the_mail_after_it_is_still_read() {
+        let _g = env_lock();
+        let home = tempdir();
+        let mut env = env_pins();
+        env.set("SKEIN_HOME", &home);
+        let store = home.join("store").join(".claude");
+        ensure_store(&store).unwrap();
+        let mailbox_sh = store.join("skein").join("bin").join("mailbox.sh");
+        let run = |vmid: &str, args: &[&str]| -> String {
+            let out = box_shell(&home)
+                .arg(&mailbox_sh)
+                .args(args)
+                .env("SKEIN_BOX", vmid)
+                .env("SANDBOX_VM_ID", "the-shared-sandbox")
+                .output()
+                .expect("run mailbox.sh");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let send = |body: &str| {
+            run(
+                "boxA",
+                &["send", "--to", "boxB", "--kind", "note", "--body", body],
+            );
+        };
+        send("first");
+        send("second");
+        let dir = fs::read_dir(&store)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .chain(
+                fs::read_dir(home.join("store"))
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|e| e.path()),
+            )
+            .find(|p| p.file_name().is_some_and(|n| n == "mailbox"))
+            .expect("the shared mailbox directory");
+        std::os::unix::fs::symlink(home.join("nowhere"), dir.join("0000-gone.json")).unwrap();
+
+        assert_eq!(
+            run("boxB", &["unread"]),
+            "2",
+            "unread stopped at the missing entry"
+        );
+        let woke = run("boxB", &["wake"]);
+        assert_eq!(
+            woke.lines().count(),
+            2,
+            "wake stopped at the missing entry: {woke}"
+        );
+        send("third");
+        let read = run("boxB", &["inbox"]);
+        assert!(
+            read.contains("third"),
+            "inbox stopped at the missing entry: {read}"
+        );
+    }
+
     /// **`mailbox.sh wake` takes this box's unread shared mail exactly as `inbox` does, and nothing
     /// of the owner's** (SKEIN-1468). skein's plugin runs it while the session is idle and starts a
     /// turn with what it prints, so it and the turn-boundary hooks must deliver each message once

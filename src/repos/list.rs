@@ -71,7 +71,7 @@ fn read_repos_uncached() -> Vec<Repo> {
 /// [`crate::util::write_atomic`]'s write and its rename used to leave behind — is `Err`.
 fn read_repos_or_why() -> Result<Vec<Repo>, String> {
     let path = repos_json();
-    let text = match fs::read_to_string(&path) {
+    let text = match crate::util::read_settled(&path) {
         Ok(text) => text,
         // Nobody has added a repo yet. The one case where empty is the truth.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

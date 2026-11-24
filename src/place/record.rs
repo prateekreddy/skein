@@ -367,7 +367,7 @@ pub fn placed_boxes(sandbox: &str) -> Vec<(String, PlaceRecord)> {
 }
 
 fn read_place_record(name: &str) -> Option<PlaceRecord> {
-    serde_json::from_str(&fs::read_to_string(place_record_path(name)).ok()?).ok()
+    serde_json::from_str(&crate::util::read_settled(&place_record_path(name)).ok()?).ok()
 }
 
 /// [`place_of`], for a caller that cannot go on without the place, refusing in words that say why.

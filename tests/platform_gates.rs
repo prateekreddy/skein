@@ -94,6 +94,10 @@ const GATED: &[(&str, &str)] = &[
         "runs the mailbox scripts skein installs into a box",
     ),
     (
+        "a_missing_entry_is_skipped_and_the_mail_after_it_is_still_read",
+        "runs the mailbox scripts skein installs into a box, which take mail under util-linux `flock`",
+    ),
+    (
         "mailbox_wake_takes_shared_mail_once_with_the_turn_boundary_hooks_and_none_of_the_owners",
         "runs the mailbox scripts skein installs into a box, which take mail under util-linux `flock`",
     ),

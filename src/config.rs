@@ -401,7 +401,7 @@ pub(crate) fn config_json() -> PathBuf {
 /// has to be *said*.
 fn read_config() -> Result<Option<Config>, String> {
     let path = config_json();
-    let text = match fs::read_to_string(&path) {
+    let text = match crate::util::read_settled(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("reading {}: {e}", path.display())),

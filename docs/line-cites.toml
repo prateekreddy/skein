@@ -1839,7 +1839,7 @@ cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 line = "pub fn fleet_root() -> String {"
 cited_by = ["docs/decisions/tests-never-reach-a-live-fleet.md"]
 
-["src/util.rs:1336"]
+["src/util.rs:1360"]
 line = "pub(crate) fn invalidate(&self) {"
 cited_by = ["docs/recovery-survey.md"]
 

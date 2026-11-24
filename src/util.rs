@@ -115,6 +115,30 @@ pub(crate) fn lock_beside(path: &Path) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(format!(".{name}.lock")))
 }
 
+/// How long [`read_settled`] waits before it believes a file is missing.
+const SETTLE: Duration = Duration::from_millis(2);
+
+/// A file's text, read again once if it was missing.
+///
+/// On the virtiofs mount that holds skein's home and the stores, a file another process is
+/// replacing by rename (as [`write_atomic`] does) can briefly fail to open with "not found":
+/// spike 6 measured 5 in 24,653 opens, and content never tore (SKEIN-1552). A reader that takes
+/// that miss as "nobody wrote it" acts on an empty answer: the token refresher read no grants and
+/// deleted a box's push tokens. A file that is really absent costs one more look, [`SETTLE`] later.
+pub fn read_settled(path: &Path) -> std::io::Result<String> {
+    read_settled_with(path, || std::thread::sleep(SETTLE))
+}
+
+fn read_settled_with(path: &Path, between: impl FnOnce()) -> std::io::Result<String> {
+    match fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            between();
+            fs::read_to_string(path)
+        }
+        read => read,
+    }
+}
+
 /// A JSON file's contents, with "not there" and "there and unreadable" kept apart.
 ///
 /// The generic form of `repos::read_repos_or_why` and `tracking::read_connections`, and the one
@@ -133,7 +157,7 @@ pub fn read_json_or_why<T>(path: &Path) -> Result<Option<T>, String>
 where
     T: serde::de::DeserializeOwned,
 {
-    let text = match fs::read_to_string(path) {
+    let text = match read_settled(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("reading {}: {e}", path.display())),
@@ -1641,6 +1665,24 @@ pub(crate) mod probe {
 
 #[cfg(test)]
 mod tests {
+    /// What would make it fail: `read_settled_with` answering the first miss, so a file that
+    /// appears between the two looks (a rename finishing) reads as absent.
+    #[test]
+    fn a_file_missing_at_the_first_look_and_there_at_the_second_is_read() {
+        let dir = std::env::temp_dir().join(format!("skein-settled-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+        let _ = fs::remove_file(&path);
+        let got = read_settled_with(&path, || fs::write(&path, "[1]").unwrap()).unwrap();
+        assert_eq!(got, "[1]");
+        fs::remove_file(&path).unwrap();
+        let mut looked = false;
+        let gone = read_settled_with(&path, || looked = true).unwrap_err();
+        assert!(looked, "a missing file was not looked at again");
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        let _ = fs::remove_dir(&dir);
+    }
+
     use super::*;
     use crate::testutil::{env_lock, env_pins, sb, secs_ago, tempdir};
 

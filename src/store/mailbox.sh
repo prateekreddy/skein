@@ -165,7 +165,7 @@ prune_seen() { # $1 = age in days, $2 = noisy (0/1)
   lock_ready || return 0
   boxes="$(registered_boxes)"
   for f in "$box"/*.json; do
-    [ -e "$f" ] || break
+    [ -e "$f" ] || continue
     mt="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
     [ "$mt" -lt "$cutoff" ] || continue
     # Kept, and counted: mail to a box that no longer exists can never be seen, so it is never
@@ -251,7 +251,8 @@ case "$cmd" in
     shared=1
     lock_ready || shared=0
     for f in "$box"/*.json; do
-      [ "$shared" = 1 ] && [ -e "$f" ] || break
+      [ "$shared" = 1 ] || break
+      [ -e "$f" ] || continue
       # **The name is shown with the fact that nobody checked it.** A name rendered as a name is
       # how one box speaks as another — or as you.
       line="$(take_shared "$f" '"  • [\(.kind // "note")] from \(.from // "?") (a box; this name is not checked) on \(.branch // "?"): \(.body // "")"')" || continue
@@ -270,7 +271,7 @@ case "$cmd" in
     # flood of box mail cannot push them off a screen — they are last, which is where the eye ends.
     if [ -d "$own" ]; then
       for f in "$own"/*.json; do
-        [ -e "$f" ] || break
+        [ -e "$f" ] || continue
         id="$(basename "$f")"
         # Delivered-once is remembered here rather than in the file, because the file is read-only
         # to this box by design. `grep -Fx` so an id is matched whole and not as a prefix.
@@ -312,7 +313,8 @@ case "$cmd" in
     lock_ready || exit 0
     n=0
     for f in "$box"/*.json; do
-      [ "$n" -lt 10 ] && [ -e "$f" ] || break
+      [ "$n" -lt 10 ] || break
+      [ -e "$f" ] || continue
       take_shared "$f" '(.body // "" | tostring) as $b
         | {from: ((.from // "?") | tostring | .[0:64]), body: $b[0:2048], cut: (($b | length) > 2048)}
         | tojson' && n=$((n+1))
@@ -325,12 +327,12 @@ case "$cmd" in
     # itself (SKEIN-1362): delivery is the turn-boundary hooks'.
     n=0
     for f in "$box"/*.json; do
-      [ -e "$f" ] || break
+      [ -e "$f" ] || continue
       jq -e --arg v "$vmid" "$for_me_unseen" "$f" >/dev/null 2>&1 && n=$((n+1))
     done
     if [ -d "$own" ]; then
       for f in "$own"/*.json; do
-        [ -e "$f" ] || break
+        [ -e "$f" ] || continue
         grep -Fxq "$(basename "$f")" "$seen_file" 2>/dev/null && continue
         jq -e --arg v "$vmid" "$owner_for_me" "$f" >/dev/null 2>&1 && n=$((n+1))
       done
