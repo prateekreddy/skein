@@ -84,10 +84,11 @@ for candidate in \
   "${SKEIN_GIT_TOKENS}/read/${owner}" \
   "${SKEIN_GIT_TOKENS}/read/_any"
 do
-  if [ -r "$candidate" ]; then
-    token="$(cat "$candidate" 2>/dev/null)"
-    [ -n "$token" ] && break
-  fi
+  # Looked at twice before it is passed over: the host renames a fresh token into place on every
+  # refresh, and on the shared mount a file being replaced can briefly fail to open (SKEIN-1553).
+  # Passed over, the push fails or the agent asks for access it has.
+  token="$(cat "$candidate" 2>/dev/null)" || { sleep 0.01; token="$(cat "$candidate" 2>/dev/null)"; }
+  [ -n "$token" ] && break
 done
 
 # Nothing, rather than something that will not work. A repository with no token here is one this box

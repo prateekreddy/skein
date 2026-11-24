@@ -347,6 +347,15 @@ apply_fleet_ceilings() {
   done
 }
 
+# A FILE THE HOST REPLACES CAN BRIEFLY LOOK MISSING (SKEIN-1553). The state and the request queues
+# live on the virtiofs share, where a file being replaced by rename can fail to open for a moment
+# (spike 6: 5 in 24,653 opens). A scan that takes that miss as final skips a live request and files
+# a duplicate, or reads a live grant as ended. So these look once more, 10 ms later, before they
+# believe a file is not there. A file that is really absent costs one more look.
+settled_file() { [ -f "$1" ] || { sleep 0.01; [ -f "$1" ]; }; }
+settled_exists() { [ -e "$1" ] || { sleep 0.01; [ -e "$1" ]; }; }
+settled_jq() { jq -r "$1" "$2" 2>/dev/null || { sleep 0.01; jq -r "$1" "$2" 2>/dev/null; }; }
+
 # Where a box files a request for a system package, and where the host reads it back.
 #
 # The fleet root rather than the shared `.claude` store, and that distinction is the whole point: the
@@ -535,14 +544,14 @@ request_package() {
   # which is never `$dir`, so a loose pre-split file is pending-only too.
   local f state existing
   for f in "$queue"/*/*.json "$queue"/*.json; do
-    [ -f "$f" ] || continue
-    state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
+    settled_file "$f" || continue
+    state="$(settled_jq '.state // ""' "$f")" || continue
     case "$state" in
       pending) ;;
       approved) [ "${f%/*}" = "$dir" ] || continue ;;
       *) continue ;;
     esac
-    existing="$(jq -r '(.kind // "") + " " + ((.packages // []) | sort | unique | join(" ")) + " "' "$f" 2>/dev/null)" || continue
+    existing="$(settled_jq '(.kind // "") + " " + ((.packages // []) | sort | unique | join(" ")) + " "' "$f")" || continue
     if [ "$existing" = "$want" ]; then
       printf 'skein: already asked for (%s) — request %s is %s.\n' \
         "${packages[*]}" "$(jq -r '.id // "?"' "$f")" "$state"
@@ -555,9 +564,9 @@ request_package() {
   # per box per pass as well, for a box that writes its queue without coming through here.
   if [ "$kind" = playwright ]; then
     for f in "$dir"/*.json; do
-      [ -f "$f" ] || continue
-      [ "$(jq -r '.kind // ""' "$f" 2>/dev/null)" = playwright ] || continue
-      case "$(jq -r '.state // ""' "$f" 2>/dev/null)" in
+      settled_file "$f" || continue
+      [ "$(settled_jq '.kind // ""' "$f")" = playwright ] || continue
+      case "$(settled_jq '.state // ""' "$f")" in
         pending | approved)
           printf 'skein: this box already has a browser request waiting (%s). Ask again once it is answered.\n' \
             "$(jq -r '.id // "?"' "$f")" >&2
@@ -698,13 +707,13 @@ request_write() {
   local f state existing tokens="${SKEIN_GIT_TOKENS-}" ended=''
   local token_name="${repo%%/*}%2F${repo#*/}"
   for f in "$dir"/*.json; do
-    [ -f "$f" ] || continue
-    state="$(jq -r '.state // ""' "$f" 2>/dev/null)" || continue
+    settled_file "$f" || continue
+    state="$(settled_jq '.state // ""' "$f")" || continue
     case "$state" in pending | granted) ;; *) continue ;; esac
-    existing="$(jq -r '.repo // ""' "$f" 2>/dev/null)" || continue
+    existing="$(settled_jq '.repo // ""' "$f")" || continue
     [ "$existing" = "$repo" ] || continue
     if [ "$state" = granted ] && [ -n "$tokens" ] &&
-      [ ! -e "$tokens/$token_name" ] && [ ! -e "$tokens/why/$token_name" ]; then
+      ! settled_exists "$tokens/$token_name" && ! settled_exists "$tokens/why/$token_name"; then
       ended="$(jq -r '.id // "?"' "$f")"
       continue
     fi

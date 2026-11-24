@@ -77,6 +77,32 @@ impl Box_ {
         fs::write(dir.join(owner), token).unwrap();
     }
 
+    /// Put a `sleep` first on the scripts' `PATH` that writes `body` to `file` and returns: the file
+    /// a host rename was half-way through placing, there by the second look (SKEIN-1553).
+    fn arrives_during_the_wait(&self, file: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let sleep = bin.join("sleep");
+        fs::write(
+            &sleep,
+            format!("#!/bin/sh\nprintf '%s' '{body}' > '{}'\n", file.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&sleep, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// `PATH` for the scripts: this box's `bin` first when [`Box_::arrives_during_the_wait`] made one.
+    fn path(&self) -> String {
+        let bin = self.root.join("bin");
+        let rest = std::env::var("PATH").unwrap_or_default();
+        if bin.is_dir() {
+            format!("{}:{rest}", bin.display())
+        } else {
+            rest
+        }
+    }
+
     /// Ask the helper for a credential exactly as git does.
     fn credential(&self, host: &str, path: &str) -> String {
         self.credential_said(host, path).0
@@ -89,6 +115,7 @@ impl Box_ {
             .arg(script("git-credential-skein.sh"))
             .arg("get")
             .env("SKEIN_GIT_TOKENS", &self.tokens)
+            .env("PATH", self.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -147,7 +174,8 @@ impl Box_ {
             .arg("--request-write")
             .arg(arg_box)
             .args(argv)
-            .env("SKEIN_FLEET_ROOT", &self.fleet);
+            .env("SKEIN_FLEET_ROOT", &self.fleet)
+            .env("PATH", self.path());
         match env_box {
             Some(b) => cmd.env("SKEIN_BOX", b),
             None => cmd.env_remove("SKEIN_BOX"),
@@ -1778,4 +1806,61 @@ fn the_workshop_box_keeps_the_fleet_in_view() {
         binds.trim().is_empty(),
         "a privileged box must get no isolation binds at all: {binds}"
     );
+}
+
+/// **A token or a request the host is replacing is looked at twice before it is believed gone**
+/// (SKEIN-1553). On the shared mount a file being renamed into place can briefly fail to open. The
+/// fake `sleep` places the file during the wait, as the rename finishing would.
+///
+/// What would make it fail: the helper's second `cat` removed (no token, so the push would fail or
+/// the agent ask for access it has); any of the launcher's `settled_` helpers reduced to one look
+/// (that helper's line answers nothing).
+#[test]
+fn a_token_or_request_that_arrives_during_the_second_look_is_found() {
+    if !have("jq") {
+        return skip("jq is not installed");
+    }
+    let b = Box_::new("settled-token");
+    let token = b.tokens.join("acme%2Fthing");
+    b.arrives_during_the_wait(&token, "APP-TOKEN-FOR-THING");
+    let said = b.credential("github.com", "acme/thing.git");
+    assert!(
+        said.contains("password=APP-TOKEN-FOR-THING"),
+        "a token placed between two looks was passed over: {said:?}"
+    );
+
+    // The launcher pins its own `PATH`, so its looks are held by lifting its three helpers and
+    // giving them a `sleep` that places the file, as a bash function does ahead of any command.
+    let launcher = fs::read_to_string(script("box-session.sh")).unwrap();
+    let helpers: String = launcher
+        .lines()
+        .filter(|l| l.starts_with("settled_"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert_eq!(
+        helpers.lines().count(),
+        3,
+        "the launcher's settled_ helpers moved: {helpers}"
+    );
+    assert!(
+        launcher.contains("! settled_exists \"$tokens/$token_name\""),
+        "the grant check no longer looks twice at the token"
+    );
+    let at = b.root.join("late");
+    let run = |what: &str| {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "sleep() {{ printf '{{\\\"state\\\":\\\"granted\\\"}}' > '{f}'; }}\n{helpers}{what}",
+                f = at.display()
+            ))
+            .output()
+            .unwrap();
+        let _ = fs::remove_file(&at);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let f = at.display();
+    assert_eq!(run(&format!("settled_exists '{f}' && echo there")), "there");
+    assert_eq!(run(&format!("settled_file '{f}' && echo there")), "there");
+    assert_eq!(run(&format!("settled_jq .state '{f}'")), "granted");
 }
